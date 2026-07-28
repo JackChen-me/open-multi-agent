@@ -2,6 +2,9 @@
 
 `open-multi-agent` keeps the agent config shape stable across hosted, cloud, and local providers. Change `provider`, `model`, and the relevant credential; the rest of your team definition stays the same.
 
+The supported runtime is Node.js 22 or newer. Core uses OpenAI SDK v7 for
+OpenAI and OpenAI-compatible Chat Completions endpoints.
+
 ```typescript
 const agent = {
   name: 'my-agent',
@@ -55,6 +58,11 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 | LiteLLM (proxy) | `provider: 'openai'` + `baseURL: 'http://localhost:4000/v1'` + `apiKey` | `LITELLM_API_KEY` (if proxy auth enabled) | any model on your proxy | [LiteLLM](https://github.com/BerriAI/litellm) unifies 100+ providers (OpenAI, Anthropic, Azure, Bedrock, Vertex, etc.) behind one OpenAI-compatible endpoint. Run `litellm --config config.yaml` and point `baseURL` at the proxy. |
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
+
+OMA registers JSON-schema `function` tools. If an OpenAI v7 response contains
+the separate `custom` tool-call variant, the adapter raises
+`UnsupportedToolCallError` instead of dropping the call or presenting an empty
+successful turn.
 
 ## Budget ceilings and governed runs
 

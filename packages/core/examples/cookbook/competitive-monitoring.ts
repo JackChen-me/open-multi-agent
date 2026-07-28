@@ -13,7 +13,7 @@
  *
  * Prerequisites:
  *   ANTHROPIC_API_KEY env var must be set.
- *   Requires Node.js >= 18.
+ *   Requires Node.js >= 22.
  *
  * Fixtures:
  *   - examples/fixtures/competitive-monitoring/twitter.json (10 claims)

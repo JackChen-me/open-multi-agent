@@ -26,6 +26,7 @@ import type {
   TextBlock,
   ToolUseBlock,
 } from '../types.js'
+import { UnsupportedToolCallError } from '../errors.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
 import { reasoningBlockToInlineText, resolveReasoningOutboundMaxChars, type ReasoningOutboundOptions } from './reasoning-fallback.js'
 
@@ -358,6 +359,10 @@ export function fromOpenAICompletion(
   }
 
   for (const toolCall of message.tool_calls ?? []) {
+    if (toolCall.type !== 'function') {
+      throw new UnsupportedToolCallError(provenance ?? 'openai', toolCall.type)
+    }
+
     let parsedInput: Record<string, unknown> = {}
     try {
       const parsed: unknown = JSON.parse(toolCall.function.arguments)

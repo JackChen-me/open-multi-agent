@@ -191,6 +191,7 @@ export {
   InvalidMessageError,
   InvalidTaskRequirementsError,
   LLMCallTimeoutError,
+  UnsupportedToolCallError,
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
   RoutingTimeoutError,

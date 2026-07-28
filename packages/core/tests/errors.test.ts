@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { TokenBudgetExceededError, InvalidMessageError, LLMCallTimeoutError } from '../src/errors.js'
+import {
+  TokenBudgetExceededError,
+  InvalidMessageError,
+  LLMCallTimeoutError,
+  UnsupportedToolCallError,
+} from '../src/errors.js'
 
 describe('TokenBudgetExceededError', () => {
   it('sets .name to TokenBudgetExceededError', () => {
@@ -59,6 +64,17 @@ describe('InvalidMessageError', () => {
   it('is an instance of Error (extends built-in Error)', () => {
     const err = new InvalidMessageError('test')
     expect(err).toBeInstanceOf(Error)
+  })
+})
+
+describe('UnsupportedToolCallError', () => {
+  it('identifies the provider and unsupported tool type', () => {
+    const err = new UnsupportedToolCallError('openai', 'custom')
+    expect(err.name).toBe('UnsupportedToolCallError')
+    expect(err.code).toBe('UNSUPPORTED_TOOL_CALL')
+    expect(err.provider).toBe('openai')
+    expect(err.toolType).toBe('custom')
+    expect(err.message).toBe('openai returned unsupported tool-call type "custom"')
   })
 })
 

@@ -56,7 +56,7 @@ The runtime schedules dependencies, runs independent work in parallel, shares co
 
 ## Quick Start
 
-Requires Node.js 18 or newer. Scaffold and run a starter in one command:
+Requires Node.js 22 or newer. Scaffold and run a starter in one command:
 
 ```bash
 npm create oma-app@latest my-oma

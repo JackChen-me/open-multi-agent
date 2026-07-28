@@ -53,7 +53,7 @@
     "url": "https://github.com/open-multi-agent/open-multi-agent/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

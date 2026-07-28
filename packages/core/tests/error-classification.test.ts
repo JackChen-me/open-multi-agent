@@ -5,6 +5,7 @@ import {
   TokenBudgetExceededError,
   InvalidMessageError,
   LLMCallTimeoutError,
+  UnsupportedToolCallError,
 } from '../src/errors.js'
 
 describe('isRetryableError', () => {
@@ -41,6 +42,7 @@ describe('isRetryableError', () => {
   it('classifies budget, invalid-message, and task-requirement errors as terminal', () => {
     expect(isRetryableError(new TokenBudgetExceededError('a', 100, 50))).toBe(false)
     expect(isRetryableError(new InvalidMessageError('bad'))).toBe(false)
+    expect(isRetryableError(new UnsupportedToolCallError('openai', 'custom'))).toBe(false)
     expect(isRetryableError(new InvalidTaskRequirementsError([{
       code: 'NO_ELIGIBLE_AGENT',
       taskId: 'task-1',
@@ -56,6 +58,12 @@ describe('isRetryableError', () => {
   it('classifies an AbortError as terminal', () => {
     const err = new Error('aborted')
     err.name = 'AbortError'
+    expect(isRetryableError(err)).toBe(false)
+  })
+
+  it('classifies the OpenAI SDK APIUserAbortError as terminal', () => {
+    const err = new Error('Request was aborted')
+    err.name = 'APIUserAbortError'
     expect(isRetryableError(err)).toBe(false)
   })
 

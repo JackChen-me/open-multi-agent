@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Scaffold from the published npm package and run the no-key demo
         env:
           # The tag is the core version (e.g. v1.11.0); create-oma-app has its

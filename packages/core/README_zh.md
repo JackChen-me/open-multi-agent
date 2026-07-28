@@ -56,7 +56,7 @@
 
 ## 快速开始
 
-要求 Node.js 18 或更高版本。一条命令初始化并运行 starter：
+要求 Node.js 22 或更高版本。一条命令初始化并运行 starter：
 
 ```bash
 npm create oma-app@latest my-oma

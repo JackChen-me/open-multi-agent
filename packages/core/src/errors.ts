@@ -141,6 +141,24 @@ export class InvalidMessageError extends Error {
 }
 
 /**
+ * Raised when a provider returns a tool-call type that OMA cannot execute.
+ *
+ * OMA exposes JSON-schema function tools. Failing loudly keeps an upstream
+ * custom-tool response from being mistaken for a successful empty turn.
+ */
+export class UnsupportedToolCallError extends Error {
+  readonly code = 'UNSUPPORTED_TOOL_CALL'
+
+  constructor(
+    readonly provider: string,
+    readonly toolType: string,
+  ) {
+    super(`${provider} returned unsupported tool-call type "${toolType}"`)
+    this.name = 'UnsupportedToolCallError'
+  }
+}
+
+/**
  * Read an HTTP-style status code off an unknown error, if present. Provider
  * SDK errors (`Anthropic.APIError`, `OpenAI.APIError`) expose it as `.status`;
  * some libraries use `.statusCode`. Returns `undefined` for network/unknown
@@ -161,7 +179,8 @@ function extractStatus(error: unknown): number | undefined {
  * *provably* terminal, so turning retry on never silently stops retrying an
  * error class that was retried before — it only skips attempts that are
  * pointless. Terminal cases are exhausted-budget, malformed input, an aborted
- * call, and 4xx client errors other than 408/409/429. Everything else —
+ * call (including OpenAI SDK's `APIUserAbortError`), and 4xx client errors
+ * other than 408/409/429. Everything else —
  * network blips (no status), request timeouts (408), conflicts (409), rate
  * limits (429), and all 5xx server errors — is retryable.
  */
@@ -170,11 +189,15 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof TokenBudgetExceededError) return false
   if (error instanceof CostBudgetExceededError) return false
   if (error instanceof InvalidMessageError) return false
+  if (error instanceof UnsupportedToolCallError) return false
   if (error instanceof LLMCallTimeoutError) return true
   if (error instanceof RoutingTimeoutError) return true
   if (error instanceof RoutingProfilerFailedError) return false
   if (error instanceof RoutingDeclarationRequiredError) return false
-  if (error instanceof Error && error.name === 'AbortError') return false
+  if (
+    error instanceof Error
+    && (error.name === 'AbortError' || error.name === 'APIUserAbortError')
+  ) return false
   const status = extractStatus(error)
   if (status === undefined) return true
   if (status === 408 || status === 409 || status === 429) return true
