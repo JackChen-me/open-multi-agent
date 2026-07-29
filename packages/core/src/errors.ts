@@ -172,6 +172,19 @@ function extractStatus(error: unknown): number | undefined {
 }
 
 /**
+ * Detect caller-driven cancellation errors without importing a provider SDK.
+ *
+ * Standard aborts use `.name === 'AbortError'`. OpenAI v7's
+ * `APIUserAbortError` inherits the default `.name === 'Error'`, so its public
+ * constructor name is the stable discriminator available at this boundary.
+ */
+export function isCancellationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === 'AbortError'
+    || error.constructor.name === 'APIUserAbortError'
+}
+
+/**
  * Classify an error as retryable (transient — another attempt might succeed)
  * or terminal (a retry cannot help).
  *
@@ -194,10 +207,7 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof RoutingTimeoutError) return true
   if (error instanceof RoutingProfilerFailedError) return false
   if (error instanceof RoutingDeclarationRequiredError) return false
-  if (
-    error instanceof Error
-    && (error.name === 'AbortError' || error.name === 'APIUserAbortError')
-  ) return false
+  if (isCancellationError(error)) return false
   const status = extractStatus(error)
   if (status === undefined) return true
   if (status === 408 || status === 409 || status === 429) return true

@@ -3,6 +3,7 @@ import {
   LLMCallTimeoutError,
   RoutingTimeoutError,
   TokenBudgetExceededError,
+  isCancellationError,
   isRetryableError,
 } from '../errors.js'
 import type {
@@ -55,7 +56,7 @@ export function classifyRunFailure(
   } else if (error instanceof LLMCallTimeoutError || error instanceof RoutingTimeoutError) {
     statusCode = 'timeout'
     kind = 'timeout'
-  } else if (error instanceof Error && error.name === 'AbortError') {
+  } else if (isCancellationError(error)) {
     statusCode = 'cancelled'
     kind = 'cancellation'
   } else if (

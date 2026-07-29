@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import OpenAI from 'openai'
 import {
   isRetryableError,
   InvalidTaskRequirementsError,
@@ -7,6 +8,7 @@ import {
   LLMCallTimeoutError,
   UnsupportedToolCallError,
 } from '../src/errors.js'
+import { classifyRunFailure } from '../src/observability/status.js'
 
 describe('isRetryableError', () => {
   it('treats terminal 4xx client errors as non-retryable', () => {
@@ -62,9 +64,20 @@ describe('isRetryableError', () => {
   })
 
   it('classifies the OpenAI SDK APIUserAbortError as terminal', () => {
-    const err = new Error('Request was aborted')
-    err.name = 'APIUserAbortError'
+    const err = new OpenAI.APIUserAbortError()
     expect(isRetryableError(err)).toBe(false)
+  })
+
+  it('classifies the real OpenAI SDK abort as cancellation', () => {
+    const err = new OpenAI.APIUserAbortError()
+    expect(classifyRunFailure(err, { provider: 'openai' })).toMatchObject({
+      status: { code: 'cancelled' },
+      errorInfo: {
+        kind: 'cancellation',
+        retryable: false,
+        provider: 'openai',
+      },
+    })
   })
 
   it('ignores a non-numeric status (defaults to retryable)', () => {
