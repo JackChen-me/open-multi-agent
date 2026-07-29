@@ -56,7 +56,10 @@ The runtime schedules dependencies, runs independent work in parallel, shares co
 
 ## Quick Start
 
-Requires Node.js 22 or newer. Scaffold and run a starter in one command:
+Requires Node.js 20 or newer; Node.js 22 or 24 is recommended. Node.js 20 is
+upstream-EOL and retained only as a migration compatibility window. OMA will
+remove Node.js 20 support in its next major release, no earlier than
+2026-10-31. Scaffold and run a starter in one command:
 
 ```bash
 npm create oma-app@latest my-oma

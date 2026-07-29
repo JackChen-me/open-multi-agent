@@ -23,7 +23,7 @@
  *
  * Prerequisites:
  *   ANTHROPIC_API_KEY env var must be set.
- *   Requires Node.js >= 22.
+ *   Requires Node.js >= 20.
  *
  * Fixtures:
  *   All fixtures under examples/fixtures/narrative-puzzle-hint-arbitration/ are MOCK.

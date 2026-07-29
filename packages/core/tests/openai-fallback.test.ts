@@ -45,7 +45,7 @@ const TOOL_NAMES = ['bash', 'file_read', 'file_write']
 // ---------------------------------------------------------------------------
 
 describe('fromOpenAICompletion fallback extraction', () => {
-  it('rejects OpenAI v7 custom tool calls instead of dropping them', () => {
+  it('rejects custom OpenAI tool calls instead of dropping them', () => {
     const completion = makeCompletion({
       tool_calls: [{
         id: 'custom_1',

@@ -48,7 +48,7 @@ follow-up; OBS-5 only permits narrow correctness and compatibility fixes.
 
 ## Failure-injection matrix
 
-`Automated` means a committed test runs in the Node 22/24 `npm test` CI
+`Automated` means a committed test runs in the Node 20/22/24 `npm test` CI
 matrix. `Runnable` is a no-network example exercised by the package CI job.
 `Manual` is an external condition and is not represented as passed.
 

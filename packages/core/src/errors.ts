@@ -174,7 +174,7 @@ function extractStatus(error: unknown): number | undefined {
 /**
  * Detect caller-driven cancellation errors without importing a provider SDK.
  *
- * Standard aborts use `.name === 'AbortError'`. OpenAI v7's
+ * Standard aborts use `.name === 'AbortError'`. OpenAI SDK's
  * `APIUserAbortError` inherits the default `.name === 'Error'`, so its public
  * constructor name is the stable discriminator available at this boundary.
  */

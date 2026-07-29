@@ -56,7 +56,7 @@ Always inspect the focused diff and run `git diff --check`. Run the smallest rel
 - **Cross-workspace or dependency changes:** `npm run lint`, `npm test`, and `npm run build`; add the package/import/template smoke checks relevant to the changed surface.
 - **Provider E2E:** run only when the changed surface requires real-provider verification and the necessary credentials are safely available. Never expose credential values.
 
-Before finishing, report every command run and its outcome. If a relevant check was skipped or could not run, state the reason and residual risk. CI remains the source of truth for the complete Node 22/24 pre-merge matrix.
+Before finishing, report every command run and its outcome. If a relevant check was skipped or could not run, state the reason and residual risk. CI remains the source of truth for the complete Node 20/22/24 pre-merge matrix.
 
 ## Architecture entry points
 

@@ -49,7 +49,7 @@
     "url": "https://github.com/open-multi-agent/open-multi-agent/issues"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@open-multi-agent/core": "^1.11.0"

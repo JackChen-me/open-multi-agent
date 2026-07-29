@@ -2,8 +2,11 @@
 
 `open-multi-agent` keeps the agent config shape stable across hosted, cloud, and local providers. Change `provider`, `model`, and the relevant credential; the rest of your team definition stays the same.
 
-The supported runtime is Node.js 22 or newer. Core uses OpenAI SDK v7 for
-OpenAI and OpenAI-compatible Chat Completions endpoints.
+The supported runtime is Node.js 20 or newer; Node.js 22 or 24 is recommended.
+Node.js 20 is upstream-EOL and retained only as a migration compatibility
+window. OMA will remove Node.js 20 support in its next major release, no earlier
+than 2026-10-31. Core uses OpenAI SDK v6 for OpenAI and OpenAI-compatible Chat
+Completions endpoints.
 
 ```typescript
 const agent = {
@@ -59,8 +62,8 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
 
-OMA registers JSON-schema `function` tools. If an OpenAI v7 response contains
-the separate `custom` tool-call variant, the adapter raises
+OMA registers JSON-schema `function` tools. If an OpenAI-compatible response
+contains the separate `custom` tool-call variant, the adapter raises
 `UnsupportedToolCallError` instead of dropping the call or presenting an empty
 successful turn.
 

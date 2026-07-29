@@ -47,7 +47,7 @@ The `Provider Canary` workflow runs the DeepSeek suite daily and can also be sta
 
 Run checks that match the surface you changed and record the commands and results in the PR description. For code changes, start with `npm run lint && npm test`; also run `npm run build` when package output or public entry points may be affected, and `npm run test:scaffold` when changing `create-oma-app` scaffolding or templates.
 
-CI is the source of truth for the full pre-merge matrix. It runs lint, unit tests on Node 22/24, coverage, workspace builds, package/import smoke tests, template type-checking, tarball assertions, and the scaffold E2E test.
+CI is the source of truth for the full pre-merge matrix. It runs lint, unit tests on Node 20/22/24, coverage, workspace builds, package/import smoke tests, template type-checking, tarball assertions, and the scaffold E2E test.
 
 ## Making a Pull Request
 

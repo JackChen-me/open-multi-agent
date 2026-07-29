@@ -65,7 +65,7 @@ beforeAll(async () => {
       : [{
           id: 'call_1',
           type: 'function',
-          function: { name: 'search', arguments: '{"query":"v7"}' },
+          function: { name: 'search', arguments: '{"query":"sdk"}' },
         }]
 
     response.writeHead(200, { 'content-type': 'application/json' })
@@ -95,7 +95,7 @@ afterAll(async () => {
   })
 })
 
-describe('OpenAI SDK v7 boundary', () => {
+describe('OpenAI SDK boundary', () => {
   it('maps a real SDK function-tool response and usage', async () => {
     const adapter = new OpenAIAdapter('test-key', baseURL)
     const response = await adapter.chat(
@@ -107,7 +107,7 @@ describe('OpenAI SDK v7 boundary', () => {
       type: 'tool_use',
       id: 'call_1',
       name: 'search',
-      input: { query: 'v7' },
+      input: { query: 'sdk' },
     }])
     expect(response.stop_reason).toBe('tool_use')
     expect(response.usage).toEqual({ input_tokens: 7, output_tokens: 4 })
@@ -141,7 +141,7 @@ describe('OpenAI SDK v7 boundary', () => {
     } satisfies Partial<OpenAI.APIError>)
   })
 
-  it('rejects the v7 custom-tool response variant explicitly', async () => {
+  it('rejects unsupported custom-tool response variants explicitly', async () => {
     const adapter = new OpenAIAdapter('test-key', baseURL)
 
     await expect(adapter.chat(

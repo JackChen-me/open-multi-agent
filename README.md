@@ -73,7 +73,10 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 
 ## Get started
 
-Requires Node.js 22 or newer.
+Requires Node.js 20 or newer; Node.js 22 or 24 is recommended. Node.js 20 is
+upstream-EOL and retained only as a migration compatibility window. OMA will
+remove Node.js 20 support in its next major release, no earlier than
+2026-10-31.
 
 Scaffold a PR review agent, security analysis agent, or teaching DAG:
 

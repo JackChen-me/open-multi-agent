@@ -56,7 +56,9 @@
 
 ## 快速开始
 
-要求 Node.js 22 或更高版本。一条命令初始化并运行 starter：
+要求 Node.js 20 或更高版本，推荐使用 Node.js 22 或 24。Node.js 20 已结束上游维护，
+OMA 仅在迁移窗口内保留兼容；下一次主版本将移除 Node.js 20 支持，且不会早于
+2026-10-31。一条命令初始化并运行 starter：
 
 ```bash
 npm create oma-app@latest my-oma
