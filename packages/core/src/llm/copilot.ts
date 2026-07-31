@@ -47,6 +47,7 @@ import {
   fromOpenAICompletion,
   normalizeFinishReason,
   buildOpenAIMessageList,
+  toOpenAISdkReasoningEffort,
 } from './openai-common.js'
 import { assertValidMessages } from './validate.js'
 
@@ -316,7 +317,7 @@ export class CopilotAdapter implements LLMAdapter {
         messages: openAIMessages,
         max_tokens: options.maxTokens,
         temperature: options.temperature,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,
         stream: false,
       },
@@ -348,7 +349,7 @@ export class CopilotAdapter implements LLMAdapter {
         messages: openAIMessages,
         max_tokens: options.maxTokens,
         temperature: options.temperature,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,
         stream: true,
         stream_options: { include_usage: true },

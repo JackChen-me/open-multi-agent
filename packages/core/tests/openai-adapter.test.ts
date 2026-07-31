@@ -491,9 +491,9 @@ describe('OpenAIAdapter', () => {
     })
 
     it('passes through newer effort values via extraBody (e.g. gpt-5 "minimal")', async () => {
-      // The IR's `effort` union is intentionally narrowed to what the
-      // pinned SDK declares. Newer values (gpt-5 'minimal', GPT-5.5 'none')
-      // travel via extraBody — same escape hatch as vLLM-only top_k/min_p.
+      // Values outside the framework union (gpt-5 'minimal', GPT-5.5
+      // 'none') travel via extraBody — the same escape hatch as vLLM-only
+      // top_k/min_p.
       mockCreate.mockResolvedValue(makeCompletion())
 
       await adapter.chat(
@@ -502,6 +502,17 @@ describe('OpenAIAdapter', () => {
       )
 
       expect(mockCreate.mock.calls[0][0].reasoning_effort).toBe('minimal')
+    })
+
+    it('ignores the DeepSeek-only max effort', async () => {
+      mockCreate.mockResolvedValue(makeCompletion())
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({ thinking: { enabled: true, effort: 'max' } }),
+      )
+
+      expect(mockCreate.mock.calls[0][0].reasoning_effort).toBeUndefined()
     })
 
     it('omits reasoning_effort when thinking is absent', async () => {

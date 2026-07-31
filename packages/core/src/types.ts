@@ -549,23 +549,23 @@ export interface ToolDefinition<TInput = Record<string, unknown>> {
  *
  * - `budgetTokens` maps to Anthropic's `thinking.budget_tokens` and Gemini's
  *   `thinkingConfig.thinkingBudget`.
- * - `effort` maps to OpenAI o-series / gpt-5 `reasoning_effort`. Carried as
- *   an explicit value rather than derived from `budgetTokens` so the call
- *   site stays unambiguous across providers.
+ * - `effort` maps to OpenAI-compatible `reasoning_effort`, including
+ *   DeepSeek's `high` / `max` levels. It is carried as an explicit value
+ *   rather than derived from `budgetTokens` so the call site stays
+ *   unambiguous across providers.
  *
- * The `effort` union is intentionally narrowed to the values declared by
- * the pinned `openai` SDK (`'low' | 'medium' | 'high'`). Newer values
- * shipped by the API but not yet in the SDK type union (e.g. gpt-5's
- * `'minimal'`, GPT-5.5's `'none'`) should be passed via `extraBody:
- * { reasoning_effort: '<value>' }`, matching how `top_k` / `min_p` are
- * handled for vLLM.
+ * The union includes DeepSeek's `max` value in addition to the common
+ * OpenAI-compatible levels. Other provider-specific values not declared
+ * here (for example `'minimal'` or `'none'`) should be passed via
+ * `extraBody: { reasoning_effort: '<value>' }`, matching how `top_k` /
+ * `min_p` are handled for vLLM.
  *
  * Adapters that don't recognise a given field ignore it.
  */
 export interface ThinkingConfig {
   readonly enabled: boolean
   readonly budgetTokens?: number
-  readonly effort?: 'low' | 'medium' | 'high'
+  readonly effort?: 'low' | 'medium' | 'high' | 'max'
 }
 
 /** Context passed to the {@link AgentConfig.beforeRun} hook. */
@@ -845,9 +845,12 @@ export interface AgentConfig {
    *   (`includeThoughts` defaults on when enabled).
    * - OpenAI: forwards `effort` as `reasoning_effort` (o-series, gpt-5).
    *   The `enabled`/`budgetTokens` fields are ignored — OpenAI's reasoning
-   *   surface is qualitative (`effort`), not quantitative.
-   * - All other providers (Bedrock, local servers, etc.): ignored. Use
-   *   {@link extraBody} for provider-specific reasoning controls instead.
+   *   surface is qualitative (`effort`), not quantitative. The
+   *   DeepSeek-specific `max` value is ignored.
+   * - DeepSeek: forwards `enabled` as `thinking.type` and `effort` as
+   *   `reasoning_effort`; `max` is supported.
+   * - All other provider-specific fields (Bedrock, local servers, etc.) are
+   *   ignored. Use {@link extraBody} for controls not represented here.
    */
   readonly thinking?: ThinkingConfig
   /**

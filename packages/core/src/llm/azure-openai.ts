@@ -60,6 +60,7 @@ import {
   fromOpenAICompletion,
   normalizeFinishReason,
   buildOpenAIMessageList,
+  toOpenAISdkReasoningEffort,
 } from './openai-common.js'
 import { assertValidMessages } from './validate.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
@@ -142,7 +143,7 @@ export class AzureOpenAIAdapter implements LLMAdapter {
         presence_penalty: options.presencePenalty,
         top_p: options.topP,
         parallel_tool_calls: options.parallelToolCalls,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         ...options.extraBody,
         model: deploymentName,
         messages: openAIMessages,
@@ -190,7 +191,7 @@ export class AzureOpenAIAdapter implements LLMAdapter {
         presence_penalty: options.presencePenalty,
         top_p: options.topP,
         parallel_tool_calls: options.parallelToolCalls,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         ...options.extraBody,
         model: deploymentName,
         messages: openAIMessages,
@@ -337,5 +338,4 @@ export class AzureOpenAIAdapter implements LLMAdapter {
     }
   }
 }
-
 

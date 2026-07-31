@@ -124,7 +124,7 @@ const DEFAULT_WORKER_MODEL: Record<string, string> = {
   anthropic: 'claude-haiku-4-5',
   gemini: 'gemini-2.5-flash',
   openai: 'gpt-5',
-  deepseek: 'deepseek-chat',
+  deepseek: 'deepseek-v4-flash',
 }
 const workerModel = process.env.AGENT_MODEL?.trim() || DEFAULT_WORKER_MODEL[workerProvider] || 'claude-haiku-4-5'
 

@@ -2,7 +2,7 @@
  * Multi-Agent Team Collaboration with DeepSeek
  *
  * Three specialized agents (architect, developer, reviewer) collaborate via `runTeam()`
- * to build a minimal Express.js REST API. Every agent uses DeepSeek's flagship model.
+ * to build a minimal Express.js REST API. Every agent uses a DeepSeek V4 model.
  *
  * Run:
  *   npx tsx packages/core/examples/providers/deepseek.ts
@@ -11,8 +11,8 @@
  *   DEEPSEEK_API_KEY environment variable must be set.
  *
  * Available models:
- *   deepseek-v4-flash  — economical (1M context)
- *   deepseek-v4-pro    — flagship, best for coding (1M context)
+ *   deepseek-v4-flash  — DeepSeek-V4-Flash-0731 public beta (1M context)
+ *   deepseek-v4-pro    — Preview API (1M context)
  */
 
 import { join } from 'node:path'

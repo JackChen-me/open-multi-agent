@@ -457,6 +457,17 @@ describe('CopilotAdapter', () => {
       expect(mockCreate.mock.calls[0][0].reasoning_effort).toBe('high')
     })
 
+    it('ignores the DeepSeek-only max effort', async () => {
+      mockCreate.mockResolvedValue(makeCompletion())
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({ thinking: { enabled: true, effort: 'max' } }),
+      )
+
+      expect(mockCreate.mock.calls[0][0].reasoning_effort).toBeUndefined()
+    })
+
     it('omits reasoning_effort when thinking is absent or effort is unset', async () => {
       mockCreate.mockResolvedValue(makeCompletion())
       await adapter.chat([textMsg('user', 'Hi')], chatOpts())

@@ -416,9 +416,8 @@ describe('AzureOpenAIAdapter', () => {
     })
 
     it('passes through newer effort values via extraBody (e.g. gpt-5 "minimal")', async () => {
-      // See openai-adapter.test.ts for the rationale — the IR `effort`
-      // union is narrowed to SDK-declared values; newer ones go via
-      // extraBody.
+      // See openai-adapter.test.ts for the rationale — values outside the
+      // framework union go via extraBody.
       createCompletionMock.mockResolvedValue(makeCompletion())
       const adapter = new AzureOpenAIAdapter('k', 'https://test.openai.azure.com')
 
@@ -428,6 +427,21 @@ describe('AzureOpenAIAdapter', () => {
       )
 
       expect(createCompletionMock.mock.calls[0][0].reasoning_effort).toBe('minimal')
+    })
+
+    it('ignores the DeepSeek-only max effort', async () => {
+      createCompletionMock.mockResolvedValue(makeCompletion())
+      const adapter = new AzureOpenAIAdapter('k', 'https://test.openai.azure.com')
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({
+          model: 'my-deployment',
+          thinking: { enabled: true, effort: 'max' },
+        }),
+      )
+
+      expect(createCompletionMock.mock.calls[0][0].reasoning_effort).toBeUndefined()
     })
 
     it('omits reasoning_effort when thinking is absent or effort is unset', async () => {

@@ -5,6 +5,7 @@
  * OpenAI-compatible endpoint and DEEPSEEK_API_KEY environment variable fallback.
  */
 
+import type { LLMChatOptions, ThinkingConfig } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -14,11 +15,11 @@ import { OpenAIAdapter } from './openai.js'
  *
  * Usage:
  *   provider: 'deepseek'
- *   model: 'deepseek-v4-flash' (economical) or 'deepseek-v4-pro' (flagship)
+ *   model: 'deepseek-v4-flash' (DeepSeek-V4-Flash-0731 public beta)
+ *     or 'deepseek-v4-pro' (Preview API)
  *
- * Legacy `deepseek-chat` and `deepseek-reasoner` map to the non-thinking and
- * thinking modes of `deepseek-v4-flash` respectively, and will be fully retired
- * by DeepSeek on 2026-07-24.
+ * Legacy `deepseek-chat` and `deepseek-reasoner` were retired by DeepSeek on
+ * 2026-07-24.
  */
 export class DeepSeekAdapter extends OpenAIAdapter {
   readonly name = 'deepseek'
@@ -37,6 +38,29 @@ export class DeepSeekAdapter extends OpenAIAdapter {
   // it is ignored there but would still bloat context).
   override readonly capabilities = {
     echoesReasoning: 'tool-use-only' as const,
+  }
+
+  /**
+   * DeepSeek exposes its thinking switch as
+   * `thinking: { type: 'enabled' | 'disabled' }`.
+   *
+   * Keep the field absent when no framework-level thinking config is supplied
+   * so DeepSeek's server default still applies. Explicit `extraBody` values
+   * remain the final override layer for forward compatibility.
+   */
+  protected override buildExtraBody(options: LLMChatOptions): Record<string, unknown> | undefined {
+    const extraBody = super.buildExtraBody(options)
+    if (options.thinking === undefined) return extraBody
+    return {
+      thinking: {
+        type: options.thinking.enabled ? 'enabled' : 'disabled',
+      },
+      ...extraBody,
+    }
+  }
+
+  protected override buildReasoningEffort(options: LLMChatOptions): ThinkingConfig['effort'] {
+    return options.thinking?.effort
   }
 
   constructor(apiKey?: string, baseURL?: string) {

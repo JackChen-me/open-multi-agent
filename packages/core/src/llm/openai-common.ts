@@ -24,6 +24,7 @@ import type {
   LLMToolDef,
   ReasoningBlock,
   TextBlock,
+  ThinkingConfig,
   ToolUseBlock,
 } from '../types.js'
 import { UnsupportedToolCallError } from '../errors.js'
@@ -33,6 +34,17 @@ import { reasoningBlockToInlineText, resolveReasoningOutboundMaxChars, type Reas
 // ---------------------------------------------------------------------------
 // Framework → OpenAI
 // ---------------------------------------------------------------------------
+
+/**
+ * Limit the shared reasoning-effort union to values declared by the pinned
+ * OpenAI SDK. DeepSeek supports the additional `max` value and opts into it
+ * in its adapter override.
+ */
+export function toOpenAISdkReasoningEffort(
+  effort: ThinkingConfig['effort'],
+): Exclude<ThinkingConfig['effort'], 'max'> {
+  return effort === 'max' ? undefined : effort
+}
 
 /**
  * Convert a framework {@link LLMToolDef} to an OpenAI {@link ChatCompletionTool}.
