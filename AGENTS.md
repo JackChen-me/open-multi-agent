@@ -43,6 +43,8 @@ Examples and core E2E tests may require real provider credentials. Unit tests mo
 - OpenTelemetry APIs, SDKs, semantic-convention packages, and exporters belong in `@open-multi-agent/otel`, never in the core root import. The application owns its tracer/provider lifecycle unless an API explicitly says otherwise.
 - Treat `docs/` as the source of truth for subsystem behavior. Keep this file to rules and concise invariants; link to docs instead of copying long explanations.
 - Follow conventional commits when a commit is requested. Reference a PR or issue when one exists. The full contribution flow is in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
+- **Managed Git worktrees share repository metadata.** Never repair access by changing `.git` ownership or permissions. Use the current tool's normal Git and approval flow.
+- **Keep worktree dependencies isolated.** Run `npm ci` in each worktree and never symlink `node_modules` from another checkout. Codex users can select the checked-in local environment to automate setup.
 
 ## Validation by change type
 
