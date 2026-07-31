@@ -43,6 +43,7 @@ Examples and core E2E tests may require real provider credentials. Unit tests mo
 - OpenTelemetry APIs, SDKs, semantic-convention packages, and exporters belong in `@open-multi-agent/otel`, never in the core root import. The application owns its tracer/provider lifecycle unless an API explicitly says otherwise.
 - Treat `docs/` as the source of truth for subsystem behavior. Keep this file to rules and concise invariants; link to docs instead of copying long explanations.
 - Follow conventional commits when a commit is requested. Reference a PR or issue when one exists. The full contribution flow is in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
+- Publishing spans three packages with independent version tracks, a fixed publish order, and template pins that must move with the core version. Do not infer any of that from this file: [`.github/RELEASING.md`](.github/RELEASING.md) is the source of truth.
 - **Managed Git worktrees share repository metadata.** Never repair access by changing `.git` ownership or permissions. Use the current tool's normal Git and approval flow.
 - **Keep worktree dependencies isolated.** Run `npm ci` in each worktree and never symlink `node_modules` from another checkout.
 
@@ -62,20 +63,9 @@ Before finishing, report every command run and its outcome. If a relevant check 
 
 ## Architecture entry points
 
-Use this map to locate code; use the linked docs for behavior and contracts.
+`packages/core/src/` is organized one directory per subsystem (`orchestrator/`, `agent/`, `team/`, `task/`, `tool/`, `llm/`, `memory/`, `observability/`, `eval/`, `dashboard/`, `cli/`); run `ls packages/core/src/` to locate code, and use the linked docs below for behavior and contracts. Inside `orchestrator/`, `orchestrator.ts` is the entry point that the peer modules in that directory hang off.
 
-| Area | Entry points |
-|---|---|
-| Orchestration | `packages/core/src/orchestrator/orchestrator.ts` facade plus sibling run-context, budget, retry, task-execution, coordinator, consensus, and scheduler modules |
-| Agents and backends | `packages/core/src/agent/` — runner, pool, structured output, loop detection, process backend, and ACP backend |
-| Teams and tasks | `packages/core/src/team/`, `packages/core/src/task/` — roster, messaging, shared-memory binding, dependency queue, and task state |
-| Tools | `packages/core/src/tool/` — definitions, executor, MCP bridge, text fallback, built-ins, sandbox, and delegation |
-| LLM adapters | `packages/core/src/llm/` — adapter factory, provider adapters, OpenAI-compatible helpers, and reasoning fallback |
-| Memory and recovery | `packages/core/src/memory/` — shared memory, stores, file backends, and checkpointing |
-| Observability | `packages/core/src/observability/` for core records/sinks/stores; `packages/otel/src/` for the optional OpenTelemetry adapter |
-| Evaluation | `packages/core/src/eval/` — scorers, EvalSets, stores, offline/online runners, reports, and gates |
-| Dashboard and CLI | `packages/core/src/dashboard/`, `packages/core/src/cli/oma.ts` |
-| Public exports | `packages/core/src/index.ts` plus dedicated subpath entry points for observability, evaluation, MCP, AI SDK, ACP, process backends, and classifiers |
+The published surface is `packages/core/src/index.ts` plus the dedicated subpath entry points declared under `exports` in `packages/core/package.json`: `/observability`, `/observability/file`, `/eval`, `/eval/file`, `/mcp`, `/ai-sdk`, `/acp`, `/process`, and `/classifiers`. Keep that declaration and the backing source files in sync when adding or renaming one.
 
 `OpenMultiAgent` exposes three primary modes: `runAgent()` for a one-shot agent, `runTeam()` for coordinator-generated task DAGs, and `runTasks()` for explicit dependency pipelines. See the [core package README](packages/core/README.md#architecture) for the conceptual architecture.
 
@@ -97,6 +87,8 @@ These constraints span multiple files and can cause behavioral or compatibility 
 
 ## Subsystem documentation
 
+**This table is a curated selection, not a complete index.** `docs/` contains more files than are listed here. Run `ls docs/` for the full set before concluding that a topic is undocumented.
+
 | Topic | Source of truth |
 |---|---|
 | Context strategies and reasoning round-tripping | [docs/context-management.md](docs/context-management.md) |
@@ -108,6 +100,7 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | Evaluation, scorers, stores, reports, sampling, and gates | [docs/evaluation.md](docs/evaluation.md) |
 | CLI commands and JSON schemas | [docs/cli.md](docs/cli.md) |
 | Process and ACP backends | [docs/external-agents.md](docs/external-agents.md) |
+| Routing, scheduling, consensus, recovery, and replay | [model-routing](docs/model-routing.md), [execution-routing](docs/execution-routing.md), [task-scheduling](docs/task-scheduling.md), [consensus](docs/consensus.md), [adaptive-recovery](docs/adaptive-recovery.md), [plan-replay](docs/plan-replay.md) |
 
 ## Adding an LLM adapter
 
