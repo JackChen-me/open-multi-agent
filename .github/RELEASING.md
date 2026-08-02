@@ -25,6 +25,35 @@ needed at publish time.
 - [`CHANGELOG.md`](../CHANGELOG.md) is a single root file keyed by core version,
   with an `## Unreleased` section at the top.
 
+## Breaking changes
+
+Decide whether a release contains one before the release commit, not while
+writing release notes. A change is breaking when it can stop working for a
+caller who did nothing but upgrade:
+
+- the `engines` floor rises
+- a published direct dependency crosses a major version
+- input that an earlier release accepted is now rejected
+- a public export is removed, renamed, or has its signature narrowed
+
+A conventional-commits `!` marker on a merged commit signals that one landed,
+but it is not a substitute for the steps below, because nothing carries it
+through to a reader of the release.
+
+When a release contains a breaking change:
+
+- [`CHANGELOG.md`](../CHANGELOG.md) opens that version with a
+  `### Breaking changes` section above `### Added`, naming what breaks and what
+  the caller has to do.
+- The GitHub Release repeats it as its first section, not as a note near the
+  end.
+- Weigh the version number against how far the change reaches. 1.14.0 raised the
+  `engines` floor to Node 20 and moved `openai` from v4 to v6 while shipping as
+  a minor, so every `^1.x` caller on Node 18 received it automatically. npm
+  treats an `engines` mismatch as an `EBADENGINE` warning rather than an install
+  failure, which means those projects install successfully and fail later at run
+  time.
+
 ## The release commit
 
 Version bumps land on `main` through a normal pull request before anything is
@@ -72,6 +101,24 @@ none is triggered by pushing a tag.
    live on npm. Publishing it triggers `release-smoke.yml`, which resolves the
    published packages from the real registry. Releasing before they are live
    makes that run fail.
+
+## Release notes are not a copy of the changelog
+
+The two are rendered under different rules. [`CHANGELOG.md`](../CHANGELOG.md) is
+hard-wrapped at 80 columns, which is correct for a repository file because GitHub
+joins a single newline into a space there. A release body is rendered with GFM
+hard line breaks, where every newline becomes a `<br>`, so pasted wrapped text
+turns into a column of lines that look truncated at 80 characters.
+
+Unwrap each paragraph and list item onto a single line before publishing, and
+check the draft first:
+
+```bash
+jq -Rs '{text: ., mode: "gfm"}' < notes.md | gh api /markdown --input - | grep -c '<br>'
+```
+
+That endpoint matches what the release page renders. A correct release body
+returns `0`.
 
 ## What CI proves
 

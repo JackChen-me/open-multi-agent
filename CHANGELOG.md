@@ -4,6 +4,26 @@
 
 ## 1.14.0 - 2026-08-01
 
+### Breaking changes
+
+This release shipped as a minor version, so a caller on a `^1.x` range receives
+it without an explicit upgrade step. npm reports an `engines` mismatch as an
+`EBADENGINE` warning rather than an install failure, so a Node 18 project
+installs 1.14.0 successfully and then fails at run time.
+
+- **Node.js 20 or newer is now required.** The `engines` floor moved from 18 to
+  20 across `@open-multi-agent/core`, `@open-multi-agent/otel`, and
+  `create-oma-app`. Node 18 reached end of life on 2025-04-30.
+- **The bundled `openai` dependency moved from v4 to v6.** A project that also
+  depends on `openai` directly resolves a nested second copy until it moves to
+  v6 as well.
+- **Plans that were previously accepted can now fail at validation time.**
+  Invalid task dependency graphs, unsatisfiable task requirements, and invalid
+  coordinator plans are rejected before execution instead of running partially.
+  Each of these surfaces a defect that was previously silent, so correct graphs
+  and rosters are unaffected. The individual entries are under Changed and
+  Fixed below.
+
 ### Added
 
 - Adaptive plan recovery lets a run revise the not-yet-executed part of its task
@@ -33,13 +53,9 @@
 
 ### Changed
 
-- **Node.js 20 or newer is now required.** The `engines` floor moved from 18 to
-  20 across `@open-multi-agent/core`, `@open-multi-agent/otel`, and
-  `create-oma-app`. Node 18 reached end of life on 2025-04-30.
-- The bundled `openai` dependency moved from v4 to v6. OpenAI user aborts are
-  now classified as cancellation rather than as a retryable failure, and
-  unsupported custom tool calls are rejected explicitly instead of being passed
-  through.
+- On the OpenAI v6 SDK, user aborts are now classified as cancellation rather
+  than as a retryable failure, and unsupported custom tool calls are rejected
+  explicitly instead of being passed through.
 - Task requirements are enforced as global hard constraints. A task whose
   requirements no agent satisfies is now rejected rather than assigned to an
   ineligible agent.
@@ -58,9 +74,6 @@
   runs.
 - Adaptive plan recovery is opt-in. Task graphs stay fixed unless
   `recovery.mode` selects `'repairable'`.
-- Runs that previously succeeded with an invalid task DAG or an unsatisfiable
-  task requirement now fail at validation time. This surfaces a defect that was
-  previously silent; correct graphs and rosters are unaffected.
 - Adaptive recovery adds a version 2 task-queue snapshot carrying plan-revision
   history. `TaskQueue.fromSnapshot()` still accepts version 1 snapshots, so
   checkpoints written by earlier releases remain restorable.
