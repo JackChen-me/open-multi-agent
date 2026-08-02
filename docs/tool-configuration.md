@@ -29,11 +29,11 @@ result reports `governanceConclusion: 'not-applicable'` until that plan is
 executed, for example through `runFromPlan()`.
 
 Use `governanceIntent: 'none'` to opt into automatic `runTeam()` routing
-explicitly. Omitting `governanceIntent` does the same. This route is Hybrid by
-default: a deterministic Single candidate may be upgraded after one semantic
-profile call. Set
-`executionRouting: { strategy: 'deterministic' }` for the previous no-profiler
-behavior.
+explicitly. Omitting `governanceIntent` does the same. This route is
+deterministic by default and makes no semantic profile call. Hybrid semantic
+routing is opt-in: set `executionRouting: { strategy: 'hybrid' }` to let a
+deterministic Single candidate be upgraded after one semantic profile call. See
+[execution routing](execution-routing.md).
 
 After execution, required declarations are checked against the execution
 receipt. The `governanceConclusion` value is `satisfied`, `unsatisfied`, or
