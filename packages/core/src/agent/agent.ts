@@ -125,6 +125,7 @@ export class Agent {
     this.config = config
     this._toolRegistry = toolRegistry
     this._toolExecutor = toolExecutor
+    this.messageHistory = config.history ? [...config.history] : []
 
     this.state = {
       status: 'idle',

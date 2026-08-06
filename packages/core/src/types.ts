@@ -670,6 +670,15 @@ export type ExternalAgentBackendConfig = AgentBackendConfig | ProcessAgentBacken
 /** Static configuration for a single agent. */
 export interface AgentConfig {
   readonly name: string
+  /**
+   * Previously persisted conversation messages to restore for prompt() calls.
+   *
+   * The messages are copied when the Agent is constructed, so a caller can
+   * safely reuse or replace the serialized history after passing it in. The
+   * history should contain the same valid message sequence returned by
+   * Agent.getHistory().
+   */
+  readonly history?: readonly LLMMessage[]
   /** One-sentence role description for bounded, structured agent manifests. */
   readonly description?: string
   /**
