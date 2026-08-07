@@ -110,6 +110,42 @@ Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Pr
 
 Use `planOnly` to inspect a generated task graph before execution, then `createPlanArtifact()` and `runFromPlan()` to replay it. `runConsensus()` adds a proposer→judge verification loop when one answer needs extra scrutiny.
 
+### Structured single-agent input
+
+`Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` keep the string
+form above and also accept a complete `LLMMessage[]`. Use the message form for
+caller-owned conversation history or blocks such as base64 images:
+
+```typescript
+import { OpenMultiAgent, type LLMMessage } from '@open-multi-agent/core'
+
+const messages: LLMMessage[] = [{
+  role: 'user',
+  content: [
+    { type: 'text', text: 'Describe this image.' },
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: imageBase64 },
+    },
+  ],
+}]
+
+const result = await new OpenMultiAgent().runAgent(
+  { name: 'vision', model: 'claude-sonnet-4-6' },
+  messages,
+)
+```
+
+For a persistent `Agent.prompt()` conversation, pass a string or one
+`ContentBlock[]` user turn; restore earlier turns through `AgentConfig.history`.
+Structured input is validated and defensively copied. `beforeRun` receives both
+the complete `messages` and its backwards-compatible latest-user `prompt` view.
+Process and ACP backends remain string-only and reject structured arguments
+instead of discarding history or images. See [Structured Agent
+Input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md) for copy, hook, progress/evaluation, and
+external-backend semantics, or run
+[`basics/structured-input`](examples/basics/structured-input.ts).
+
 Automatic `runTeam()` uses the deterministic router by default: no extra model
 call is made. Opt into Hybrid Semantic Routing with
 `executionRouting: { strategy: 'hybrid' }`; it keeps deterministic Team
@@ -192,7 +228,7 @@ are covered in
 | **Dynamic orchestration** | Runtime goal decomposition, dependency-aware scheduling, parallel branches, configurable assignment, task-scoped results and handoffs, opt-in team context for workers (`revealCoordinator`), and final synthesis. |
 | **Models and reasoning** | Mix built-in, OpenAI-compatible, AI SDK, or local models; map one `thinking` config to each provider's reasoning setting, route phases separately, and preserve reasoning only when explicitly enabled. |
 | **Tools and handoffs** | Built-in tools are default-deny; custom tools, MCP, and guarded `delegate_to_agent` handoffs are opt-in, and consequential tools on undeclared runs are flagged for confirmation. |
-| **Controlled outputs** | Stream per agent, validate results with Zod, approve or durably suspend plans, task rounds, dispatches, and tool calls, rewrite prompts or post-process results with `beforeRun` / `afterRun`, and cancel with `AbortSignal`. |
+| **Controlled outputs** | Send text or structured single-agent input, stream per agent, validate results with Zod, approve or durably suspend plans, task rounds, dispatches, and tool calls, rewrite messages/prompts or post-process results with `beforeRun` / `afterRun`, and cancel with `AbortSignal`. |
 | **Evaluation** | Version EvalSets, run reference scorers, gate CI with offline reports, persist results, or sample production runs on a best-effort path. |
 | **Memory and recovery** | Shared memory is pluggable; checkpoints resume interrupted runs without repeating completed tasks. |
 | **Observability** | Stable run identity, traces, execution receipts, redaction, TraceStore, and the offline DAG/Waterfall Viewer are available without a hosted service. |
@@ -221,6 +257,7 @@ Start with one example that matches the behavior you need:
 
 | Goal | Example |
 |---|---|
+| Send image blocks and caller-owned history | [`basics/structured-input`](examples/basics/structured-input.ts) |
 | See coordinator planning | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
 | Build an explicit DAG | [`cookbook/contract-review-dag`](examples/cookbook/contract-review-dag.ts) |
 | Observe event-driven DAG dispatch | [`patterns/event-driven-dag`](examples/patterns/event-driven-dag.ts) |
@@ -275,7 +312,7 @@ See the [observability guide](https://github.com/open-multi-agent/open-multi-age
 
 | Area | Guides |
 |---|---|
-| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
+| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [structured input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
 | Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [durable approvals](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | Control workflows | [Plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](examples/production/README.md) |

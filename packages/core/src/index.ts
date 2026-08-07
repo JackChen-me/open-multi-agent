@@ -332,6 +332,8 @@ export type {
 
   // Agent
   AgentConfig,
+  AgentPromptInput,
+  AgentRunInput,
   AgentState,
   AgentRunResult,
   RunAgentOptions,
@@ -364,6 +366,7 @@ export type {
   AcpPermissionPolicy,
   AcpPermissionRequest,
   BeforeRunHookContext,
+  BeforeRunHookResult,
   ToolCallRecord,
   LoopDetectionConfig,
   LoopDetectionInfo,

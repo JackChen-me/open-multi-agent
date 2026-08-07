@@ -126,10 +126,10 @@ export class RoutingDeclarationRequiredError extends Error {
 }
 
 /**
- * Raised when a message list passed to an adapter violates the
- * {@link LLMMessage}[] contract (e.g. a `content` that isn't a `ContentBlock[]`).
- * Surfaced at the adapter entry so the violation fails loudly instead of
- * crashing deep in provider-specific message conversion.
+ * Raised when structured input passed to a public Agent API or adapter violates
+ * the {@link LLMMessage}[] contract (e.g. a `content` that isn't a
+ * `ContentBlock[]`), cannot be copied safely, or crosses a text-only backend
+ * boundary. Surfaced before provider-specific conversion or external execution.
  */
 export class InvalidMessageError extends Error {
   readonly code = 'INVALID_MESSAGE'

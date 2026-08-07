@@ -1,14 +1,14 @@
 /**
- * @fileoverview Entry-point validation for adapter message lists.
+ * @fileoverview Entry-point validation for public and adapter message lists.
  *
  * `LLMMessage.content` is typed as `ContentBlock[]`, but JS callers, deserialized
  * history, or custom integrations can break that contract at runtime. Without a
  * guard a non-array `content` fails deep in provider-specific conversion with a
  * cryptic `TypeError: <x>.content.some is not a function`.
  *
- * {@link assertValidMessages} is called at the entry of every adapter's
- * `chat()`/`stream()` so a broken contract surfaces as a clear
- * {@link InvalidMessageError} at the boundary instead.
+ * {@link assertValidMessages} is called by public structured Agent inputs and
+ * at every adapter's `chat()`/`stream()` entry so a broken contract surfaces as
+ * a clear {@link InvalidMessageError} at the boundary instead.
  */
 
 import type { LLMMessage } from '../types.js'
@@ -31,7 +31,7 @@ function describeType(value: unknown): string {
  * fields. It rejects invalid input rather than coercing it, so the caller's bug
  * stays visible instead of being silently reshaped.
  */
-export function assertValidMessages(messages: LLMMessage[]): void {
+export function assertValidMessages(messages: readonly LLMMessage[]): void {
   if (!Array.isArray(messages)) {
     throw new InvalidMessageError(`messages must be an array, got ${describeType(messages)}`)
   }

@@ -15,6 +15,17 @@
       "featuredOrder": 1
     },
     {
+      "id": "structured-input",
+      "path": "basics/structured-input.ts",
+      "title": "Structured Multimodal Input",
+      "description": "Send caller-owned message history and an image through runAgent() as structured input.",
+      "section": "goal",
+      "goal": "start-here",
+      "capabilities": ["run-agent", "multi-turn"],
+      "format": "script",
+      "level": "beginner"
+    },
+    {
       "id": "team-collaboration",
       "path": "basics/team-collaboration.ts",
       "title": "Team Collaboration",

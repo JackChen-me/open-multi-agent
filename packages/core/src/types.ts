@@ -125,6 +125,23 @@ export interface LLMMessage {
   readonly content: ContentBlock[]
 }
 
+/**
+ * Input accepted by one-shot agent entry points.
+ *
+ * A string is shorthand for one user text message. A message list starts a
+ * fresh run with caller-owned conversation history and may include structured
+ * content such as {@link ImageBlock}s.
+ */
+export type AgentRunInput = string | readonly LLMMessage[]
+
+/**
+ * Input accepted by {@link Agent.prompt} for one persistent user turn.
+ *
+ * Use {@link AgentConfig.history} to restore earlier turns; the content-block
+ * form here is appended as exactly one new user message.
+ */
+export type AgentPromptInput = string | readonly ContentBlock[]
+
 /** Context management strategy for long-running agent conversations. */
 export type ContextStrategy =
   | { type: 'sliding-window'; maxTurns: number }
@@ -691,9 +708,34 @@ export interface ThinkingConfig {
 
 /** Context passed to the {@link AgentConfig.beforeRun} hook. */
 export interface BeforeRunHookContext {
-  /** The user prompt text. */
+  /**
+   * Text blocks from the latest user message, concatenated in block order.
+   * Kept for backwards-compatible text-only rewrites.
+   */
   readonly prompt: string
+  /**
+   * A defensive copy of the complete effective message list.
+   * Return a replacement list to rewrite structured input or caller history.
+   */
+  readonly messages: readonly LLMMessage[]
   /** The agent's static configuration. */
+  readonly agent: AgentConfig
+}
+
+/** Value returned by {@link AgentConfig.beforeRun}. */
+export interface BeforeRunHookResult {
+  /**
+   * Backwards-compatible text rewrite for the latest user message. When both
+   * `messages` and `prompt` change, `messages` is applied first and `prompt`
+   * then replaces that message's text blocks while preserving non-text order.
+   */
+  readonly prompt: string
+  /**
+   * Optional replacement for the complete message list. Omission preserves
+   * compatibility with hooks that predate structured run input.
+   */
+  readonly messages?: readonly LLMMessage[]
+  /** Read-only informational agent configuration. */
   readonly agent: AgentConfig
 }
 
@@ -794,10 +836,10 @@ export interface AgentConfig {
   /**
    * Previously persisted conversation messages to restore for prompt() calls.
    *
-   * The messages are copied when the Agent is constructed, so a caller can
-   * safely reuse or replace the serialized history after passing it in. The
-   * history should contain the same valid message sequence returned by
-   * Agent.getHistory().
+   * The messages are validated and defensively deep-copied when the Agent is
+   * constructed, so a caller can safely reuse or mutate the serialized history
+   * after passing it in. The history should contain the same valid message
+   * sequence returned by Agent.getHistory().
    */
   readonly history?: readonly LLMMessage[]
   /** One-sentence role description for bounded, structured agent manifests. */
@@ -1096,11 +1138,13 @@ export interface AgentConfig {
    */
   readonly outputSchema?: ZodSchema
   /**
-   * Called before each agent run. Receives the prompt and agent config.
+   * Called before each agent run. Receives a defensive copy of the complete
+   * messages plus the backwards-compatible text `prompt` view and agent config.
    * Return a (possibly modified) context to continue, or throw to abort the run.
-   * Only `prompt` from the returned context is applied; `agent` is read-only informational.
+   * `messages` is applied first, then a changed `prompt`; `agent` is read-only
+   * informational. External process/ACP backends support `prompt` rewrites only.
    */
-  readonly beforeRun?: (context: BeforeRunHookContext) => Promise<BeforeRunHookContext> | BeforeRunHookContext
+  readonly beforeRun?: (context: BeforeRunHookContext) => Promise<BeforeRunHookResult> | BeforeRunHookResult
   /**
    * Called after each agent run completes successfully. Receives the run result.
    * Return a (possibly modified) result, or throw to mark the run as failed.

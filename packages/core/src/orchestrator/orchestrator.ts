@@ -43,6 +43,7 @@
 
 import type {
   AgentConfig,
+  AgentRunInput,
   AgentRunResult,
   ApprovalDecisionRecord,
   ApprovalGateDecision,
@@ -82,6 +83,7 @@ import type {
 } from '../types.js'
 import type { RunOptions } from '../agent/runner.js'
 import { Agent } from '../agent/agent.js'
+import { copyMessages, prepareAgentRunInput } from '../agent/input.js'
 import { AgentPool } from '../agent/pool.js'
 import { createAdapter } from '../llm/adapter.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
@@ -776,22 +778,25 @@ export class OpenMultiAgent {
   // -------------------------------------------------------------------------
 
   /**
-   * Run a single prompt with a one-off agent.
+   * Run a string prompt or structured message history with a one-off agent.
    *
-   * Constructs a fresh agent from `config`, runs `prompt` in a single turn,
+   * Constructs a fresh agent from `config`, runs `input` in a fresh conversation,
    * and returns the result. The agent is not registered with any pool or team.
    *
    * Useful for simple one-shot queries that do not need team orchestration.
    *
    * @param config - Agent configuration.
-   * @param prompt - The user prompt to send.
+   * @param input - A string shorthand or complete caller-owned message list.
    */
   async runAgent(
     config: AgentConfig,
-    prompt: string,
+    input: AgentRunInput,
     options?: RunAgentOptions,
   ): Promise<AgentRunResult> {
-    const pendingEvaluation = this.beginOnlineEvaluation(prompt)
+    const preparedInput = prepareAgentRunInput(input, config.backend)
+    const pendingEvaluation = this.beginOnlineEvaluation(
+      preparedInput.structured ? copyMessages(preparedInput.messages) : input,
+    )
     const { identity, metadata } = createRunFacts(options)
     const traceRuntime = this.startTrace(identity, metadata)
     const effectiveBudget = resolveBudgetCeiling(config.maxTokenBudget, this.config.maxTokenBudget)
@@ -808,7 +813,9 @@ export class OpenMultiAgent {
     this.config.onProgress?.({
       type: 'agent_start',
       agent: config.name,
-      data: { prompt },
+      data: preparedInput.structured
+        ? { messages: copyMessages(preparedInput.messages) }
+        : { prompt: input },
     })
 
     // Build run-time options: trace + optional abort signal. RunOptions has
@@ -837,7 +844,10 @@ export class OpenMultiAgent {
             tracePhase: 'agent',
           }
 
-    const result = await agent.run(prompt, runOptions)
+    const result = await agent.run(
+      preparedInput.structured ? preparedInput.messages : input,
+      runOptions,
+    )
     let finalResult = result
 
     if (result.budgetExceeded) {

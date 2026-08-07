@@ -14,11 +14,12 @@ standalone example or top-level example directory is not registered.
 
 ## basics — start here
 
-The four core execution modes. Read these first.
+Core execution modes and input shapes. Read these first.
 
 | Example | What it shows |
 |---------|---------------|
 | [`basics/single-agent`](basics/single-agent.ts) | One agent with bash + file tools, then streaming via the `Agent` class. |
+| [`basics/structured-input`](basics/structured-input.ts) | Caller-owned message history and image blocks through `runAgent()`. |
 | [`basics/team-collaboration`](basics/team-collaboration.ts) | `runTeam()` coordinator pattern — goal in, results out. |
 | [`basics/task-pipeline`](basics/task-pipeline.ts) | `runTasks()` with explicit task DAG and dependencies. |
 | [`basics/multi-model-team`](basics/multi-model-team.ts) | Different models per agent in one team. |

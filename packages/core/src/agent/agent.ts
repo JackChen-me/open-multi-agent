@@ -36,12 +36,18 @@
  * ```
  */
 
+import { isDeepStrictEqual } from 'node:util'
+
 import type {
   ExternalAgentBackendConfig,
   AgentConfig,
+  AgentPromptInput,
+  AgentRunInput,
   AgentState,
   AgentRunResult,
   BeforeRunHookContext,
+  BeforeRunHookResult,
+  ContentBlock,
   LLMMessage,
   StreamEvent,
   TokenUsage,
@@ -56,7 +62,8 @@ import { createRunIdentity } from '../observability/identity.js'
 import { classifyRunFailure, statusOnly } from '../observability/status.js'
 import { DurableApprovalError } from '../approval/durable.js'
 import { createTraceRuntime } from '../observability/runtime.js'
-import { TokenBudgetExceededError } from '../errors.js'
+import { InvalidMessageError, TokenBudgetExceededError } from '../errors.js'
+import { assertValidMessages } from '../llm/validate.js'
 import type { ToolDefinition as FrameworkToolDefinition, ToolRegistry } from '../tool/framework.js'
 import type { ToolExecutor } from '../tool/executor.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
@@ -67,6 +74,11 @@ import {
   extractJSON,
   validateOutput,
 } from './structured-output.js'
+import {
+  copyMessages,
+  prepareAgentPromptInput,
+  prepareAgentRunInput,
+} from './input.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -126,7 +138,8 @@ export class Agent {
     this.config = config
     this._toolRegistry = toolRegistry
     this._toolExecutor = toolExecutor
-    this.messageHistory = config.history ? [...config.history] : []
+    if (config.history) assertValidMessages(config.history)
+    this.messageHistory = config.history ? copyMessages(config.history) : []
 
     this.state = {
       status: 'idle',
@@ -265,42 +278,38 @@ export class Agent {
   // -------------------------------------------------------------------------
 
   /**
-   * Run `prompt` in a fresh conversation (history is NOT used).
+   * Run a string prompt or complete message list in a fresh conversation
+   * (persistent history is NOT used).
    *
-   * Equivalent to constructing a brand-new messages array `[{ role:'user', … }]`
-   * and calling the runner once. The agent's persistent history is not modified.
+   * A string is shorthand for `[{ role:'user', content:[{ type:'text', … }] }]`.
+   * A structured list is defensively copied before execution. The agent's
+   * persistent history is not modified.
    *
    * Use this for one-shot queries where past context is irrelevant.
    */
-  async run(prompt: string, runOptions?: Partial<RunOptions>): Promise<AgentRunResult> {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: [{ type: 'text', text: prompt }] },
-    ]
-
+  async run(input: AgentRunInput, runOptions?: Partial<RunOptions>): Promise<AgentRunResult> {
+    const { messages } = prepareAgentRunInput(input, this.config.backend)
     return this.executeRun(messages, runOptions)
   }
 
   /**
-   * Run `prompt` as part of the ongoing conversation.
+   * Run a string or structured user turn as part of the ongoing conversation.
    *
-   * Appends the user message to the persistent history, runs the agent, then
-   * appends the resulting messages to the history for the next call.
+   * A `ContentBlock[]` is appended as exactly one user message. The input and
+   * resulting messages are defensively copied into persistent history for the
+   * next call.
    *
    * Use this for multi-turn interactions.
    */
   // TODO(#18): accept optional RunOptions to forward trace context
-  async prompt(message: string): Promise<AgentRunResult> {
-    const userMessage: LLMMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: message }],
-    }
-
+  async prompt(input: AgentPromptInput): Promise<AgentRunResult> {
+    const { message: userMessage } = prepareAgentPromptInput(input, this.config.backend)
     this.messageHistory.push(userMessage)
 
-    const result = await this.executeRun([...this.messageHistory])
+    const result = await this.executeRun(copyMessages(this.messageHistory))
 
     // Persist the new messages into history so the next `prompt` sees them.
-    for (const msg of result.messages) {
+    for (const msg of copyMessages(result.messages)) {
       this.messageHistory.push(msg)
     }
 
@@ -308,16 +317,14 @@ export class Agent {
   }
 
   /**
-   * Stream a fresh-conversation response, yielding {@link StreamEvent}s.
+   * Stream a fresh-conversation response from a string or complete message list,
+   * yielding {@link StreamEvent}s.
    *
    * Like {@link run}, this does not use or update the persistent history.
    */
-  async *stream(prompt: string, runOptions?: Partial<RunOptions>): AsyncGenerator<StreamEvent> {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: [{ type: 'text', text: prompt }] },
-    ]
-
-    yield* this.executeStream(messages, runOptions)
+  stream(input: AgentRunInput, runOptions?: Partial<RunOptions>): AsyncGenerator<StreamEvent> {
+    const { messages } = prepareAgentRunInput(input, this.config.backend)
+    return this.executeStream(messages, runOptions)
   }
 
   // -------------------------------------------------------------------------
@@ -331,7 +338,7 @@ export class Agent {
 
   /** Return a copy of the persistent message history. */
   getHistory(): LLMMessage[] {
-    return [...this.messageHistory]
+    return copyMessages(this.messageHistory)
   }
 
   /**
@@ -417,9 +424,7 @@ export class Agent {
       // --- beforeRun hook ---
       if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
         failureKind = 'callback'
-        const hookCtx = this.buildBeforeRunHookContext(messages)
-        const modified = await this.config.beforeRun(hookCtx)
-        this.applyHookContext(messages, modified, hookCtx.prompt)
+        await this.applyBeforeRunHook(messages)
         failureKind = undefined
       }
 
@@ -766,9 +771,7 @@ export class Agent {
       // --- beforeRun hook ---
       if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
         failureKind = 'callback'
-        const hookCtx = this.buildBeforeRunHookContext(messages)
-        const modified = await this.config.beforeRun(hookCtx)
-        this.applyHookContext(messages, modified, hookCtx.prompt)
+        await this.applyBeforeRunHook(messages)
         failureKind = undefined
       }
 
@@ -890,6 +893,28 @@ export class Agent {
   // Hook helpers
   // -------------------------------------------------------------------------
 
+  private async applyBeforeRunHook(messages: LLMMessage[]): Promise<void> {
+    const hook = this.config.beforeRun
+    if (!hook) return
+
+    const hookCtx = this.buildBeforeRunHookContext(messages)
+    const originalHookMessages = copyMessages(hookCtx.messages)
+    const modified = await hook(hookCtx)
+
+    if (
+      this.config.backend !== undefined &&
+      modified.messages !== undefined &&
+      !isDeepStrictEqual(modified.messages, originalHookMessages)
+    ) {
+      throw new InvalidMessageError(
+        `The ${this.config.backend.kind} external backend accepts beforeRun.prompt rewrites only; ` +
+          'beforeRun.messages cannot be forwarded without loss.',
+      )
+    }
+
+    this.applyHookContext(messages, modified, hookCtx)
+  }
+
   /** Extract the prompt text from the last user message to build hook context. */
   private buildBeforeRunHookContext(messages: LLMMessage[]): BeforeRunHookContext {
     let prompt = ''
@@ -904,26 +929,52 @@ export class Agent {
     }
     // Strip hook functions to avoid circular self-references in the context
     const { beforeRun, afterRun, ...agentInfo } = this.config
-    return { prompt, agent: agentInfo as AgentConfig }
+    return {
+      prompt,
+      messages: copyMessages(messages),
+      agent: agentInfo as AgentConfig,
+    }
   }
 
   /**
    * Apply a (possibly modified) hook context back to the messages array.
    *
-   * Only text blocks in the last user message are replaced; non-text content
-   * (images, tool results) is preserved. The array element is replaced (not
-   * mutated in place) so that shallow copies of the original array (e.g. from
-   * `prompt()`) are not affected.
+   * A returned `messages` list replaces the complete run input first. A changed
+   * `prompt` then replaces text blocks in the last user message; non-text blocks
+   * retain their relative order. The caller's input and persistent prompt
+   * history are separate defensive copies.
    */
-  private applyHookContext(messages: LLMMessage[], ctx: BeforeRunHookContext, originalPrompt: string): void {
-    if (ctx.prompt === originalPrompt) return
+  private applyHookContext(
+    messages: LLMMessage[],
+    ctx: BeforeRunHookResult,
+    original: BeforeRunHookContext,
+  ): void {
+    if (typeof ctx.prompt !== 'string') {
+      throw new InvalidMessageError('beforeRun.prompt must be a string')
+    }
+
+    if (ctx.messages !== undefined) {
+      assertValidMessages(ctx.messages)
+      messages.splice(0, messages.length, ...copyMessages(ctx.messages))
+    }
+
+    if (ctx.prompt === original.prompt) return
 
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]!.role === 'user') {
-        const nonTextBlocks = messages[i]!.content.filter(b => b.type !== 'text')
+        const content = messages[i]!.content
+        const firstTextIndex = content.findIndex((block) => block.type === 'text')
+        const replacement = { type: 'text' as const, text: ctx.prompt }
+        const rewritten = firstTextIndex === -1
+          ? [replacement, ...content]
+          : content.reduce<ContentBlock[]>((blocks, block, index) => {
+              if (block.type !== 'text') blocks.push(block)
+              else if (index === firstTextIndex) blocks.push(replacement)
+              return blocks
+            }, [])
         messages[i] = {
           role: 'user',
-          content: [{ type: 'text', text: ctx.prompt }, ...nonTextBlocks],
+          content: rewritten,
         }
         break
       }
