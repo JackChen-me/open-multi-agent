@@ -5,30 +5,22 @@
  * optional timeout and a custom working directory.
  */
 
-import { spawn } from 'child_process'
 import { z } from 'zod'
 import { defineTool } from '../framework.js'
-import { isSensitiveName, redactSensitiveText } from '../../utils/redaction.js'
-import { killProcessTree } from '../../utils/process-tree.js'
+import { redactSensitiveText } from '../../utils/redaction.js'
+import { LocalShellExecutor } from '../shell/local.js'
+import type {
+  ShellExecResult,
+  ShellExecutor,
+} from '../shell/types.js'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS = 30_000
-const SAFE_ENV_ALLOWLIST = new Set([
-  'HOME',
-  'LANG',
-  'LC_ALL',
-  'LOGNAME',
-  'PATH',
-  'SHELL',
-  'TEMP',
-  'TERM',
-  'TMP',
-  'TMPDIR',
-  'USER',
-])
+const EXECUTOR_BACKSTOP_GRACE_MS = 100
+const DEFAULT_SHELL_EXECUTOR = new LocalShellExecutor()
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -62,12 +54,23 @@ export const bashTool = defineTool({
   execute: async (input, context) => {
     const timeoutMs = input.timeout ?? DEFAULT_TIMEOUT_MS
 
-    const { stdout, stderr, exitCode } = await runCommand(
-      input.command,
-      { cwd: input.cwd, timeoutMs },
-      context.abortSignal,
-    )
+    let execution: ShellExecResult
+    try {
+      execution = await executeWithBackstop(
+        context.shellExecutor ?? DEFAULT_SHELL_EXECUTOR,
+        input.command,
+        { cwd: input.cwd, timeoutMs },
+        context.abortSignal,
+      )
+    } catch (error) {
+      execution = {
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: 127,
+      }
+    }
 
+    const { stdout, stderr, exitCode } = execution
     const combined = redactSensitiveText(buildOutput(stdout, stderr, exitCode))
     const isError = exitCode !== 0
 
@@ -82,128 +85,126 @@ export const bashTool = defineTool({
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-interface RunResult {
-  stdout: string
-  stderr: string
-  exitCode: number
-}
-
-interface RunOptions {
+interface BashRunOptions {
   cwd: string | undefined
   timeoutMs: number
 }
 
 /**
- * Spawn a bash subprocess, capture its output, and resolve when it exits or
- * the abort signal fires.
+ * Bound an executor even when an adapter fails to honour its own timeout or
+ * abort contract. The executor receives the cancellation immediately; the
+ * short grace period lets a cooperative implementation return captured output
+ * before the wrapper falls back to an empty conventional result.
  */
-function runCommand(
+async function executeWithBackstop(
+  executor: ShellExecutor,
   command: string,
-  options: RunOptions,
+  options: BashRunOptions,
   signal: AbortSignal | undefined,
-): Promise<RunResult> {
-  return new Promise<RunResult>((resolve) => {
-    const stdoutChunks: Buffer[] = []
-    const stderrChunks: Buffer[] = []
-
-    const child = spawn('bash', ['-c', command], {
+): Promise<ShellExecResult> {
+  // The local implementation already owns a process-tree-aware deadline and
+  // abort path. Calling it directly preserves the historical timing and
+  // captured-output behavior exactly; the wrapper backstop is for pluggable
+  // executors whose cooperation OMA cannot assume.
+  if (executor instanceof LocalShellExecutor) {
+    return executor.exec(command, {
       cwd: options.cwd,
-      detached: process.platform !== 'win32',
-      env: buildSafeShellEnv(process.env),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      timeoutMs: options.timeoutMs,
+      abortSignal: signal,
     })
-
-    child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(chunk))
-    child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk))
-
-    let timedOut = false
-    let aborted = false
-    let settled = false
-
-    const done = (exitCode: number): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (signal !== undefined) {
-        signal.removeEventListener('abort', onAbort)
-      }
-
-      const stdout = Buffer.concat(stdoutChunks).toString('utf8')
-      const stderr = Buffer.concat(stderrChunks).toString('utf8')
-
-      resolve({ stdout, stderr, exitCode })
-    }
-
-    // Timeout handler — kill the whole process group so backgrounded
-    // children (`(sleep 5; ...) &`) do not outlive the parent.
-    const timer = setTimeout(() => {
-      timedOut = true
-      killProcessTree(child)
-    }, options.timeoutMs)
-
-    // Abort-signal handler — same process-group cleanup as the timeout.
-    const onAbort = (): void => {
-      aborted = true
-      killProcessTree(child)
-    }
-
-    if (signal !== undefined) {
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-
-    // `close` (process exited AND stdio drained) is the normal completion
-    // path. After a forced kill we settle on `exit` instead: on Windows,
-    // MSYS bash's fork emulation can leave descendants that taskkill cannot
-    // reach (their recorded parent PID is a dead intermediate process), and
-    // any such straggler would hold the stdio pipes open and delay `close`
-    // until it exits naturally.
-    //
-    // When we killed the process ourselves, report the conventional exit
-    // codes (124 timeout / 130 abort) authoritatively: the code the OS
-    // reports for a forced termination is platform-dependent (`null` after
-    // SIGKILL on POSIX, `1` after taskkill on Windows).
-    const resolveExitCode = (code: number | null): number => {
-      if (timedOut) return 124
-      if (aborted) return 130
-      return code ?? 1
-    }
-
-    child.on('close', (code: number | null) => {
-      done(resolveExitCode(code))
-    })
-
-    child.on('exit', (code: number | null) => {
-      if (timedOut || aborted) {
-        done(resolveExitCode(code))
-      }
-    })
-
-    child.on('error', (err: Error) => {
-      if (!settled) {
-        settled = true
-        clearTimeout(timer)
-        if (signal !== undefined) {
-          signal.removeEventListener('abort', onAbort)
-        }
-        resolve({
-          stdout: '',
-          stderr: err.message,
-          exitCode: 127,
-        })
-      }
-    })
-  })
-}
-
-function buildSafeShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const safeEnv: NodeJS.ProcessEnv = {}
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) continue
-    if (!SAFE_ENV_ALLOWLIST.has(name)) continue
-    if (isSensitiveName(name)) continue
-    safeEnv[name] = value
   }
-  return safeEnv
+
+  if (signal?.aborted) {
+    return { stdout: '', stderr: '', exitCode: 130 }
+  }
+
+  type TerminationReason = 'timeout' | 'abort'
+  type Outcome =
+    | { readonly kind: 'result'; readonly result: ShellExecResult }
+    | { readonly kind: 'backstop'; readonly reason: TerminationReason }
+
+  const commandAbort = new AbortController()
+  let termination: TerminationReason | undefined
+  let graceTimer: ReturnType<typeof setTimeout> | undefined
+  let resolveBackstop!: (outcome: Outcome) => void
+  const backstop = new Promise<Outcome>((resolve) => {
+    resolveBackstop = resolve
+  })
+
+  const terminate = (reason: TerminationReason): void => {
+    if (termination !== undefined) return
+    termination = reason
+    commandAbort.abort()
+    graceTimer = setTimeout(() => {
+      resolveBackstop({ kind: 'backstop', reason })
+    }, EXECUTOR_BACKSTOP_GRACE_MS)
+  }
+
+  const onAbort = (): void => terminate('abort')
+  signal?.addEventListener('abort', onAbort, { once: true })
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    // Invoke first so LocalShellExecutor's own deadline is registered before
+    // the wrapper backstop. That preserves its captured-output behavior while
+    // still bounding a non-cooperative custom executor.
+    const execution = executor.exec(command, {
+      cwd: options.cwd,
+      timeoutMs: options.timeoutMs,
+      abortSignal: commandAbort.signal,
+    })
+      .then((result): Outcome => ({ kind: 'result', result }))
+      .catch((error: unknown): Outcome => {
+        // Cancellation-triggered adapter rejections still use the cross-adapter
+        // 124/130 result contract. Unrelated executor failures propagate to the
+        // ToolExecutor, which converts thrown tool errors into ToolResult values.
+        if (termination !== undefined) {
+          return {
+            kind: 'result',
+            result: {
+              stdout: '',
+              stderr: '',
+              exitCode: termination === 'timeout' ? 124 : 130,
+            },
+          }
+        }
+        throw error
+      })
+
+    if (signal?.aborted) terminate('abort')
+    timeoutTimer = setTimeout(() => terminate('timeout'), options.timeoutMs)
+
+    const outcome = await Promise.race([execution, backstop])
+    if (outcome.kind === 'backstop') {
+      return {
+        stdout: '',
+        stderr: '',
+        exitCode: outcome.reason === 'timeout' ? 124 : 130,
+      }
+    }
+    if (termination !== undefined) {
+      return {
+        ...outcome.result,
+        exitCode: termination === 'timeout' ? 124 : 130,
+      }
+    }
+    return outcome.result
+  } catch (error) {
+    // An executor is allowed by JavaScript to throw before returning its
+    // promise. Cancellation remains authoritative in that race too.
+    if (termination !== undefined) {
+      return {
+        stdout: '',
+        stderr: '',
+        exitCode: termination === 'timeout' ? 124 : 130,
+      }
+    }
+    throw error
+  } finally {
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
+    if (graceTimer !== undefined) clearTimeout(graceTimer)
+    signal?.removeEventListener('abort', onAbort)
+  }
 }
 
 /**

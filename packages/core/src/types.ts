@@ -11,6 +11,7 @@ import type {
   SchedulingStrategy,
   SchedulingWeights,
 } from './orchestrator/scheduler.js'
+import type { ShellExecutor } from './tool/shell/types.js'
 
 // ---------------------------------------------------------------------------
 // Content blocks
@@ -545,6 +546,13 @@ export interface ToolUseContext {
    */
   readonly abortController?: AbortController
   /**
+   * Effective executor for the built-in `bash` tool. Framework callers inject
+   * this from {@link AgentConfig.shellExecutor}; low-level tool callers may
+   * omit it to use `LocalShellExecutor`. A caller that invokes
+   * `bashTool.execute()` directly owns the executor lifecycle.
+   */
+  readonly shellExecutor?: ShellExecutor
+  /**
    * Working directory for filesystem-tool sandboxing.
    *
    * - `string` — built-in filesystem tools (`file_read`, `file_write`,
@@ -997,6 +1005,17 @@ export interface AgentConfig {
    * key is auto-redacted from traces and dashboards.
    */
   readonly credentials?: Readonly<Record<string, string>>
+  /**
+   * Where a granted `bash` tool executes. Overrides
+   * {@link OrchestratorConfig.defaultShellExecutor} for this agent. The
+   * executor does not grant `bash`; `tools` / `toolPreset` still control
+   * availability.
+   *
+   * One instance is reused across bash calls within a run. If the same
+   * instance is shared by multiple agents, its `exec()` may be called
+   * concurrently and its lifecycle is reference-counted across those runs.
+   */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory used by built-in filesystem tools (`file_read`,
    * `file_write`, `file_edit`, `grep`, `glob`). Paths must be absolute and
@@ -2250,6 +2269,14 @@ export interface OrchestratorConfig {
    * then accept arbitrary absolute or relative paths).
    */
   readonly defaultCwd?: string | null
+  /**
+   * Default executor inherited by agents that do not set
+   * {@link AgentConfig.shellExecutor}. This changes where a granted `bash`
+   * command runs; it does not grant the tool. One shared instance may serve
+   * concurrent agents, so non-concurrent implementations must serialize
+   * `exec()` internally or be supplied as distinct per-agent instances.
+   */
+  readonly defaultShellExecutor?: ShellExecutor
   readonly onProgress?: (event: OrchestratorEvent) => void
   /** Best-effort online scoring of settled top-level runs. Disabled unless configured. */
   readonly evaluation?: import('./eval/online.js').OnlineEvaluationConfig
@@ -2652,6 +2679,8 @@ export interface CoordinatorConfig {
   readonly disallowedTools?: readonly string[]
   /** See {@link AgentConfig.onToolCall}. */
   readonly onToolCall?: ToolCallGate
+  /** See {@link AgentConfig.shellExecutor}. */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory used by the coordinator's filesystem tools.
    * Defaults to {@link OrchestratorConfig.defaultCwd}. Pass `null` to

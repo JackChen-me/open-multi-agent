@@ -388,6 +388,109 @@ Compound commands are segmented on shell separators (`&&`, `||`, `;`, `|`, subst
 
 The classifier is a **shallow heuristic, not a parser**; it can be fooled by obfuscation (variable indirection, base64-decode-then-exec, exotic quoting). It is convenience only: extend the tables, wrap it, or replace it entirely. See [`examples/patterns/risk-gated-bash.ts`](../packages/core/examples/patterns/risk-gated-bash.ts) for an end-to-end demo.
 
+## Shell Executors
+
+The granted `bash` built-in delegates command execution through a
+`ShellExecutor`. With no executor configured, OMA uses `LocalShellExecutor`,
+which preserves the existing `bash -c` behavior on the host:
+
+```typescript
+import { OpenMultiAgent } from '@open-multi-agent/core'
+import type { AgentConfig } from '@open-multi-agent/core'
+import type { ShellExecutor } from '@open-multi-agent/core/shell'
+
+declare const sharedRemoteExecutor: ShellExecutor
+declare const specialistExecutor: ShellExecutor
+
+const orchestrator = new OpenMultiAgent({
+  // Inherited by agents that do not set shellExecutor.
+  defaultShellExecutor: sharedRemoteExecutor,
+})
+
+const agent: AgentConfig = {
+  name: 'builder',
+  model: 'claude-sonnet-4-6',
+  tools: ['bash'],
+  // Per-agent value wins over the orchestrator default.
+  shellExecutor: specialistExecutor,
+}
+```
+
+The executor changes **where an already-granted command runs**. It does not
+grant `bash` or bypass `disallowedTools`; command execution still happens only
+after `onToolCall` allows it. The existing default-deny and per-call gate rules
+are unchanged. The tool wrapper also keeps the model-facing behavior uniform
+across executors: input validation, the 30-second default timeout,
+stdout/stderr formatting, output redaction, and
+`isError` on a nonzero exit code.
+
+The public type contract is available from `@open-multi-agent/core/shell` and
+has no runtime imports:
+
+```typescript
+interface ShellExecutor {
+  start?(): Promise<void>
+  exec(command: string, options: ShellExecOptions): Promise<ShellExecResult>
+  dispose?(): Promise<void>
+}
+```
+
+`ShellExecOptions` contains `cwd`, `timeoutMs`, and `abortSignal`.
+`ShellExecResult` contains `stdout`, `stderr`, and `exitCode`. Executors must
+use exit code `124` for timeout, `130` for abort, and `127` when the process or
+remote command could not be started. The tool wrapper adds a short deadline
+backstop so an executor that ignores timeout or abort cannot stall the tool
+loop indefinitely, but implementations still own prompt cancellation and
+termination of the process, job, or remote session they control.
+
+### Lifecycle and concurrent use
+
+One executor instance represents one reusable session:
+
+- OMA calls `start()` lazily, immediately before the first allowed `bash`
+  execution in a run. A granted tool that is never called (or is denied by
+  `onToolCall`) creates no session. Later shell calls in that run reuse it.
+- OMA always attempts `dispose()` when the run succeeds, fails, is aborted, or
+  a streaming consumer stops early. If `start()` partially allocates resources
+  and then rejects, OMA attempts `dispose()` too.
+- If overlapping runs share the same executor instance (as agents inheriting
+  one `defaultShellExecutor` do), OMA reference-counts them: one `start()`, then
+  one `dispose()` after the final run finishes. `exec()` may be called
+  concurrently, including when one model turn requests multiple shell calls.
+  An executor that cannot run commands concurrently must serialize internally;
+  use distinct per-agent instances when each agent needs its own session.
+- A process crash cannot execute JavaScript cleanup. Remote adapters should
+  also configure a provider-side TTL, lease expiry, or out-of-band reaper for
+  crash recovery.
+
+These lifecycle calls belong to Agent/Orchestrator runs. If application code
+invokes the low-level exported `bashTool.execute()` directly, that caller owns
+`start()` / `dispose()` around its tool calls.
+
+`LocalShellExecutor` is stateless. It keeps the existing safe environment
+allowlist, captures stdout/stderr, runs the command in a separate process group
+on POSIX, and kills the process tree on timeout or abort. It executes with the
+host Node.js process's permissions: **it is not a sandbox or security
+boundary**. A custom executor is only as isolated as the environment and
+adapter implementation behind it; OMA does not ship Docker, VM, or hosted
+sandbox adapters in core.
+
+### Host and remote filesystems diverge
+
+> **A remote shell executor does not move the built-in filesystem tools.**
+> `file_read`, `file_write`, `file_edit`, `grep`, and `glob` still operate on
+> the host inside `AgentConfig.cwd` / `defaultCwd`. The `cwd` passed to `bash`
+> is interpreted inside the executor's environment. For example, `file_write`
+> may create `report.md` in the host `.agent-workspace`, while a following
+> remote `bash` call to `wc -l report.md` sees no such file. Unless the
+> application provides its own synchronization layer, do not co-grant the
+> host filesystem tools to a remote-shell agent, or explicitly design around
+> the two separate filesystems.
+
+Shell executors apply only inside the normal LLM runner tool loop. Process and
+ACP agent backends replace that loop and continue to manage their own command
+execution and `cwd`; `shellExecutor` does not affect them.
+
 ## Filesystem Working Directory
 
 Built-in filesystem tools (`file_read`, `file_write`, `file_edit`, `grep`, `glob`) are sandboxed to a per-agent working directory. Paths must be absolute and resolve inside that directory; symlinks are resolved before the check so they cannot escape the configured root.
@@ -438,7 +541,10 @@ const agent: AgentConfig = {
 
 **Auto-creation.** The sandbox root is `mkdir -p`'d on first write, so callers do not need to pre-create `.agent-workspace` (or any custom path).
 
-The `bash` tool runs in its own process group on POSIX, so timeouts and abort signals kill any backgrounded children rather than letting them outlive the parent.
+The default `LocalShellExecutor` runs `bash` in its own process group on POSIX,
+so timeouts and abort signals kill any backgrounded children rather than
+letting them outlive the parent. Custom executors own equivalent cleanup in
+their execution environment.
 
 ## Custom Tools
 

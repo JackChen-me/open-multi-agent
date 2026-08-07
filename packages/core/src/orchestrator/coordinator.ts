@@ -526,6 +526,8 @@ export function buildCoordinatorBaseConfig(
     tools: coordinatorOverrides?.tools,
     disallowedTools: coordinatorOverrides?.disallowedTools,
     onToolCall: coordinatorOverrides?.onToolCall ?? config.onToolCall,
+    shellExecutor:
+      coordinatorOverrides?.shellExecutor ?? config.defaultShellExecutor,
     cwd: coordinatorOverrides?.cwd === undefined
       ? config.defaultCwd
       : coordinatorOverrides.cwd,

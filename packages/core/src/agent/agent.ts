@@ -207,6 +207,9 @@ export class Agent {
       allowedTools: this.config.tools,
       disallowedTools: this.config.disallowedTools,
       ...(this.config.onToolCall !== undefined ? { onToolCall: this.config.onToolCall } : {}),
+      ...(this.config.shellExecutor !== undefined
+        ? { shellExecutor: this.config.shellExecutor }
+        : {}),
       cwd: this.config.cwd,
       agentName: this.name,
       agentRole: this.config.systemPrompt?.slice(0, 50) ?? 'assistant',
@@ -1066,6 +1069,9 @@ export class Agent {
         model: this.config.model!,
       },
       abortSignal,
+      ...(this.config.shellExecutor !== undefined
+        ? { shellExecutor: this.config.shellExecutor }
+        : {}),
       cwd: this.config.cwd === undefined ? defaultWorkspaceDir() : this.config.cwd,
       ...(this.config.credentials !== undefined ? { credentials: this.config.credentials } : {}),
     }

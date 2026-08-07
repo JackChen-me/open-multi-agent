@@ -303,9 +303,12 @@ your model provider, so grant read and exec access deliberately. Tools may keep
 application-owned data separate while returning text, image, or file content
 through `modelOutput`; see the [tool configuration guide](../../docs/tool-configuration.md#rich-image-and-file-results).
 Filesystem tools stay within the configured `cwd`; granted `bash` is not
-sandboxed. Secrets are redacted from traces, shell output, and Viewer payloads
-by default, but result messages and checkpoints have their own persistence
-boundary.
+sandboxed. Its execution target can be replaced through a
+[`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors),
+while the default `LocalShellExecutor` preserves host execution and is not a
+security boundary. Secrets are redacted from traces, shell output, and Viewer
+payloads by default, but result messages and checkpoints have their own
+persistence boundary.
 
 ### Observability
 

@@ -52,6 +52,8 @@ import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import { classifyRunFailure } from '../observability/status.js'
 import type { ToolRegistry } from '../tool/framework.js'
 import type { ToolExecutor } from '../tool/executor.js'
+import type { ShellExecutor } from '../tool/shell/types.js'
+import { RunScopedShellExecutor } from '../tool/shell/lifecycle.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import {
   AGENT_FRAMEWORK_DISALLOWED,
@@ -147,6 +149,8 @@ export interface RunnerOptions {
   readonly disallowedTools?: readonly string[]
   /** Optional per-call tool gate inherited from agent or orchestrator config. */
   readonly onToolCall?: ToolCallGate
+  /** Effective execution target for the granted `bash` built-in. */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory passed to built-in filesystem tools via `ToolUseContext.cwd`.
    * `null` disables the sandbox; `undefined` falls back to
@@ -982,6 +986,10 @@ export class AgentRunner implements AgentBackend {
       }
     }
     const loopAction = this.options.loopDetection?.onLoopDetected ?? 'warn'
+    const runShellExecutor = this.options.shellExecutor === undefined
+      ? undefined
+      : new RunScopedShellExecutor(this.options.shellExecutor)
+    let streamError: Error | undefined
 
     try {
       // -----------------------------------------------------------------
@@ -991,7 +999,10 @@ export class AgentRunner implements AgentBackend {
         if (phase === 'completed') break
 
         if (phase === 'executing_tools') {
-          const toolContext: ToolUseContext = this.buildToolContext(options)
+          const toolContext: ToolUseContext = this.buildToolContext(
+            options,
+            runShellExecutor,
+          )
           const executions = await Promise.all(pendingToolCalls.map(async (pending, index) => {
             if (pending.commit) {
               return { commit: pending.commit, shouldCommit: true } satisfies ToolExecution
@@ -1319,8 +1330,24 @@ export class AgentRunner implements AgentBackend {
         await persistCheckpoint()
       }
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err))
-      yield { type: 'error', data: error } satisfies StreamEvent
+      streamError = err instanceof Error ? err : new Error(String(err))
+    } finally {
+      try {
+        await runShellExecutor?.release()
+      } catch (err) {
+        const cleanupError = err instanceof Error ? err : new Error(String(err))
+        if (streamError !== undefined) {
+          throw new AggregateError(
+            [streamError, cleanupError],
+            'Agent run failed and shell executor cleanup also failed.',
+          )
+        }
+        throw cleanupError
+      }
+    }
+
+    if (streamError !== undefined) {
+      yield { type: 'error', data: streamError } satisfies StreamEvent
       return
     }
 
@@ -1793,7 +1820,10 @@ export class AgentRunner implements AgentBackend {
    * Build the {@link ToolUseContext} passed to every tool execution.
    * Identifies this runner as the invoking agent.
    */
-  private buildToolContext(options: RunOptions = {}): ToolUseContext {
+  private buildToolContext(
+    options: RunOptions = {},
+    shellExecutor?: ShellExecutor,
+  ): ToolUseContext {
     return {
       agent: {
         name: this.options.agentName ?? 'runner',
@@ -1801,6 +1831,9 @@ export class AgentRunner implements AgentBackend {
         model: this.options.model,
       },
       abortSignal: options.abortSignal ?? this.options.abortSignal,
+      ...(shellExecutor !== undefined
+        ? { shellExecutor }
+        : {}),
       cwd: this.options.cwd === undefined ? defaultWorkspaceDir() : this.options.cwd,
       ...(options.runId !== undefined ? { runId: options.runId } : {}),
       ...(options.taskId !== undefined ? { taskId: options.taskId } : {}),

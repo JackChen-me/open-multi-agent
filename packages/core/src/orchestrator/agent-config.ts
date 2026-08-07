@@ -25,6 +25,7 @@ export interface AgentDefaultsSource {
   readonly defaultBaseURL?: OrchestratorConfig['defaultBaseURL']
   readonly defaultApiKey?: OrchestratorConfig['defaultApiKey']
   readonly defaultCwd?: OrchestratorConfig['defaultCwd']
+  readonly defaultShellExecutor?: OrchestratorConfig['defaultShellExecutor']
   readonly onToolCall?: OrchestratorConfig['onToolCall']
 }
 
@@ -37,6 +38,7 @@ export function applyAgentDefaults(config: AgentConfig, src: AgentDefaultsSource
     baseURL: config.baseURL ?? src.defaultBaseURL,
     apiKey: config.apiKey ?? src.defaultApiKey,
     cwd: config.cwd === undefined ? src.defaultCwd : config.cwd,
+    shellExecutor: config.shellExecutor ?? src.defaultShellExecutor,
     onToolCall: config.onToolCall ?? src.onToolCall,
   }
 }

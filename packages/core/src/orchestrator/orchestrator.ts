@@ -344,8 +344,8 @@ function resolveRunBudgets(
  */
 export class OpenMultiAgent {
   private readonly config: Required<
-    Omit<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
-  > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
+    Omit<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'defaultShellExecutor' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
+  > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'defaultShellExecutor' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
 
   private readonly teams: Map<string, Team> = new Map()
   private readonly hasConfiguredCustomExecutionRouter: boolean
@@ -426,6 +426,7 @@ export class OpenMultiAgent {
       // <cwd>/.agent-workspace". An explicit `null` propagates through to
       // disable the filesystem sandbox; a string sets a custom sandbox root.
       defaultCwd: config.defaultCwd === undefined ? defaultWorkspaceDir() : config.defaultCwd,
+      defaultShellExecutor: config.defaultShellExecutor,
       maxTokenBudget: config.maxTokenBudget,
       maxCostBudget: config.maxCostBudget,
       estimateCost: config.estimateCost,
@@ -2525,6 +2526,7 @@ export class OpenMultiAgent {
       defaultBaseURL: this.config.defaultBaseURL,
       defaultApiKey: this.config.defaultApiKey,
       defaultCwd: this.config.defaultCwd,
+      defaultShellExecutor: this.config.defaultShellExecutor,
       onToolCall: this.config.onToolCall,
       maxConcurrency: this.config.maxConcurrency,
     }
