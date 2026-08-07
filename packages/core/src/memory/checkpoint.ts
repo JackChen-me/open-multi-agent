@@ -55,7 +55,7 @@ export class Checkpoint {
             : { runId: this.runId }),
         }
       : snapshot
-    const storedRunId = stored.version === 2 ? stored.identity.runId : stored.runId
+    const storedRunId = stored.version === 1 ? stored.runId : stored.identity.runId
     await this.store.set(this.key, JSON.stringify(stored), {
       namespace: 'checkpoint',
       version: stored.version,
@@ -95,7 +95,11 @@ export class Checkpoint {
   private static isSnapshot(value: unknown): value is CheckpointSnapshot {
     if (value === null || typeof value !== 'object') return false
     const snapshot = value as Record<string, unknown>
-    if (snapshot['version'] !== 1 && snapshot['version'] !== 2) return false
+    if (
+      snapshot['version'] !== 1
+      && snapshot['version'] !== 2
+      && snapshot['version'] !== 3
+    ) return false
     if (
       snapshot['mode'] !== 'runTeam'
       && snapshot['mode'] !== 'runTasks'
@@ -111,7 +115,7 @@ export class Checkpoint {
       }
     }
 
-    if (snapshot['version'] === 2) {
+    if (snapshot['version'] !== 1) {
       const identity = snapshot['identity']
       if (identity === null || typeof identity !== 'object') return false
       const record = identity as Record<string, unknown>
@@ -119,6 +123,17 @@ export class Checkpoint {
       if (!Number.isInteger(record['attempt']) || (record['attempt'] as number) < 1) return false
       if (typeof record['lastTraceId'] !== 'string') return false
       if (typeof record['lastRootSpanId'] !== 'string') return false
+    }
+
+    if (snapshot['version'] === 3) {
+      const inFlightTasks = snapshot['inFlightTasks']
+      if (!Array.isArray(inFlightTasks)) return false
+      const taskIds = new Set<string>()
+      for (const state of inFlightTasks) {
+        if (!Checkpoint.isInFlightTask(state)) return false
+        if (taskIds.has(state.taskId)) return false
+        taskIds.add(state.taskId)
+      }
     }
 
     const queue = snapshot['queue']
@@ -131,5 +146,95 @@ export class Checkpoint {
       if (!Array.isArray(queueRecord['planRevisions'])) return false
     }
     return true
+  }
+
+  private static isInFlightTask(value: unknown): value is {
+    readonly taskId: string
+  } {
+    if (value === null || typeof value !== 'object') return false
+    const state = value as Record<string, unknown>
+    if (typeof state['taskId'] !== 'string' || state['taskId'].length === 0) return false
+    if (typeof state['assignee'] !== 'string' || state['assignee'].length === 0) return false
+    if (
+      state['phase'] !== 'awaiting_model'
+      && state['phase'] !== 'executing_tools'
+      && state['phase'] !== 'completed'
+    ) return false
+    if (!Array.isArray(state['conversationMessages'])) return false
+    if (!Array.isArray(state['messages'])) return false
+    if (!Array.isArray(state['toolCalls'])) return false
+    if (!Number.isInteger(state['turns']) || (state['turns'] as number) < 0) return false
+    if (!Checkpoint.isTokenUsage(state['tokenUsage'])) return false
+    for (const flag of ['loopWarned', 'loopDetected', 'budgetExceeded']) {
+      if (state[flag] !== undefined && typeof state[flag] !== 'boolean') return false
+    }
+
+    const pending = state['pendingToolCalls']
+    if (state['phase'] === 'executing_tools') {
+      if (!Array.isArray(pending) || pending.length === 0) return false
+      if (!pending.every(item => Checkpoint.isPendingToolCall(item))) return false
+      if (
+        state['pendingToolResultText'] !== undefined
+        && typeof state['pendingToolResultText'] !== 'string'
+      ) return false
+    } else if (pending !== undefined) {
+      return false
+    } else if (state['pendingToolResultText'] !== undefined) {
+      return false
+    }
+    if (state['phase'] === 'completed' && typeof state['finalOutput'] !== 'string') return false
+    if (state['phase'] !== 'completed' && state['finalOutput'] !== undefined) return false
+    return true
+  }
+
+  private static isPendingToolCall(value: unknown): boolean {
+    if (value === null || typeof value !== 'object') return false
+    const pending = value as Record<string, unknown>
+    const call = pending['call']
+    if (call === null || typeof call !== 'object') return false
+    const callRecord = call as Record<string, unknown>
+    if (callRecord['type'] !== 'tool_use') return false
+    if (typeof callRecord['id'] !== 'string' || callRecord['id'].length === 0) return false
+    if (typeof callRecord['name'] !== 'string' || callRecord['name'].length === 0) return false
+    if (!Checkpoint.isRecord(callRecord['input'])) return false
+
+    const commit = pending['commit']
+    if (commit === undefined) return true
+    if (commit === null || typeof commit !== 'object') return false
+    const commitRecord = commit as Record<string, unknown>
+    const result = commitRecord['result']
+    if (result === null || typeof result !== 'object') return false
+    const resultRecord = result as Record<string, unknown>
+    if (resultRecord['type'] !== 'tool_result') return false
+    if (resultRecord['tool_use_id'] !== callRecord['id']) return false
+    if (typeof resultRecord['content'] !== 'string') return false
+    if (resultRecord['is_error'] !== undefined && typeof resultRecord['is_error'] !== 'boolean') {
+      return false
+    }
+
+    const toolCall = commitRecord['record']
+    if (toolCall === null || typeof toolCall !== 'object') return false
+    const toolCallRecord = toolCall as Record<string, unknown>
+    if (toolCallRecord['toolName'] !== callRecord['name']) return false
+    if (!Checkpoint.isRecord(toolCallRecord['input'])) return false
+    if (typeof toolCallRecord['output'] !== 'string') return false
+    if (!Number.isFinite(toolCallRecord['duration']) || (toolCallRecord['duration'] as number) < 0) {
+      return false
+    }
+    return commitRecord['delegationUsage'] === undefined
+      || Checkpoint.isTokenUsage(commitRecord['delegationUsage'])
+  }
+
+  private static isTokenUsage(value: unknown): boolean {
+    if (value === null || typeof value !== 'object') return false
+    const record = value as Record<string, unknown>
+    return Number.isFinite(record['input_tokens'])
+      && (record['input_tokens'] as number) >= 0
+      && Number.isFinite(record['output_tokens'])
+      && (record['output_tokens'] as number) >= 0
+  }
+
+  private static isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
   }
 }

@@ -20,8 +20,9 @@
  * (`checkpoint: { store: new FileStore(path) }`) and leave shared memory on a
  * fast {@link InMemoryStore}: a separate checkpoint store self-embeds the
  * shared-memory snapshot, so resume rebuilds everything from the one file while
- * durability I/O stays at checkpoint cadence (once per completed task) instead
- * of on every agent memory write. Using it as `sharedMemoryStore` also works
+ * durability I/O stays at checkpoint cadence (safe runner boundaries and task
+ * completion) instead of on every agent memory write. Using it as
+ * `sharedMemoryStore` also works
  * and is durable, but then every shared-memory write flushes the whole file.
  *
  * **Scope.** Single Node process at a time — there is no cross-process file

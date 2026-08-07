@@ -333,7 +333,7 @@ import type { ToolCallContext, ToolCallDecision } from '@open-multi-agent/core'
 const orchestrator = new OpenMultiAgent({
   // Orchestrator-level default, inherited by any agent that sets no gate of its own.
   onToolCall: async (ctx: ToolCallContext): Promise<ToolCallDecision> => {
-    // ctx: { toolName, input (post-validation), agentName, consequential?, runId?, taskId? }
+    // ctx: { toolName, input (post-validation), agentName, consequential?, runId?, taskId?, toolCallId? }
     if (ctx.toolName !== 'bash') return { action: 'allow' }
     if (/^\s*rm\b/.test(String(ctx.input.command))) {
       return { action: 'deny', reason: 'rm is blocked' }
@@ -349,6 +349,10 @@ Key semantics:
 - **Human-in-the-loop lives inside your callback.** `await` your own CLI prompt, Slack button, or web dialog, then return `allow` or `deny`. The framework prescribes no review channel, keeping the surface small.
 - **Agent overrides orchestrator.** `AgentConfig.onToolCall` beats `OrchestratorConfig.onToolCall` for that agent, so a team can set a default policy while one specialist tightens or relaxes it. A standalone `new Agent({ ..., onToolCall })` wires the gate straight into its executor.
 - **Runs after the name-based grant.** Default-deny / allowlist / denylist resolution runs **first**; a tool that is not granted is refused before the gate is reached, so the gate only ever sees calls to already-reachable tools. Custom tools and MCP tools route through the same executor, so they are gated too.
+- **The model-issued call ID is stable across recovery.** `toolCallId` identifies
+  this invocation. If an uncommitted call must run again after checkpoint
+  restore, it keeps the same ID; a committed result is replayed without running
+  the gate or tool again. See [checkpoint recovery](checkpoint.md#mid-task-tool-recovery).
 - **Orthogonal to task dispatch approval.** `OrchestratorConfig.onApproval` gates legacy task rounds and `onTaskDispatch` gates one ready task before dispatch; `onToolCall` gates a single tool invocation during execution. They operate at different layers and compose. The two task-level approval modes are mutually exclusive with each other.
 - **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny'`, and (on deny) a `gateReason` that is redacted like other sensitive trace text, so `onTrace` consumers can audit every decision.
 

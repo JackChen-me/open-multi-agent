@@ -176,9 +176,12 @@ This prevents a task from being reported as skipped while its agent continues
 running. Budget state is checked before dispatch and again after each completion.
 Crossing a budget stops new tasks; already-started work still settles.
 
-Checkpointing remains per completion. Writes are serialized through the
-existing save chain, and restore does not rerun tasks already recorded as
-completed.
+Checkpointing persists safe built-in-runner turn/tool boundaries as well as
+task completions. Writes are serialized through the existing save chain;
+restore skips tasks already recorded as completed, replays committed tool
+results without re-executing them, and conservatively runs calls that have no
+commit record. External agent backends remain task-grained because they own
+their private execution loops.
 
 ## Progress-event migration
 

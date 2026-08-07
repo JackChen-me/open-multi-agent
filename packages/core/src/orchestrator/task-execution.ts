@@ -187,7 +187,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
   // Best-effort: a checkpoint write must never take down the run it protects.
   // Both snapshot construction and the store write are guarded, so a failing
   // store (e.g. a transient Redis/SQLite error) is surfaced via `onProgress`
-  // and the run continues — the next completed task retries the write.
+  // and the run continues — the next safe runner or task boundary retries it.
   const save = async (): Promise<void> => {
     const sharedMem = ctx.team.getSharedMemoryInstance()
     const completedTaskResults = queue.getByStatus('completed').map((task) => {
@@ -208,7 +208,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
     })
 
     const snapshot: CheckpointSnapshot = {
-      version: 2,
+      version: 3,
       mode: active.mode,
       createdAt: new Date().toISOString(),
       ...(ctx.metadata !== undefined ? { metadata: ctx.metadata } : {}),
@@ -221,7 +221,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       ...(active.goal !== undefined ? { goal: active.goal } : {}),
       queue: queue.snapshot(),
       // When the checkpoint store IS the shared-memory store, the entries are
-      // already durable there — embedding a full snapshot on every task would
+      // already durable there — embedding a full snapshot at every boundary would
       // be ~O(N^2) write volume. Persist only the turn counter (cheap) so TTL
       // expiry stays correct; restore reads the entries straight from the store.
       ...(sharedMem && !active.reusesSharedMemoryStore
@@ -230,6 +230,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       messageBus: ctx.team.snapshotMessageBus(),
       ...(sharedMem ? { turnCount: sharedMem.getTurnCount() } : {}),
       completedTaskResults,
+      inFlightTasks: [...active.inFlightTasks.values()],
     }
 
     await active.manager.save(snapshot)
@@ -986,10 +987,20 @@ export async function executeQueue(
           return
         }
 
+        const restoredRunnerState = ctx.checkpoint?.inFlightTasks.get(task.id)
+        const onRunnerCheckpoint = ctx.checkpoint
+          ? async (state: Parameters<NonNullable<RunOptions['onCheckpoint']>>[0]) => {
+              ctx.checkpoint!.inFlightTasks.set(task.id, state)
+              await saveRunCheckpoint(queue, ctx)
+            }
+          : undefined
+
         // Trace + abort + team tool context (delegate_to_agent)
         const traceBase: Partial<RunOptions> = {
           identity: ctx.identity,
           runId: ctx.runId,
+          taskId: task.id,
+          traceAgent: assignee,
           ...(ctx.traceRuntime ? {
             traceRuntime: ctx.traceRuntime,
             traceSpan: taskSpan ?? ctx.traceRuntime.root,
@@ -997,8 +1008,6 @@ export async function executeQueue(
           ...(config.onTrace
             ? {
                 onTrace: config.onTrace,
-                taskId: task.id,
-                traceAgent: assignee,
                 ...(taskSpanId ? { traceParentId: taskSpanId } : {}),
                 ...(agentSpanId ? { traceSpanId: agentSpanId } : {}),
               }
@@ -1008,6 +1017,8 @@ export async function executeQueue(
         const runOptions: Partial<RunOptions> = {
           ...traceBase,
           team: buildTaskAgentTeamInfo(ctx, task.id, traceBase, 0, [assignee]),
+          ...(restoredRunnerState ? { resumeState: restoredRunnerState } : {}),
+          ...(onRunnerCheckpoint ? { onCheckpoint: onRunnerCheckpoint } : {}),
         }
         const workerRoute = routeMatches(ctx.modelRouting, {
           phase: 'worker',
@@ -1064,6 +1075,12 @@ export async function executeQueue(
 
         const result = await executeWithRetry(
           async (attempt) => {
+            if (attempt > 1 && ctx.checkpoint) {
+              ctx.checkpoint.inFlightTasks.delete(task.id)
+              await saveRunCheckpoint(queue, ctx)
+            }
+            const { resumeState: _resumeState, ...freshRunOptions } = runOptions
+            const attemptRunOptions = attempt === 1 ? runOptions : freshRunOptions
             const activeRouteIndex = Math.min(routeIndex, routedAgents.length - 1)
             const routedAgent = routedAgents.length > 0
               ? routedAgents[activeRouteIndex]
@@ -1077,13 +1094,13 @@ export async function executeQueue(
                 ? await pool.runEphemeral(
                     routedAgent,
                     prompt,
-                    { ...runOptions, traceAgentAttempt: attempt },
+                    { ...attemptRunOptions, traceAgentAttempt: attempt },
                     streamCallback,
                   )
                 : await pool.run(
                     assignee,
                     prompt,
-                    { ...runOptions, traceAgentAttempt: attempt },
+                    { ...attemptRunOptions, traceAgentAttempt: attempt },
                     streamCallback,
                   )
               attemptUsages.push({ usage: attemptResult.tokenUsage, config: activeConfig })
@@ -1167,6 +1184,7 @@ export async function executeQueue(
             output: message,
             error,
           })
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           queue.fail(task.id, message)
           const classified = classifyRunFailure(error, { kind: 'budget' })
           taskSpan?.event('budget_exhausted', {})
@@ -1212,6 +1230,7 @@ export async function executeQueue(
             sharedMem.advanceTurn()
           }
 
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           const completedTask = queue.complete(task.id, effective.output)
           completedThisRound.push(completedTask)
           await saveRunCheckpoint(queue, ctx)
@@ -1237,6 +1256,7 @@ export async function executeQueue(
           })
         } else {
           await applyRecoveryAtOutcome(queue, task, result, undefined, ctx)
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           queue.fail(task.id, result.output)
           taskSpan?.end({
             status: result.status ?? statusOnly('error', result.output),

@@ -192,6 +192,7 @@ export class ToolExecutor {
           ...(tool.consequential === true ? { consequential: true } : {}),
           ...(context.runId !== undefined ? { runId: context.runId } : {}),
           ...(context.taskId !== undefined ? { taskId: context.taskId } : {}),
+          ...(context.toolCallId !== undefined ? { toolCallId: context.toolCallId } : {}),
         })
       } catch (err) {
         return this.errorResult(`Tool "${tool.name}" onToolCall hook threw an error: ${this.errorMessage(err)}`)

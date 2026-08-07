@@ -393,6 +393,12 @@ export interface ToolUseContext {
   /** Task ID associated with this tool call, when available. */
   readonly taskId?: string
   /**
+   * Stable model-issued ID for this tool call. Mid-task checkpoint restore
+   * reuses the same ID when an uncommitted call must be executed again, so a
+   * consequential tool can use it as an external idempotency key.
+   */
+  readonly toolCallId?: string
+  /**
    * Per-agent scoped secrets for tool code to consume (API tokens, service
    * keys, etc.), sourced from {@link AgentConfig.credentials}. A tool reads
    * `context.credentials?.STRIPE_KEY` instead of closing over a module-level
@@ -423,6 +429,8 @@ export interface ToolCallContext {
   readonly consequential?: boolean
   readonly runId?: string
   readonly taskId?: string
+  /** Stable model-issued ID for this tool call, when available. */
+  readonly toolCallId?: string
 }
 
 /** Decision returned by the optional per-call tool gate. */
@@ -1306,9 +1314,9 @@ export interface RunTasksOptions extends RunIdentityOptions {
    */
   readonly maxCostBudget?: number
   /**
-   * Opt-in durable task checkpointing. When enabled, the orchestrator writes a
-   * checkpoint after each successfully completed task using the configured
-   * {@link MemoryStore}. Defaults to off.
+   * Opt-in durable checkpointing. When enabled, the orchestrator writes a
+   * checkpoint at safe in-flight agent boundaries and after each successfully
+   * completed task using the configured {@link MemoryStore}. Defaults to off.
    *
    * `true` uses the team's shared-memory store when available, otherwise a
    * private in-memory store for the run. Pass an object to provide a durable
@@ -2248,6 +2256,52 @@ export interface CompletedTaskCheckpoint {
   readonly agentResult?: Omit<AgentRunResult, 'error'>
 }
 
+/** A tool result durably recorded before an in-flight task completes. */
+export interface ToolCallCommitCheckpoint {
+  /** Result block replayed to the model without re-executing the tool. */
+  readonly result: ToolResultBlock
+  /** Public tool-call record carried into the eventual agent result. */
+  readonly record: ToolCallRecord
+  /** Nested-agent usage returned by tools such as `delegate_to_agent`. */
+  readonly delegationUsage?: TokenUsage
+}
+
+/** One model-requested tool call in an in-flight assistant turn. */
+export interface PendingToolCallCheckpoint {
+  readonly call: ToolUseBlock
+  /** Present only after the tool returned and its result was checkpointed. */
+  readonly commit?: ToolCallCommitCheckpoint
+}
+
+/**
+ * Serializable runner state for one task that has started but is not yet
+ * reflected in the queue's completed-task partition.
+ */
+export interface InFlightTaskCheckpoint {
+  readonly taskId: string
+  readonly assignee: string
+  /** The next safe action when this state is restored. */
+  readonly phase: 'awaiting_model' | 'executing_tools' | 'completed'
+  /** Full model context, including the task's initial user message. */
+  readonly conversationMessages: readonly LLMMessage[]
+  /** Messages produced by the runner, excluding the initial user message. */
+  readonly messages: readonly LLMMessage[]
+  readonly tokenUsage: TokenUsage
+  readonly toolCalls: readonly ToolCallRecord[]
+  /** Number of completed model turns. */
+  readonly turns: number
+  /** Present while an assistant tool-use turn is being committed. */
+  readonly pendingToolCalls?: readonly PendingToolCallCheckpoint[]
+  /** Optional warning text appended beside the pending tool results. */
+  readonly pendingToolResultText?: string
+  /** Final assistant output when `phase` is `completed`. */
+  readonly finalOutput?: string
+  /** Whether loop detection has already injected its first warning. */
+  readonly loopWarned?: boolean
+  readonly loopDetected?: boolean
+  readonly budgetExceeded?: boolean
+}
+
 interface CheckpointSnapshotBase {
   readonly mode: 'runTeam' | 'runTasks' | 'runFromPlan'
   readonly createdAt: string
@@ -2272,7 +2326,7 @@ export interface CheckpointSnapshotV1 extends CheckpointSnapshotBase {
   readonly runId?: string
 }
 
-/** Identity persisted by checkpoint schema v2. */
+/** Identity persisted by identity-aware checkpoint schemas (v2 and later). */
 export interface CheckpointRunIdentity {
   readonly runId: string
   readonly attempt: number
@@ -2280,14 +2334,21 @@ export interface CheckpointRunIdentity {
   readonly lastRootSpanId: string
 }
 
-/** Current checkpoint schema. */
+/** Legacy identity-aware checkpoint schema, retained for read compatibility. */
 export interface CheckpointSnapshotV2 extends CheckpointSnapshotBase {
   readonly version: 2
   readonly identity: CheckpointRunIdentity
 }
 
+/** Current checkpoint schema with mid-task runner recovery. */
+export interface CheckpointSnapshotV3 extends CheckpointSnapshotBase {
+  readonly version: 3
+  readonly identity: CheckpointRunIdentity
+  readonly inFlightTasks: readonly InFlightTaskCheckpoint[]
+}
+
 /** Full persisted checkpoint for a task-based run. */
-export type CheckpointSnapshot = CheckpointSnapshotV1 | CheckpointSnapshotV2
+export type CheckpointSnapshot = CheckpointSnapshotV1 | CheckpointSnapshotV2 | CheckpointSnapshotV3
 
 /**
  * Optional overrides for the temporary coordinator agent created by `runTeam`.

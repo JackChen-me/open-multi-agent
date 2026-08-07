@@ -11,6 +11,7 @@
 import type {
   AgentRunResult,
   CheckpointSnapshot,
+  InFlightTaskCheckpoint,
   ModelRoutingPolicy,
   OrchestratorConfig,
   RunIdentity,
@@ -185,5 +186,7 @@ export interface ActiveCheckpoint {
    * (avoids ~O(N^2) write volume) and persists only the turn counter.
    */
   readonly reusesSharedMemoryStore: boolean
+  /** Latest safe runner state for every task currently between queue boundaries. */
+  readonly inFlightTasks: Map<string, InFlightTaskCheckpoint>
   saveChain: Promise<void>
 }

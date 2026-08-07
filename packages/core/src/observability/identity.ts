@@ -134,13 +134,13 @@ export function createRunIdentity(options: RunIdentityOptions = {}): RunIdentity
   }
 }
 
-/** Create the next execution attempt from a v1 or v2 checkpoint. */
+/** Create the next execution attempt from a supported checkpoint snapshot. */
 export function createRestoreIdentity(
   snapshot: CheckpointSnapshot,
   options: RunIdentityOptions = {},
 ): RunIdentity {
   validateRunMetadata(options.metadata)
-  const checkpointRunId = snapshot.version === 2
+  const checkpointRunId = snapshot.version !== 1
     ? snapshot.identity.runId
     : snapshot.runId
 
@@ -157,7 +157,7 @@ export function createRestoreIdentity(
   const runId = checkpointRunId === undefined
     ? options.runId
     : checkpointRunId
-  const baseAttempt = snapshot.version === 2 ? snapshot.identity.attempt : 1
+  const baseAttempt = snapshot.version !== 1 ? snapshot.identity.attempt : 1
   const identity: RunIdentity = {
     runId: runId === undefined ? randomUUID() : validateRunId(runId),
     attempt: baseAttempt + 1,
@@ -165,7 +165,7 @@ export function createRestoreIdentity(
     rootSpanId: randomHex(8),
   }
 
-  if (snapshot.version === 2) {
+  if (snapshot.version !== 1) {
     return {
       ...identity,
       links: [{

@@ -29,7 +29,7 @@ Baseline: `6339ee50515e149eb1fb5a073f44024d3ab821a3`, including PR #384.
 | `@open-multi-agent/otel` | separate package root | `packages/otel/src` | official in-memory exporter suites |
 | `forceFlush` / `shutdown` | `TraceSink`; OTel sink | batching/composite/legacy/OTel implementations | concurrency, timeout, reentry suites |
 | diagnostics / stats | sink and file-store types | `sink.ts`, `file-store.ts` | payload-free diagnostic and counter tests |
-| checkpoint/restore identity | top-level run results and checkpoint v2 | `memory/checkpoint.ts`, `identity.ts`, orchestrator | v1 read, v2 continuation, runId-conflict tests |
+| checkpoint/restore identity | top-level run results and checkpoint v3 | `memory/checkpoint.ts`, `identity.ts`, orchestrator | v1/v2 read, v3 continuation, runId-conflict tests |
 
 The public contract is the exported type plus the implementation and its tests.
 The private design RFC is historical rationale, not a substitute for current
@@ -42,7 +42,7 @@ follow-up; OBS-5 only permits narrow correctness and compatibility fixes.
 |---|---|---|
 | Dashboard | static post-run task DAG artifact | live delivery, durable state, trace query |
 | TraceStore | best-effort TraceRecord append/query/delete/retention | authoritative run state, CAS, lease, resume |
-| CheckpointStore | task-grained execution snapshots used by `restore()` | telemetry retention or trace query |
+| CheckpointStore | safe-boundary execution snapshots used by `restore()` | telemetry retention or trace query |
 | Future RunStore | authoritative durable run state machine | implemented by this release |
 | OTel adapter | mapping OMA records to spans/events/links | global provider setup, SDK/exporter choice, collector, provider ownership |
 
@@ -169,9 +169,9 @@ does not claim it is browser-safe or attempt an unrelated root-export redesign.
 - Caller abort, whole-run timeout, provider failure, budget exhaustion, and
   approval rejection now have distinct outcomes; legacy `success` remains and
   derives from `status.code === 'ok'`.
-- Checkpoint schema v2 preserves logical identity across restore, increments the
-  attempt, starts a new trace, and links to the prior root. Schema v1 remains
-  readable.
+- Identity-aware checkpoint schemas preserve logical identity across restore,
+  increment the attempt, start a new trace, and link to the prior root. Schema
+  v1 and v2 remain readable; current v3 writes also carry in-flight runner state.
 - TraceRecord schema v2 adds start/event/end records, W3C-compatible IDs,
   structured errors, and DAG/delegation/synthesis/restore links.
 - `TraceSink`, `TraceExporter`, and `BatchingTraceSink` add bounded queueing,

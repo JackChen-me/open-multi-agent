@@ -414,7 +414,7 @@ export class Agent {
 
     try {
       // --- beforeRun hook ---
-      if (this.config.beforeRun) {
+      if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
         failureKind = 'callback'
         const hookCtx = this.buildBeforeRunHookContext(messages)
         const modified = await this.config.beforeRun(hookCtx)
@@ -748,7 +748,7 @@ export class Agent {
 
     try {
       // --- beforeRun hook ---
-      if (this.config.beforeRun) {
+      if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
         failureKind = 'callback'
         const hookCtx = this.buildBeforeRunHookContext(messages)
         const modified = await this.config.beforeRun(hookCtx)

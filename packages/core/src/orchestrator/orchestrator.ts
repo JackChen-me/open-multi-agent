@@ -2080,6 +2080,21 @@ export class OpenMultiAgent {
     if (!validation.valid) {
       throw new Error(`Invalid checkpoint task dependencies: ${validation.errors.join(' ')}`)
     }
+    const restoredInFlightTasks = snapshot.version === 3 ? snapshot.inFlightTasks : []
+    for (const state of restoredInFlightTasks) {
+      const task = queue.get(state.taskId)
+      if (!task || !snapshot.queue.inProgress.includes(state.taskId)) {
+        throw new Error(
+          `Invalid checkpoint in-flight state: task "${state.taskId}" is not in the queue's in-progress partition.`,
+        )
+      }
+      if (task.assignee !== state.assignee) {
+        throw new Error(
+          `Invalid checkpoint in-flight state: task "${state.taskId}" belongs to ` +
+            `"${task.assignee ?? 'unassigned'}", not "${state.assignee}".`,
+        )
+      }
+    }
     const agentResults = this.agentResultsFromCheckpoint(snapshot, queue)
     const checkpointForResume: ActiveCheckpoint | undefined = activeCheckpoint
       ? {
@@ -2087,6 +2102,7 @@ export class OpenMultiAgent {
           mode: snapshot.mode,
           ...(snapshot.goal !== undefined ? { goal: snapshot.goal } : {}),
           runId: identity.runId,
+          inFlightTasks: new Map(restoredInFlightTasks.map((state) => [state.taskId, state])),
         }
       : undefined
 
@@ -2649,6 +2665,7 @@ export class OpenMultiAgent {
       ...(goal !== undefined ? { goal } : {}),
       ...(options.runId !== undefined ? { runId: options.runId } : {}),
       reusesSharedMemoryStore: sharedStore !== undefined && store === sharedStore,
+      inFlightTasks: new Map(),
       saveChain: Promise.resolve(),
     }
   }
