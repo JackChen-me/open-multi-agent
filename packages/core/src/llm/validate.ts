@@ -13,6 +13,7 @@
 
 import type { LLMMessage } from '../types.js'
 import { InvalidMessageError } from '../errors.js'
+import { copyToolResultContent } from '../tool/result.js'
 
 function describeType(value: unknown): string {
   if (value === null) return 'null'
@@ -21,15 +22,12 @@ function describeType(value: unknown): string {
 }
 
 /**
- * Assert that `messages` satisfies the {@link LLMMessage}[] contract every
- * adapter relies on: an array of `{ role, content }` objects whose `content` is
- * an array of content blocks (objects carrying a string `type`). Throws
- * {@link InvalidMessageError} naming the offending index on the first violation.
- *
- * Intentionally narrow: it validates only the array/shape invariants that
- * otherwise crash opaquely during conversion, not `role` or block-internal
- * fields. It rejects invalid input rather than coercing it, so the caller's bug
- * stays visible instead of being silently reshaped.
+ * Assert that `messages` satisfies the shared shape every adapter relies on:
+ * an array of `{ role, content }` objects whose `content` is an array of content
+ * blocks. Rich `tool_result` content receives full nested validation because a
+ * malformed media part otherwise fails differently across provider SDKs.
+ * Other block internals remain the responsibility of their existing adapters.
+ * Invalid input is rejected rather than coerced or silently reshaped.
  */
 export function assertValidMessages(messages: readonly LLMMessage[]): void {
   if (!Array.isArray(messages)) {
@@ -59,6 +57,33 @@ export function assertValidMessages(messages: readonly LLMMessage[]): void {
         throw new InvalidMessageError(
           `messages[${i}].content[${j}] must be a content block with a string "type"`,
         )
+      }
+
+      const record = block as Record<string, unknown>
+      if (record['type'] === 'tool_result') {
+        if (typeof record['tool_use_id'] !== 'string') {
+          throw new InvalidMessageError(
+            `messages[${i}].content[${j}].tool_use_id must be a string`,
+          )
+        }
+        if (record['is_error'] !== undefined && typeof record['is_error'] !== 'boolean') {
+          throw new InvalidMessageError(
+            `messages[${i}].content[${j}].is_error must be a boolean when provided`,
+          )
+        }
+        try {
+          copyToolResultContent(
+            record['content'],
+            `messages[${i}].content[${j}].content`,
+          )
+        } catch (error) {
+          throw new InvalidMessageError(error instanceof Error ? error.message : String(error))
+        }
+        if (record['is_error'] === true && typeof record['content'] !== 'string') {
+          throw new InvalidMessageError(
+            `messages[${i}].content[${j}].content must be a string for an error tool result`,
+          )
+        }
       }
     }
   }

@@ -47,11 +47,19 @@ const agent: AgentConfig = {
 **Notes:**
 - Error tool results are never compressed.
 - Delegation `tool_result` blocks (from `delegate_to_agent`) are exempt — the parent agent always retains the full sub-agent output.
+- Rich image/file results use an estimated size for the threshold. Consumed
+  rich results can become a text marker; the newest rich result stays intact.
+- The `summarize` strategy replaces rich media bytes and URLs with descriptive
+  placeholders before asking the summary model to compress old turns.
 - Works alongside `contextStrategy`; combine both for maximum context headroom.
 
 ## Truncating Tool Output
 
-`maxToolOutputChars` caps the raw output length for every tool used by an agent. Outputs longer than the limit are truncated to a head + tail excerpt with a marker in between. This applies at execution time, before the result enters the conversation.
+`maxToolOutputChars` caps the raw output length for implicit string tool
+results. Outputs longer than the limit are truncated to a head + tail excerpt
+with a marker in between. Explicit rich `modelOutput` is not rewritten; resize
+or bound it inside the tool. This applies at execution time, before the result
+enters the conversation.
 
 ```typescript
 const agent: AgentConfig = {
@@ -103,4 +111,3 @@ Redacted reasoning (Anthropic safety-filtered) emits the placeholder `<thinking>
 - Some local OpenAI-compatible models may echo `<thinking>` text back into their assistant response, which can trip the loop detector. See [`examples/patterns/cross-provider-reasoning.ts`](../packages/core/examples/patterns/cross-provider-reasoning.ts) for the failure mode and mitigations.
 - Bedrock has `capabilities.echoesReasoning === 'own-issued'`: signed reasoning blocks (`reasoningContent.reasoningText.signature`) and redacted blocks (`reasoningContent.redactedContent`) round-trip natively on both `chat()` and `stream()`, in both inbound extraction and outbound serialization (see #223).
 - `'tool-use-only'` (DeepSeek V4) is the only capability where same-provider echo works **without** the user opting into `preserveReasoningAsText` — it's forced on internally because the DeepSeek API requires it.
-

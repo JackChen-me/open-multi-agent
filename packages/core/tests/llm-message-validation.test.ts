@@ -40,6 +40,55 @@ describe('assertValidMessages', () => {
     expect(() => assertValidMessages([{ role: 'user', content: [] }] as LLMMessage[])).not.toThrow()
   })
 
+  it('accepts valid rich tool-result content', () => {
+    expect(() => assertValidMessages([{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'call-1',
+        content: [
+          { type: 'text', text: 'preview' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+          },
+        ],
+      }],
+    }])).not.toThrow()
+  })
+
+  it('rejects malformed rich tool-result content before provider conversion', () => {
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'call-1',
+        content: [{
+          type: 'file',
+          filename: 'report.pdf',
+          source: { type: 'url', media_type: 'application/pdf', url: 'file:///tmp/report.pdf' },
+        }],
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(InvalidMessageError)
+    expect(() => assertValidMessages(invalid)).toThrow(/must use HTTP or HTTPS/)
+  })
+
+  it('requires error tool results to remain text-only', () => {
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'call-1',
+        is_error: true,
+        content: [{ type: 'text', text: 'failed' }],
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(/must be a string for an error tool result/)
+  })
+
   it('rejects a non-array messages list', () => {
     expect(() => assertValidMessages('nope' as unknown as LLMMessage[])).toThrow(InvalidMessageError)
     expect(() => assertValidMessages(null as unknown as LLMMessage[])).toThrow(/messages must be an array, got null/)

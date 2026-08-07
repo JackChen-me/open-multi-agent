@@ -30,6 +30,7 @@ import {
   FunctionCallingConfigMode,
   type Content,
   type FunctionDeclaration,
+  type FunctionResponsePart,
   type GenerateContentConfig,
   type GenerateContentResponse,
   type Part,
@@ -56,6 +57,7 @@ import {
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
+import { toolResultContentParts, toolResultText } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -160,17 +162,51 @@ function toGeminiContents(
 
         case 'tool_result': {
           const name = toolNameById.get(block.tool_use_id) ?? block.tool_use_id
+          if (typeof block.content === 'string') {
+            parts.push({
+              functionResponse: {
+                id: block.tool_use_id,
+                name,
+                response: {
+                  content: block.content,
+                  isError: block.is_error ?? false,
+                },
+              },
+            })
+            break
+          }
+
+          const responseParts: FunctionResponsePart[] = []
+          for (const part of toolResultContentParts(block.content)) {
+            if (part.type === 'text') continue
+            if (part.source.type === 'base64') {
+              responseParts.push({
+                inlineData: {
+                  mimeType: part.source.media_type,
+                  data: part.source.data,
+                  ...(part.type === 'file' ? { displayName: part.filename } : {}),
+                },
+              })
+            } else {
+              responseParts.push({
+                fileData: {
+                  mimeType: part.source.media_type,
+                  fileUri: part.source.url,
+                  ...(part.type === 'file' ? { displayName: part.filename } : {}),
+                },
+              })
+            }
+          }
+          const text = toolResultText(block.content)
           parts.push({
             functionResponse: {
               id: block.tool_use_id,
               name,
               response: {
-                content:
-                  typeof block.content === 'string'
-                    ? block.content
-                    : JSON.stringify(block.content),
+                content: text || `[${responseParts.length} tool-result attachment(s)]`,
                 isError: block.is_error ?? false,
               },
+              ...(responseParts.length > 0 ? { parts: responseParts } : {}),
             },
           })
           break

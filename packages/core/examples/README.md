@@ -59,6 +59,7 @@ Reusable shapes for common multi-agent problems.
 |---------|---------|
 | [`patterns/fan-out-aggregate`](patterns/fan-out-aggregate.ts) | MapReduce-style fan-out via `AgentPool.runParallel()`. |
 | [`patterns/structured-output`](patterns/structured-output.ts) | Zod-validated JSON output from an agent. |
+| [`patterns/rich-tool-results`](patterns/rich-tool-results.ts) | Keep application-owned tool data separate while returning image content to the model. |
 | [`patterns/task-retry`](patterns/task-retry.ts) | Per-task retry with exponential backoff. |
 | [`patterns/multi-perspective-code-review`](patterns/multi-perspective-code-review.ts) | Multiple reviewer agents in parallel, then synthesis. |
 | [`patterns/research-aggregation`](patterns/research-aggregation.ts) | Multi-source research collated by a synthesis agent. |

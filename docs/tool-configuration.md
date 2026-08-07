@@ -506,18 +506,19 @@ This is a **scoping convenience, not an isolation boundary**. Tool code runs in-
 
 ## Tool Output Control
 
-Long tool outputs can blow up conversation size and cost. Two controls work together.
+Long tool outputs can blow up conversation size and cost. The following
+validation and context controls compose with the rich-result contract.
 
 **Validation (optional).** Add `outputSchema` to catch malformed tool results before they are forwarded:
 
 > **Note — two different `outputSchema` fields.** The one on `defineTool()` /
 > `ToolDefinition` (shown below) validates a single **tool's** `ToolResult.data`
-> — it is always a `ZodSchema<string>` because tool output is serialised as
-> text. The `outputSchema` on [`AgentConfig`](../packages/core/examples/patterns/structured-output.ts)
+> — string tools use `ZodSchema<string>`, while tools with application-owned
+> object data can use the corresponding object schema. The `outputSchema` on
+> [`AgentConfig`](../packages/core/examples/patterns/structured-output.ts)
 > is different: it validates the **agent's final answer** as parsed JSON
 > against an arbitrary Zod schema (see _Structured output_ in `packages/core/examples/`).
-> Different types, different scopes — TypeScript won't warn you if you mix
-> them up, so pick the one that matches the layer you're working at.
+> Different scopes — pick the one that matches the layer you're working at.
 
 ```typescript
 const jsonTool = defineTool({
@@ -535,6 +536,116 @@ const jsonTool = defineTool({
   execute: async () => ({ data: '{"ok": true}' }),
 })
 ```
+
+### Rich image and file results
+
+`ToolResult` separates the value your application keeps from the content sent
+back to the model:
+
+```typescript
+const renderChart = defineTool({
+  name: 'render_chart',
+  description: 'Render a chart and return a preview.',
+  inputSchema: z.object({ metric: z.string() }),
+  outputSchema: z.object({ chartId: z.string(), storageKey: z.string() }),
+  execute: async ({ metric }) => ({
+    // Application-owned value: available to onToolResult; not serialized into
+    // the model conversation.
+    data: { chartId: 'chart-42', storageKey: `artifacts/${metric}.png` },
+
+    // Model-visible value: validated and copied before it enters the transcript.
+    modelOutput: [
+      { type: 'text', text: `Preview for ${metric}` },
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: pngBytes.toString('base64'),
+        },
+      },
+      {
+        type: 'file',
+        filename: 'report.pdf',
+        source: {
+          type: 'url',
+          media_type: 'application/pdf',
+          url: signedReportUrl,
+        },
+      },
+    ],
+  }),
+})
+```
+
+Existing `{ data: 'plain text' }` tools are unchanged: when `modelOutput` is
+omitted, the string in `data` follows the existing `maxOutputChars` behavior
+and is sent to the model. A non-string `data` value requires `modelOutput`; OMA
+never guesses a JSON serialization. Invalid content becomes a normal text error
+`ToolResult` (`isError: true`) so the tool loop keeps its existing error
+behavior. Error results remain text-only.
+
+`modelOutput` is either a string or a non-empty array of `text`, `image`, and
+`file` parts. Media sources are either raw base64 bytes (not a `data:` URL) or
+an absolute HTTP(S) reference and must include a MIME type without parameters.
+File parts also require a display filename. OMA defensively copies nested
+content at the tool boundary and again before callbacks can affect the model
+transcript; `data` remains application-owned and is not cloned.
+
+Provider conversion is faithful or explicit—media is never silently dropped:
+
+| Adapter family | Mapping | Deterministic local rejection |
+|---|---|---|
+| OpenAI Chat Completions, Azure OpenAI, Copilot, and built-in OpenAI-compatible adapters | Text stays in the `tool` message; attachments follow in a `user` message. Images accept inline data or URLs; files accept inline data. | File URL references. |
+| Anthropic | Images stay in `tool_result`; PDF files are adjacent document blocks. Inline data and URLs are accepted for those mapped types. | Unsupported image MIME types and non-PDF files. |
+| Gemini | Media maps to `functionResponse.parts` as `inlineData` or `fileData`. | No additional protocol-level rejection after shared validation. |
+| Bedrock Converse | Inline images and supported document formats map to native tool-result blocks. | URL media, unknown image MIME types, and unmapped document MIME types. |
+| `AISdkAdapter` | Media maps to AI SDK `file-data` or `file-url` content. | No additional protocol-level rejection after shared validation. |
+
+These are wire-format mappings, not a promise that every model behind an
+adapter accepts every mapped part. A selected model or OpenAI-compatible
+endpoint can still reject otherwise valid content; that provider error
+propagates instead of falling back to a text placeholder. Known unmappable
+parts throw the terminal `UnsupportedToolResultContentError` before the SDK
+request. Use a text-only `modelOutput` yourself when that is the desired
+fallback.
+
+Choose inline data versus references deliberately:
+
+- Inline base64 is self-contained, but it expands request bodies and is stored
+  in `AgentRunResult.messages` and task checkpoints. OMA does not impose a
+  framework byte cap; provider request and media limits still apply.
+- HTTP(S) references keep the transcript smaller, but the provider must be able
+  to fetch them. Treat signed URLs, query tokens, filenames, and referenced
+  content as data disclosed to the model provider.
+- `maxOutputChars` preserves its legacy meaning for implicit string results.
+  It does not rewrite explicit rich `modelOutput`; bound or resize rich payloads
+  in the tool before returning them.
+- Context summary paths replace old media with textual placeholders;
+  `compressToolResults` and `compact` can replace consumed rich results with a
+  marker. The newest result stays intact.
+- Stream `tool_result` events, result messages, `onToolResult`, and progress
+  result payloads can expose the full rich content to application handlers.
+  Legacy tool-call traces and `ToolCallRecord.output` use a redacted text/media
+  summary that omits inline bytes and reference URLs. Online scorers receive the
+  normal run result, while stored evaluation payloads continue to follow the
+  configured evaluation payload policy.
+
+Task checkpoints JSON-serialize model-visible rich content in completed
+`AgentRunResult.messages`, so restored task results preserve it. Checkpoint
+stores are not covered by trace redaction; wrap the store with `RedactingStore`
+when that tradeoff is appropriate. Mid-task recovery remains task-grained: an
+interrupted in-flight tool call still re-runs as described in
+[`checkpoint.md`](checkpoint.md#limitations).
+
+Current boundaries: the native rich contract does not include audio, local
+filesystem paths, automatic uploads, resizing, malware scanning, URL fetching,
+or MIME sniffing. Process and ACP backends own their execution and do not use
+the runner's tool loop. Adapter tests validate local wire conversion without
+contacting provider APIs; verify the exact provider/model combination you plan
+to operate before relying on media support in production.
+
+See the runnable [`rich-tool-results` example](../packages/core/examples/patterns/rich-tool-results.ts).
 
 **Truncation.** Cap an individual tool result to a head + tail excerpt with a marker in between:
 
@@ -588,6 +699,10 @@ Notes:
 - `@modelcontextprotocol/sdk` is an optional peer dependency, only needed when using MCP.
 - Current transport support is stdio.
 - MCP input validation is delegated to the MCP server (`inputSchema` is `z.any()`).
+- MCP text output keeps its existing string behavior. Successful MCP `image`,
+  embedded blob resource, and HTTP(S) `resource_link` blocks also receive a
+  rich `modelOutput`; errors, audio, malformed media, and non-HTTP resource
+  links retain an explicit text representation.
 - Prefer locally installed or pinned MCP server binaries and pass only the environment variables that server needs. Avoid spreading `process.env` into MCP subprocesses.
 
 See [`integrations/mcp-github`](../packages/core/examples/integrations/mcp-github.ts) for a full runnable setup.

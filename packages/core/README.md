@@ -298,7 +298,14 @@ See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/d
 
 Budget checks run at turn and task boundaries, so a run can overshoot by up to one model turn; they are not a cent-exact stop. `estimateCost` receives each call's token usage plus the agent, effective `model`, `provider`, phase, and `taskId`, and your application owns the price table.
 
-Built-in tools are default-deny, and every tool result is sent to your model provider, so grant read and exec access deliberately. Filesystem tools stay within the configured `cwd`; granted `bash` is not sandboxed. Secrets are redacted from traces, shell output, and Viewer payloads by default.
+Built-in tools are default-deny, and every model-visible tool result is sent to
+your model provider, so grant read and exec access deliberately. Tools may keep
+application-owned data separate while returning text, image, or file content
+through `modelOutput`; see the [tool configuration guide](../../docs/tool-configuration.md#rich-image-and-file-results).
+Filesystem tools stay within the configured `cwd`; granted `bash` is not
+sandboxed. Secrets are redacted from traces, shell output, and Viewer payloads
+by default, but result messages and checkpoints have their own persistence
+boundary.
 
 ### Observability
 

@@ -95,9 +95,55 @@ export interface ToolUseBlock {
 export interface ToolResultBlock {
   readonly type: 'tool_result'
   readonly tool_use_id: string
-  readonly content: string
+  readonly content: ToolResultContent
   readonly is_error?: boolean
 }
+
+/** Inline bytes or a remote reference supplied as model-visible tool output. */
+export type ToolResultMediaSource =
+  | {
+      readonly type: 'base64'
+      /** IANA media type for the encoded bytes. */
+      readonly media_type: string
+      /** Raw base64 data without a data-URL prefix. */
+      readonly data: string
+    }
+  | {
+      readonly type: 'url'
+      /** IANA media type expected at the reference. */
+      readonly media_type: string
+      /** Absolute HTTP(S) URL. Provider/model support still varies. */
+      readonly url: string
+    }
+
+/** Text part in a rich, model-visible tool result. */
+export interface ToolResultTextPart {
+  readonly type: 'text'
+  readonly text: string
+}
+
+/** Image part in a rich, model-visible tool result. */
+export interface ToolResultImagePart {
+  readonly type: 'image'
+  readonly source: ToolResultMediaSource
+}
+
+/** File part in a rich, model-visible tool result. */
+export interface ToolResultFilePart {
+  readonly type: 'file'
+  /** Display name forwarded when the provider wire format supports one. */
+  readonly filename: string
+  readonly source: ToolResultMediaSource
+}
+
+/** A part accepted inside a rich tool result. */
+export type ToolResultContentPart =
+  | ToolResultTextPart
+  | ToolResultImagePart
+  | ToolResultFilePart
+
+/** Content returned to the model for one tool call. */
+export type ToolResultContent = string | readonly ToolResultContentPart[]
 
 /** A base64-encoded image passed to or returned from a model. */
 export interface ImageBlock {
@@ -628,8 +674,18 @@ export interface ToolResultMetadata {
 }
 
 /** Value returned by a tool's `execute` function. */
-export interface ToolResult {
-  readonly data: string
+export interface ToolResult<TData = string> {
+  /**
+   * Application-owned result. Existing tools may keep returning a string.
+   * Non-string values require an explicit {@link modelOutput} so the framework
+   * never guesses how to serialize application data for a model.
+   */
+  readonly data: TData
+  /**
+   * Optional model-visible representation, validated and defensively copied at
+   * the tool boundary. When omitted, string `data` is forwarded unchanged.
+   */
+  readonly modelOutput?: ToolResultContent
   readonly isError?: boolean
   readonly metadata?: ToolResultMetadata
 }
@@ -645,7 +701,7 @@ export interface ToolResult {
  * set and validation fails, execution returns an error ToolResult instead of
  * propagating invalid output.
  */
-export interface ToolDefinition<TInput = Record<string, unknown>> {
+export interface ToolDefinition<TInput = Record<string, unknown>, TData = string> {
   readonly name: string
   readonly description: string
   readonly inputSchema: ZodSchema<TInput>
@@ -656,13 +712,13 @@ export interface ToolDefinition<TInput = Record<string, unknown>> {
    */
   readonly consequential?: boolean
   /**
-   * Optional runtime validator for `ToolResult.data` (always a string).
+   * Optional runtime validator for the application-owned `ToolResult.data`.
    *
    * **Not to be confused with {@link AgentConfig.outputSchema}**, which
    * validates an agent's final JSON answer. This one only guards a single
-   * tool's serialised output.
+   * tool's application result.
    */
-  readonly outputSchema?: ZodSchema<string>
+  readonly outputSchema?: ZodSchema<TData>
   /**
    * When present, used as {@link LLMToolDef.inputSchema} as-is instead of
    * deriving JSON Schema from `inputSchema` (Zod).
@@ -674,7 +730,7 @@ export interface ToolDefinition<TInput = Record<string, unknown>> {
    * Takes priority over {@link AgentConfig.maxToolOutputChars}.
    */
   readonly maxOutputChars?: number
-  execute(input: TInput, context: ToolUseContext): Promise<ToolResult>
+  execute(input: TInput, context: ToolUseContext): Promise<ToolResult<TData>>
 }
 
 // ---------------------------------------------------------------------------
@@ -915,7 +971,7 @@ export interface AgentConfig {
    * will throw at registration time.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly customTools?: readonly ToolDefinition<any>[]
+  readonly customTools?: readonly ToolDefinition<any, any>[]
   /** Names of tools (from the tool registry) available to this agent. */
   readonly tools?: readonly string[]
   /** Names of tools explicitly disallowed for this agent. */
@@ -1133,8 +1189,8 @@ export interface AgentConfig {
    * retry with error feedback is attempted on validation failure.
    *
    * **Distinct from {@link ToolDefinition.outputSchema}**, which validates an
-   * individual tool's `ToolResult.data` string. This one operates on the
-   * agent's final answer as parsed JSON.
+   * individual tool's application-owned `ToolResult.data`. This schema operates
+   * on the agent's final answer as parsed JSON.
    */
   readonly outputSchema?: ZodSchema
   /**

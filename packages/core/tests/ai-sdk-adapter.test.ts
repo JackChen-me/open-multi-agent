@@ -70,6 +70,52 @@ describe('llmMessagesToAiSdkModelMessages', () => {
     expect(toolMsg.content[0]?.output).toEqual({ type: 'error-text', value: 'boom' })
   })
 
+  it('maps rich tool results to AI SDK content output without text serialization', () => {
+    const out = llmMessagesToAiSdkModelMessages([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'c3', name: 'render', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'c3',
+          content: [
+            { type: 'text', text: 'Rendered preview' },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+            },
+            {
+              type: 'file',
+              filename: 'report.pdf',
+              source: {
+                type: 'url',
+                media_type: 'application/pdf',
+                url: 'https://example.com/report.pdf',
+              },
+            },
+          ],
+        }],
+      },
+    ])
+
+    const toolMsg = out[1] as {
+      role: string
+      content: Array<{ output: { type: string; value: unknown[] } }>
+    }
+    expect(toolMsg.content[0]?.output).toEqual({
+      type: 'content',
+      value: [
+        { type: 'text', text: 'Rendered preview' },
+        { type: 'file-data', data: 'aW1hZ2U=', mediaType: 'image/png' },
+        { type: 'text', text: '[File: report.pdf; application/pdf]' },
+        { type: 'file-url', url: 'https://example.com/report.pdf' },
+      ],
+    })
+  })
+
   it('does not serialize opaque redacted reasoning payloads', () => {
     // Security regression guard (upstream 6b63302): the back-compat default-off
     // path must never leak the opaque `redactedData` blob into the AI SDK

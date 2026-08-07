@@ -128,7 +128,10 @@ At each safe in-flight runner boundary and after each successfully completed tas
   token usage, tool-call records, the next recovery phase, and any pending tool
   calls. Tool results are committed independently by model-issued tool-call ID,
   so a parallel turn may contain both replayable results and calls that still
-  need execution.
+  need execution. Model-visible image/file tool results are part of those
+  messages: inline base64 is embedded in checkpoint JSON, while URL references
+  are stored as URLs. Application-owned `ToolResult.data` is not part of the
+  conversation unless the application separately puts it there.
 - **Approval continuation state** — exact pending approval requests plus the
   decisions already consumed by this logical run. The authoritative request /
   decision row is stored separately under `__oma_approval__/<requestId>` and is

@@ -198,9 +198,9 @@ function cloneTask(task: Task): Task {
 function cloneAgentResult(result: AgentRunResult): AgentRunResult {
   return {
     ...result,
-    messages: [...result.messages],
+    messages: structuredClone(result.messages),
     tokenUsage: { ...result.tokenUsage },
-    toolCalls: result.toolCalls.map((call) => ({ ...call })),
+    toolCalls: structuredClone(result.toolCalls),
     ...(result.errorInfo !== undefined ? { errorInfo: { ...result.errorInfo } } : {}),
   }
 }

@@ -28,6 +28,7 @@ import {
   resolveReasoningOutboundMaxChars,
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
+import { toolResultContentParts } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Message conversion — OMA <-> AI SDK ModelMessage
@@ -108,9 +109,41 @@ export function llmMessagesToAiSdkModelMessages(
 
       for (const tr of toolResults) {
         const toolName = toolNamesByCallId.get(tr.tool_use_id) ?? 'unknown_tool'
-        const output = tr.is_error
-          ? ({ type: 'error-text', value: tr.content } as const)
-          : ({ type: 'text', value: tr.content } as const)
+        const richValue: Array<
+          | { type: 'text'; text: string }
+          | { type: 'file-data'; data: string; mediaType: string; filename?: string }
+          | { type: 'file-url'; url: string }
+        > = []
+        if (typeof tr.content !== 'string') {
+          for (const part of toolResultContentParts(tr.content)) {
+            if (part.type === 'text') {
+              richValue.push({ type: 'text', text: part.text })
+            } else if (part.source.type === 'base64') {
+              richValue.push({
+                type: 'file-data',
+                data: part.source.data,
+                mediaType: part.source.media_type,
+                ...(part.type === 'file' ? { filename: part.filename } : {}),
+              })
+            } else {
+              if (part.type === 'file') {
+                richValue.push({
+                  type: 'text',
+                  text: `[File: ${part.filename}; ${part.source.media_type}]`,
+                })
+              }
+              richValue.push({ type: 'file-url', url: part.source.url })
+            }
+          }
+        }
+        const output = typeof tr.content === 'string'
+          ? tr.is_error
+            ? ({ type: 'error-text', value: tr.content } as const)
+            : ({ type: 'text', value: tr.content } as const)
+          : ({
+              type: 'content',
+              value: richValue,
+            } as const)
         out.push({
           role: 'tool',
           content: [

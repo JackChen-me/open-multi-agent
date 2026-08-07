@@ -59,6 +59,14 @@ import {
   TOOL_PRESETS,
 } from '../tool/grants.js'
 import { createApprovalRequest, DurableApprovalError } from '../approval/durable.js'
+import {
+  copyToolResultContent,
+  modelOutputFromToolResult,
+  stripToolResultMedia,
+  summarizeToolResultContent,
+  toolResultContentSize,
+  toolResultHasMedia,
+} from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Tool presets
@@ -190,7 +198,7 @@ export interface RunOptions {
   /** Fired just before each tool is dispatched. */
   readonly onToolCall?: (name: string, input: Record<string, unknown>) => void
   /** Fired after each tool result is received. */
-  readonly onToolResult?: (name: string, result: ToolResult) => void
+  readonly onToolResult?: (name: string, result: ToolResult<any>) => void
   /** Fired after each complete {@link LLMMessage} is appended. */
   readonly onMessage?: (message: LLMMessage) => void
   /**
@@ -366,10 +374,14 @@ function groupIntoTurns(messages: LLMMessage[]): Turn[] {
  */
 function stripImageBlocksForSummary(messages: LLMMessage[]): LLMMessage[] {
   return messages.map((msg) => {
-    if (!msg.content.some(b => b.type === 'image')) return msg
+    if (!msg.content.some(b =>
+      b.type === 'image' || (b.type === 'tool_result' && toolResultHasMedia(b.content)))) return msg
     const newContent: ContentBlock[] = msg.content.map((block) => {
       if (block.type === 'image') {
         return { type: 'text', text: `[image: ${block.source.media_type}]` } satisfies TextBlock
+      }
+      if (block.type === 'tool_result' && toolResultHasMedia(block.content)) {
+        return { ...block, content: stripToolResultMedia(block.content) }
       }
       return block
     })
@@ -1374,7 +1386,7 @@ export class AgentRunner implements AgentBackend {
         })
       : undefined
     const startTime = toolSpan?.startUnixMs ?? Date.now()
-    let result: ToolResult
+    let result: ToolResult<any>
 
     if (!grantedToolNames.has(block.name)) {
       // Default-deny enforcement: the model asked for a tool that resolveTools()
@@ -1439,11 +1451,21 @@ export class AgentRunner implements AgentBackend {
       }
     }
     if (result.metadata?.approvalError) {
-      throw new DurableApprovalError('APPROVAL_STALE_DECISION', result.data)
+      const approvalError = typeof result.data === 'string'
+        ? result.data
+        : 'The reviewed tool returned a non-text approval error.'
+      throw new DurableApprovalError('APPROVAL_STALE_DECISION', approvalError)
     }
 
     const endTime = Date.now()
     const duration = endTime - startTime
+    // Keep callbacks/application consumers isolated from the transcript.
+    // ToolExecutor already copied tool-owned input; this second copy means an
+    // onToolResult callback cannot mutate what the model or checkpoint receives.
+    const modelOutput = copyToolResultContent(modelOutputFromToolResult(result))
+    const recordedOutput = result.modelOutput === undefined && typeof result.data === 'string'
+      ? result.data
+      : summarizeToolResultContent(modelOutput)
     const legacyEvent: TraceEvent | undefined = options.onTrace ? {
         type: 'tool_call',
         runId: options.runId ?? '',
@@ -1463,7 +1485,7 @@ export class AgentRunner implements AgentBackend {
             }
           : {}),
         input: redactSensitiveObject(block.input),
-        output: redactSensitiveText(result.data),
+        output: redactSensitiveText(summarizeToolResultContent(modelOutput)),
         startMs: startTime,
         endMs: endTime,
         durationMs: duration,
@@ -1471,7 +1493,7 @@ export class AgentRunner implements AgentBackend {
     if (toolSpan) {
       const isError = result.isError ?? false
       const classified = isError
-        ? classifyRunFailure(new Error(result.data), { kind: 'tool' })
+        ? classifyRunFailure(new Error(recordedOutput), { kind: 'tool' })
         : undefined
       toolSpan.end({
         status: classified?.status ?? { code: 'ok' },
@@ -1487,13 +1509,13 @@ export class AgentRunner implements AgentBackend {
     const record: ToolCallRecord = {
       toolName: block.name,
       input: block.input,
-      output: result.data,
+      output: recordedOutput,
       duration,
     }
     const resultBlock: ToolResultBlock = {
       type: 'tool_result',
       tool_use_id: block.id,
-      content: result.data,
+      content: modelOutput,
       is_error: result.isError,
     }
 
@@ -1638,22 +1660,27 @@ export class AgentRunner implements AgentBackend {
           if (block.is_error) return block
           // Already compressed by compressToolResults or a prior compact pass.
           if (
-            block.content.startsWith('[Tool output compressed') ||
-            block.content.startsWith('[Tool result:')
+            typeof block.content === 'string' &&
+            (block.content.startsWith('[Tool output compressed') ||
+              block.content.startsWith('[Tool result:'))
           ) {
             return block
           }
           // Short results: preserve.
-          if (block.content.length < minToolResultChars) return block
+          const contentSize = toolResultContentSize(block.content)
+          if (contentSize < minToolResultChars) return block
           const toolName = toolNameMap.get(block.tool_use_id) ?? 'unknown'
           // Delegation results: preserve — parent agent may still reason over them.
           if (toolName === 'delegate_to_agent') return block
           // Compress.
           msgChanged = true
+          const sizeDescription = typeof block.content === 'string'
+            ? `${contentSize} chars`
+            : `${contentSize} estimated chars`
           return {
             type: 'tool_result',
             tool_use_id: block.tool_use_id,
-            content: `[Tool result: ${toolName} — ${block.content.length} chars, compacted]`,
+            content: `[Tool result: ${toolName} — ${sizeDescription}, compacted]`,
           } satisfies ToolResultBlock
         }
         return block
@@ -1732,16 +1759,23 @@ export class AgentRunner implements AgentBackend {
         if (toolNameMap.get(block.tool_use_id) === 'delegate_to_agent') return block
 
         // Skip already-compressed results — avoid re-compression with wrong char count.
-        if (block.content.startsWith('[Tool output compressed')) return block
+        if (
+          typeof block.content === 'string' &&
+          block.content.startsWith('[Tool output compressed')
+        ) return block
 
         // Skip short results — the marker itself has overhead.
-        if (block.content.length < minChars) return block
+        const contentSize = toolResultContentSize(block.content)
+        if (contentSize < minChars) return block
 
         msgChanged = true
+        const sizeDescription = typeof block.content === 'string'
+          ? `${contentSize} chars`
+          : `${contentSize} estimated chars`
         return {
           type: 'tool_result',
           tool_use_id: block.tool_use_id,
-          content: `[Tool output compressed — ${block.content.length} chars, already processed]`,
+          content: `[Tool output compressed — ${sizeDescription}, already processed]`,
         } satisfies ToolResultBlock
       })
 

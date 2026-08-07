@@ -271,6 +271,17 @@
       "featuredOrder": 1
     },
     {
+      "id": "rich-tool-results",
+      "path": "patterns/rich-tool-results.ts",
+      "title": "Rich Tool Results",
+      "description": "Keep application-owned tool data separate while returning image content to the model.",
+      "section": "goal",
+      "goal": "production-controls",
+      "capabilities": ["custom-tools", "tool-use"],
+      "format": "script",
+      "level": "intermediate"
+    },
+    {
       "id": "task-retry",
       "path": "patterns/task-retry.ts",
       "title": "Task Retry",

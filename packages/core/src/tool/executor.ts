@@ -29,6 +29,7 @@ import {
   assertApprovalRequest,
   hashApprovalRequest,
 } from '../approval/durable.js'
+import { copyToolResultContent } from './result.js'
 
 // ---------------------------------------------------------------------------
 // ToolExecutor
@@ -113,7 +114,7 @@ export class ToolExecutor {
     input: Record<string, unknown>,
     context: ToolUseContext,
     options: ToolExecutorExecutionOptions = {},
-  ): Promise<ToolResult> {
+  ): Promise<ToolResult<any>> {
     const tool = this.registry.get(toolName)
     if (tool === undefined) {
       return this.errorResult(
@@ -147,8 +148,8 @@ export class ToolExecutor {
   async executeBatch(
     calls: BatchToolCall[],
     context: ToolUseContext,
-  ): Promise<Map<string, ToolResult>> {
-    const results = new Map<string, ToolResult>()
+  ): Promise<Map<string, ToolResult<any>>> {
+    const results = new Map<string, ToolResult<any>>()
 
     await Promise.all(
       calls.map(async (call) => {
@@ -179,11 +180,11 @@ export class ToolExecutor {
    */
   private async runTool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    tool: ToolDefinition<any>,
+    tool: ToolDefinition<any, any>,
     rawInput: Record<string, unknown>,
     context: ToolUseContext,
     options: ToolExecutorExecutionOptions,
-  ): Promise<ToolResult> {
+  ): Promise<ToolResult<any>> {
     // --- Zod validation ---
     const inputParseResult = this.runZodSchema(tool.inputSchema, rawInput)
     if (!inputParseResult.success) {
@@ -295,7 +296,20 @@ export class ToolExecutor {
 
     // --- Execute ---
     try {
-      const result = await tool.execute(inputParseResult.data, context)
+      const rawResult: unknown = await tool.execute(inputParseResult.data, context)
+      if (rawResult === null || typeof rawResult !== 'object' || Array.isArray(rawResult)) {
+        return this.errorResult(
+          `Invalid output for tool "${tool.name}": execute() must return a ToolResult object.`,
+          gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+        )
+      }
+      const result = rawResult as ToolResult<any>
+      if (result.isError !== undefined && typeof result.isError !== 'boolean') {
+        return this.errorResult(
+          `Invalid output for tool "${tool.name}": ToolResult.isError must be a boolean when provided.`,
+          gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+        )
+      }
       if (!result.isError && tool.outputSchema) {
         const outputParseResult = this.runZodSchema(tool.outputSchema, result.data)
         if (!outputParseResult.success) {
@@ -305,11 +319,12 @@ export class ToolExecutor {
           )
         }
       }
+      const normalized = this.normalizeModelOutput(tool.name, result, gateMetadata)
       const withApproval = approvalDecision === undefined
-        ? result
+        ? normalized
         : {
-            ...result,
-            metadata: { ...result.metadata, approvalDecision },
+            ...normalized,
+            metadata: { ...normalized.metadata, approvalDecision },
           }
       return this.withGateMetadata(this.maybeTruncate(tool, withApproval), gateMetadata)
     } catch (err) {
@@ -343,17 +358,67 @@ export class ToolExecutor {
    */
   private maybeTruncate(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    tool: ToolDefinition<any>,
-    result: ToolResult,
-  ): ToolResult {
+    tool: ToolDefinition<any, any>,
+    result: ToolResult<any>,
+  ): ToolResult<any> {
     const maxChars = tool.maxOutputChars ?? this.maxToolOutputChars
-    if (maxChars === undefined || maxChars <= 0 || result.data.length <= maxChars) {
+    // Preserve the legacy contract exactly: maxOutputChars truncates an
+    // implicit string result. Explicit modelOutput is already a caller-owned,
+    // compact representation and is not rewritten; non-string application data
+    // has no character length to truncate.
+    if (
+      result.modelOutput !== undefined
+      || typeof result.data !== 'string'
+      || maxChars === undefined
+      || maxChars <= 0
+      || result.data.length <= maxChars
+    ) {
       return result
     }
     return { ...result, data: truncateToolOutput(result.data, maxChars) }
   }
 
-  private withGateMetadata(result: ToolResult, gateMetadata: ToolCallGateMetadata | undefined): ToolResult {
+  private normalizeModelOutput(
+    toolName: string,
+    result: ToolResult<any>,
+    gateMetadata: ToolCallGateMetadata | undefined,
+  ): ToolResult<any> {
+    if (result.isError && typeof result.data !== 'string') {
+      return this.errorResult(
+        `Invalid output for tool "${toolName}": error ToolResult.data must be a string.`,
+        gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+      )
+    }
+
+    if (result.modelOutput === undefined) {
+      if (typeof result.data === 'string') return result
+      return this.errorResult(
+        `Invalid output for tool "${toolName}": non-string ToolResult.data requires modelOutput.`,
+        gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+      )
+    }
+
+    let modelOutput
+    try {
+      modelOutput = copyToolResultContent(result.modelOutput)
+    } catch (error) {
+      return this.errorResult(
+        `Invalid output for tool "${toolName}": ${this.errorMessage(error)}`,
+        gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+      )
+    }
+
+    if (result.isError && typeof modelOutput !== 'string') {
+      return this.errorResult(
+        `Invalid output for tool "${toolName}": error modelOutput must be a string.`,
+        gateMetadata ? { toolCallGate: gateMetadata } : undefined,
+      )
+    }
+
+    return { ...result, modelOutput }
+  }
+
+  private withGateMetadata(result: ToolResult<any>, gateMetadata: ToolCallGateMetadata | undefined): ToolResult<any> {
     if (!gateMetadata) return result
     return {
       ...result,

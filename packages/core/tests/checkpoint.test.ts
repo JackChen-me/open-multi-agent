@@ -237,6 +237,78 @@ describe('checkpoint snapshots', () => {
     await expect(checkpoint.loadLatest()).rejects.toThrow('is not a checkpoint snapshot')
   })
 
+  it('round-trips rich tool-result messages through task checkpoint restore', async () => {
+    const store = new InMemoryStore()
+    const queue = new TaskQueue()
+    queue.add(task('first', { assignee: 'worker' }))
+    queue.add(task('second', { assignee: 'worker', dependsOn: ['first'] }))
+    queue.complete('first', 'first output')
+    const richContent = [
+      { type: 'text' as const, text: 'Rendered preview' },
+      {
+        type: 'image' as const,
+        source: {
+          type: 'base64' as const,
+          media_type: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+      {
+        type: 'file' as const,
+        filename: 'report.pdf',
+        source: {
+          type: 'url' as const,
+          media_type: 'application/pdf',
+          url: 'https://example.com/report.pdf',
+        },
+      },
+    ]
+    await new Checkpoint(store, {}).save({
+      version: 1,
+      mode: 'runTasks',
+      createdAt: new Date().toISOString(),
+      queue: queue.snapshot(),
+      completedTaskResults: [{
+        taskId: 'first',
+        assignee: 'worker',
+        result: 'first output',
+        agentResult: {
+          success: true,
+          output: 'first output',
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'tool_use', id: 'call-1', name: 'render', input: {} }],
+            },
+            {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'call-1', content: richContent }],
+            },
+          ],
+          tokenUsage: { input_tokens: 1, output_tokens: 1 },
+          toolCalls: [{
+            toolName: 'render',
+            input: {},
+            output: 'Rendered preview\n[image: image/png; inline data]\n[file: report.pdf; application/pdf; URL reference]',
+            duration: 1,
+          }],
+        },
+      }],
+    })
+    const pending = scriptedAdapter(['second output'])
+    const team = new Team({ name: 'team', agents: [worker('worker', pending.adapter)] })
+
+    const restored = await new OpenMultiAgent().restore(team, { checkpoint: { store } })
+
+    expect(pending.calls()).toBe(1)
+    const restoredResult = restored.taskResults?.get('first')
+    expect(restoredResult?.messages[1]?.content[0]).toEqual({
+      type: 'tool_result',
+      tool_use_id: 'call-1',
+      content: richContent,
+    })
+  })
+
   it('a RedactingStore-wrapped checkpoint masks secrets yet stays loadable', async () => {
     const inner = new AsyncMapStore()
     const checkpoint = new Checkpoint(new RedactingStore(inner), { runId: 'secret-run' })

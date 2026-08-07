@@ -36,7 +36,7 @@ export function resolveGrantedToolDefinitions(
   registry: ToolRegistry,
   options: ToolGrantOptions,
   resolveOptions: ResolveToolGrantOptions = {},
-): ToolDefinition<any>[] {
+): ToolDefinition<any, any>[] {
   const warnOnConflict = resolveOptions.warnOnConflict ?? true
   if (warnOnConflict && options.toolPreset && options.allowedTools) {
     console.warn(

@@ -24,6 +24,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type {
   ContentBlockParam,
+  DocumentBlockParam,
   ImageBlockParam,
   MessageCreateParamsNonStreaming,
   MessageParam,
@@ -50,6 +51,7 @@ import type {
   StreamEvent,
   TextBlock,
   ThinkingConfig,
+  ToolResultContentPart,
   ToolResultBlock,
   ToolUseBlock,
 } from '../types.js'
@@ -59,6 +61,8 @@ import {
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
+import { UnsupportedToolResultContentError } from '../errors.js'
+import { toolResultContentParts } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -74,10 +78,34 @@ import { assertValidMessages } from './validate.js'
  * `tool_result` blocks are only valid inside `user`-role messages, which is
  * handled by {@link toAnthropicMessages} based on role context.
  */
-function toAnthropicContentBlockParam(
+function toAnthropicImageParam(
+  part: Extract<ToolResultContentPart, { type: 'image' }>,
+): ImageBlockParam {
+  const mediaType = part.source.media_type
+  if (
+    mediaType !== 'image/jpeg'
+    && mediaType !== 'image/png'
+    && mediaType !== 'image/gif'
+    && mediaType !== 'image/webp'
+  ) {
+    throw new UnsupportedToolResultContentError(
+      'Anthropic Messages',
+      `image:${mediaType}`,
+      'supported image media types are JPEG, PNG, GIF, and WebP',
+    )
+  }
+  return {
+    type: 'image',
+    source: part.source.type === 'base64'
+      ? { type: 'base64', media_type: mediaType, data: part.source.data }
+      : { type: 'url', url: part.source.url },
+  }
+}
+
+function toAnthropicContentBlockParams(
   block: ContentBlock,
   outboundOptions: ReasoningOutboundOptions | undefined,
-): ContentBlockParam | null {
+): ContentBlockParam[] {
   switch (block.type) {
     case 'reasoning': {
       // Anthropic strictly validates the signature on echoed thinking
@@ -93,7 +121,7 @@ function toAnthropicContentBlockParam(
           type: 'redacted_thinking',
           data: block.redactedData,
         }
-        return param
+        return [param]
       }
       if (ownProvenance && block.signature !== undefined) {
         const param: ThinkingBlockParam = {
@@ -101,20 +129,20 @@ function toAnthropicContentBlockParam(
           thinking: block.text,
           signature: block.signature,
         }
-        return param
+        return [param]
       }
-      if (outboundOptions?.preserveReasoningAsText !== true) return null
+      if (outboundOptions?.preserveReasoningAsText !== true) return []
       const maxChars = resolveReasoningOutboundMaxChars(outboundOptions)
       const text = maxChars === undefined
         ? reasoningBlockToInlineText(block)
         : reasoningBlockToInlineText(block, { maxChars })
-      if (text.length === 0) return null
+      if (text.length === 0) return []
       const param: TextBlockParam = { type: 'text', text }
-      return param
+      return [param]
     }
     case 'text': {
       const param: TextBlockParam = { type: 'text', text: block.text }
-      return param
+      return [param]
     }
     case 'tool_use': {
       const param: ToolUseBlockParam = {
@@ -123,16 +151,55 @@ function toAnthropicContentBlockParam(
         name: block.name,
         input: block.input,
       }
-      return param
+      return [param]
     }
     case 'tool_result': {
+      if (typeof block.content === 'string') {
+        const param: ToolResultBlockParam = {
+          type: 'tool_result',
+          tool_use_id: block.tool_use_id,
+          content: block.content,
+          is_error: block.is_error,
+        }
+        return [param]
+      }
+
+      const resultContent: Array<TextBlockParam | ImageBlockParam> = []
+      const documents: DocumentBlockParam[] = []
+      for (const part of toolResultContentParts(block.content)) {
+        if (part.type === 'text') {
+          resultContent.push({ type: 'text', text: part.text })
+        } else if (part.type === 'image') {
+          resultContent.push(toAnthropicImageParam(part))
+        } else {
+          if (part.source.media_type !== 'application/pdf') {
+            throw new UnsupportedToolResultContentError(
+              'Anthropic Messages',
+              `file:${part.source.media_type}`,
+              'tool-result file parts are supported here only for PDF documents',
+            )
+          }
+          resultContent.push({ type: 'text', text: `[File attachment follows: ${part.filename}]` })
+          documents.push({
+            type: 'document',
+            title: part.filename,
+            source: part.source.type === 'base64'
+              ? {
+                  type: 'base64',
+                  media_type: 'application/pdf',
+                  data: part.source.data,
+                }
+              : { type: 'url', url: part.source.url },
+          })
+        }
+      }
       const param: ToolResultBlockParam = {
         type: 'tool_result',
         tool_use_id: block.tool_use_id,
-        content: block.content,
+        content: resultContent,
         is_error: block.is_error,
       }
-      return param
+      return [param, ...documents]
     }
     case 'image': {
       // Anthropic only accepts a subset of MIME types; we pass them through
@@ -149,7 +216,7 @@ function toAnthropicContentBlockParam(
           data: block.source.data,
         },
       }
-      return param
+      return [param]
     }
     default: {
       // Exhaustiveness guard — TypeScript will flag this at compile time if a
@@ -173,9 +240,7 @@ function toAnthropicMessages(
 ): MessageParam[] {
   return messages.map((msg): MessageParam => ({
     role: msg.role,
-    content: msg.content
-      .map(block => toAnthropicContentBlockParam(block, outboundOptions))
-      .filter((p): p is ContentBlockParam => p !== null),
+    content: msg.content.flatMap(block => toAnthropicContentBlockParams(block, outboundOptions)),
   }))
 }
 
