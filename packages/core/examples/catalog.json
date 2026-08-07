@@ -284,6 +284,17 @@
       "featuredOrder": 3
     },
     {
+      "id": "durable-approval",
+      "path": "patterns/durable-approval.ts",
+      "title": "Durable Approval",
+      "description": "Suspend a task dispatch, record one atomic reviewer decision, and restore the exact approved task with a fresh orchestrator.",
+      "section": "goal",
+      "goal": "production-controls",
+      "capabilities": ["run-tasks"],
+      "format": "script",
+      "level": "advanced"
+    },
+    {
       "id": "plan-replay",
       "path": "patterns/plan-replay.ts",
       "title": "Plan Replay",

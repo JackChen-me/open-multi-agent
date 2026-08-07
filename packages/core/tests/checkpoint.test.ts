@@ -978,8 +978,8 @@ describe('mid-task recovery conformance (#312)', () => {
     })
     expect(world.commits).toEqual(['B'])
     const persisted = await new Checkpoint(store).loadLatest()
-    expect(persisted?.version).toBe(3)
-    if (persisted?.version !== 3) throw new Error('expected checkpoint v3')
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
     expect(persisted.inFlightTasks).toHaveLength(1)
     expect(persisted.inFlightTasks[0]).toMatchObject({
       phase: 'awaiting_model',
@@ -1030,8 +1030,8 @@ describe('mid-task recovery conformance (#312)', () => {
     })
     expect(world.commits).toEqual([])
     const persisted = await new Checkpoint(store).loadLatest()
-    expect(persisted?.version).toBe(3)
-    if (persisted?.version !== 3) throw new Error('expected checkpoint v3')
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
     expect(persisted.inFlightTasks[0]).toMatchObject({
       phase: 'executing_tools',
       turns: 1,
@@ -1153,8 +1153,8 @@ describe('mid-task recovery conformance (#312)', () => {
     expect(commits).toEqual(['P'])
 
     const persisted = await new Checkpoint(store).loadLatest()
-    expect(persisted?.version).toBe(3)
-    if (persisted?.version !== 3) throw new Error('expected checkpoint v3')
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
     const pending = persisted.inFlightTasks[0]?.pendingToolCalls
     expect(pending?.map(call => [call.call.id, call.commit?.result.content])).toEqual([
       ['tu-parallel-p', 'committed:P'],
@@ -1211,7 +1211,7 @@ describe('mid-task recovery conformance (#312)', () => {
     expect(world.commits).toEqual(['D'])
   })
 
-  it('persists the in-flight turn, tool commit, and queue boundary in checkpoint v3', async () => {
+  it('persists the in-flight turn, tool commit, and queue boundary in checkpoint v4', async () => {
     const store = new InMemoryStore()
     const abort = new AbortController()
     const world = externalWorld((label, count) => {
@@ -1237,8 +1237,8 @@ describe('mid-task recovery conformance (#312)', () => {
     // boundary, including the committed tool result that must be replayed.
     const persisted = await new Checkpoint(store, {}).loadLatest()
     expect(persisted).not.toBeNull()
-    expect(persisted?.version).toBe(3)
-    if (persisted?.version !== 3) throw new Error('expected checkpoint v3')
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
     const snapshotJson = JSON.stringify(persisted)
     expect(snapshotJson).toContain('first done') // preserved: completed result
     expect(snapshotJson).toContain('committed:B') // preserved: per-call commit

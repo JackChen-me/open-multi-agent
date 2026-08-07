@@ -4,6 +4,10 @@ Long-running task workflows can persist their progress and resume after a crash,
 
 It covers the orchestration paths (`runTeam`, `runTasks`, `runFromPlan`, and `restore`). A single `runAgent` call has nothing to resume and is not checkpointed.
 
+Checkpoint schema v4 also carries suspended continuation state for
+[durable approval gates](durable-approvals.md). Approval decisions live in
+separate primary records in the same store; they are not telemetry.
+
 ## Enable it
 
 Pass `checkpoint` per call, or set a default for every run via `OrchestratorConfig.checkpoint`. Per-call options override the config default.
@@ -106,7 +110,7 @@ await orchestrator.restore(team,        { checkpoint: { store } })  // resume-on
 
 At each safe in-flight runner boundary and after each successfully completed task, the orchestrator writes the latest `CheckpointSnapshot`:
 
-- **Execution identity (schema v3)** — `runId`, current `attempt`,
+- **Execution identity (schema v4)** — `runId`, current `attempt`,
   `lastTraceId`, and `lastRootSpanId`. Restore preserves the logical `runId`,
   increments `attempt`, creates fresh trace/root IDs, and returns a
   `continued_from` link to the prior attempt.
@@ -125,15 +129,20 @@ At each safe in-flight runner boundary and after each successfully completed tas
   calls. Tool results are committed independently by model-issued tool-call ID,
   so a parallel turn may contain both replayable results and calls that still
   need execution.
+- **Approval continuation state** — exact pending approval requests plus the
+  decisions already consumed by this logical run. The authoritative request /
+  decision row is stored separately under `__oma_approval__/<requestId>` and is
+  checked against the checkpoint during restore.
 - **Task handoff/provenance config** — `dependencyPayload`, logical `role`, and
   validated task `metadata` remain on the queue snapshot, so resumed consumers
   use the same data-flow and trace references as the original run.
 
-Snapshots are stored as JSON under a reserved namespace: `__oma_checkpoint__/<runId>/latest` (or `__oma_checkpoint__/latest` when no `runId` is set). Keys under `__oma_checkpoint__/` are reserved — shared-memory snapshot/restore deliberately skips them so one store can hold both agent memory and checkpoints.
+Snapshots are stored as JSON under a reserved namespace: `__oma_checkpoint__/<runId>/latest` (or `__oma_checkpoint__/latest` when no `runId` is set). Keys under `__oma_checkpoint__/` and `__oma_approval__/` are reserved — shared-memory snapshot/restore deliberately skips them so one store can hold agent memory, checkpoints, and primary approval records.
 
-New writes use checkpoint schema v3. Schema v1 and v2 remain readable; because
-they contain no in-flight runner state, their active tasks resume from the task
-boundary. A v1 checkpoint's optional top-level `runId` is preserved, and
+New writes use checkpoint schema v4. Schemas v1, v2, and v3 remain readable;
+v1 and v2 contain no in-flight runner state, so their active tasks resume from
+the task boundary. Schema v3 retains mid-task tool recovery but has no durable
+approval continuation. A v1 checkpoint's optional top-level `runId` is preserved, and
 restore treats the saved execution as attempt 1. A v1 checkpoint without
 `runId` receives a new logical run ID. If a caller-supplied restore `runId`
 conflicts with the snapshot, restore throws a validation error instead of
@@ -141,7 +150,11 @@ joining unrelated runs.
 
 ### Saves are best-effort
 
-A checkpoint write must never take down the run it protects. If the store rejects (a transient Redis/SQLite error), the failure is surfaced via `onProgress` and the run continues; the next safe runner boundary or completed task retries the write.
+An ordinary checkpoint write must never take down the run it protects. If the store rejects (a transient Redis/SQLite error), the failure is surfaced via `onProgress` and the run continues; the next safe runner boundary or completed task retries the write.
+
+Suspension is the exception: OMA cannot return a resumable approval request
+until the exact pending boundary has been saved. That save is strict and fails
+closed. See [durable approvals](durable-approvals.md#rejection-and-recovery-semantics).
 
 ```typescript
 const orchestrator = new OpenMultiAgent({
@@ -180,6 +193,12 @@ await orchestrator.runTasks(team, tasks, {
 Wrap **every durable store you persist to**: in a split setup — wrapped shared store, separate *unwrapped* checkpoint store — the checkpoint's `completedTaskResults` (sourced from the queue, not the store) would still be raw. Add custom value patterns (e.g. PII) via `new RedactingStore(store, { patterns: [/…/] })`.
 
 Redaction is opt-in by construction and lossy on purpose: a **resumed** run sees `[redacted]` in place of the masked values. Don't enable it if a downstream agent legitimately needs a persisted secret on resume.
+
+The same lossiness makes `RedactingStore` unsuitable for durable approvals,
+whose hash must bind verbatim reviewed content. It deliberately does not expose
+`compareAndSet`, so a suspend decision fails closed before OMA reports a pending
+request. Use a protected, non-redacting checkpoint/approval store for those
+runs.
 
 ## Mid-task tool recovery
 
@@ -252,6 +271,9 @@ Per-run snapshot/restore over `MemoryStore`. What it does *not* yet do:
 - **External agent backends remain task-grained.** Process and ACP backends own
   their own loops, so OMA cannot persist their private mid-task conversation or
   tool state.
+- **Suspendable tool gates require the built-in LLM runner.** Standalone agents,
+  the simple-goal short circuit, and external backends fail closed on a tool
+  `suspend` decision because they have no resumable private tool-loop state.
 - **Only runner tool results have per-call commit records.** Application hooks,
   custom context-strategy callbacks, and an LLM request interrupted before a
   response may run again from the last safe boundary.

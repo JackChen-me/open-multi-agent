@@ -7,6 +7,7 @@
 import type { AgentRunResult, Task, TokenUsage } from '../types.js'
 import { isRetryableError } from '../errors.js'
 import { abortableDelay } from '../utils/abort.js'
+import { DurableApprovalError } from '../approval/durable.js'
 
 /** Maximum delay cap to prevent runaway exponential backoff (30 seconds). */
 export const MAX_RETRY_DELAY_MS = 30_000
@@ -97,6 +98,13 @@ export async function executeWithRetry(
       if (result.success) {
         return { ...result, tokenUsage: totalUsage }
       }
+      // Suspension is a durable continuation boundary, not a retryable task
+      // failure. Re-running here would ask for the same approval again and
+      // could race the primary decision record.
+      if (result.status?.code === 'suspended') {
+        return { ...result, tokenUsage: totalUsage }
+      }
+      if (result.error instanceof DurableApprovalError) throw result.error
       lastError = result.output
 
       // Non-streaming path carries the structured error on the result; a
@@ -109,6 +117,7 @@ export async function executeWithRetry(
 
       return { ...result, tokenUsage: totalUsage }
     } catch (err) {
+      if (err instanceof DurableApprovalError) throw err
       lastError = err instanceof Error ? err.message : String(err)
 
       // Streaming path: the structured error is in scope here. Skip retries on

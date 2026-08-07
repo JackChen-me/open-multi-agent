@@ -44,8 +44,13 @@
 import type {
   AgentConfig,
   AgentRunResult,
+  ApprovalDecisionRecord,
+  ApprovalGateDecision,
+  ApprovalRequest,
+  ApprovalRequestContent,
   CheckpointOptions,
   CheckpointSnapshot,
+  InFlightTaskCheckpoint,
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
@@ -165,7 +170,18 @@ import {
   TaskProfileValidationError,
   validateTaskProfilerResult,
 } from './task-profiler.js'
-import { executeQueue, saveRunCheckpoint } from './task-execution.js'
+import {
+  executeQueue,
+  persistPendingApproval,
+  saveRunCheckpoint,
+} from './task-execution.js'
+import {
+  assertDurableTaskApprovalSupport,
+  createApprovalRequest,
+  DurableApprovalError,
+  DurableApprovalLedger,
+  hashApprovalRequest,
+} from '../approval/durable.js'
 import {
   buildGovernanceTaskSpecs,
   finalizeGovernanceRun,
@@ -234,6 +250,26 @@ interface SemanticProfileRun {
   readonly model?: string
   readonly provider?: string
   readonly reasons: readonly string[]
+}
+
+function normalizeApprovalDecision(
+  value: ApprovalGateDecision,
+  callbackName: string,
+): { readonly action: 'allow' | 'deny' | 'suspend'; readonly reason?: string } {
+  if (value === true) return { action: 'allow' }
+  if (value === false) return { action: 'deny' }
+  if (
+    value === null
+    || typeof value !== 'object'
+    || (value.action !== 'allow' && value.action !== 'deny' && value.action !== 'suspend')
+    || ('reason' in value && value.reason !== undefined && typeof value.reason !== 'string')
+  ) {
+    throw new Error(`${callbackName} returned an invalid approval decision.`)
+  }
+  const reason = 'reason' in value ? value.reason : undefined
+  return reason === undefined
+    ? { action: value.action }
+    : { action: value.action, reason }
 }
 
 function validateExecutionRoutingConfig(config?: ExecutionRoutingConfig): void {
@@ -1673,18 +1709,39 @@ export class OpenMultiAgent {
       attributes: { 'oma.plan.task_count': planTasks.length },
     })
     const planReadyStartMs = planSpan?.startUnixMs ?? Date.now()
-    let approved = true
+    let planDecision: { readonly action: 'allow' | 'deny' | 'suspend'; readonly reason?: string } = {
+      action: 'allow',
+    }
     let planApprovalError: unknown
     if (this.config.onPlanReady) {
       try {
-        approved = await this.config.onPlanReady(planTasks)
+        planDecision = normalizeApprovalDecision(
+          await this.config.onPlanReady(planTasks),
+          'onPlanReady',
+        )
+        if (planDecision.action === 'suspend') {
+          assertDurableTaskApprovalSupport(planTasks)
+          const request = createApprovalRequest({
+            runId: identity.runId,
+            scope: 'plan',
+            boundary: 'coordinator-plan',
+            content: {
+              kind: 'plan',
+              continuation: options?.planOnly ? 'plan_only' : 'execute',
+              tasks: queue.snapshot().tasks,
+            },
+            ...(planDecision.reason !== undefined ? { reason: planDecision.reason } : {}),
+          })
+          await persistPendingApproval(queue, ctx, request)
+          ctx.outcomeStatus = statusOnly('suspended', 'Plan approval pending.')
+        }
       } catch (error) {
-        approved = false
+        planDecision = { action: 'deny' }
         planApprovalError = error
       }
     }
     if (
-      approved
+      planDecision.action === 'allow'
       && this.config.onPlanReady
       && consequentialUndeclared
       && this.config.requireConsequentialConfirmation
@@ -1699,7 +1756,7 @@ export class OpenMultiAgent {
         ...(coordinatorDecomposeSpanId ? { parentId: coordinatorDecomposeSpanId } : {}),
         agent: 'coordinator',
         taskCount: planTasks.length,
-        approved,
+        approved: planDecision.action === 'allow',
         startMs: planReadyStartMs,
         endMs: planReadyEndMs,
         durationMs: planReadyEndMs - planReadyStartMs,
@@ -1709,15 +1766,33 @@ export class OpenMultiAgent {
         ? classifyRunFailure(planApprovalError, { kind: 'callback' })
         : undefined
       planSpan.end({
-        status: planStatus?.status ?? statusOnly(approved ? 'ok' : 'rejected'),
+        status: planStatus?.status ?? statusOnly(
+          planDecision.action === 'allow'
+            ? 'ok'
+            : planDecision.action === 'suspend'
+              ? 'suspended'
+              : 'rejected',
+        ),
         ...(planStatus ? { error: planStatus.errorInfo } : {}),
-        attributes: { 'oma.plan.approved': approved },
+        attributes: {
+          'oma.plan.approved': planDecision.action === 'allow',
+          'oma.approval.decision': planDecision.action,
+        },
         ...(planLegacyEvent ? { legacyEvent: planLegacyEvent } : {}),
       })
     } else if (planLegacyEvent) {
       emitTrace(this.config.onTrace, planLegacyEvent)
     }
-    if (!approved) {
+    if (planDecision.action === 'suspend') {
+      const suspended = this.buildPlanOnlyTeamRunResult(agentResults, identity, goal, queue)
+      return finish(this.withCheckpointApprovals({
+        ...suspended,
+        success: false,
+        status: statusOnly('suspended', 'Plan approval pending.'),
+        planOnly: undefined,
+      }, activeCheckpoint))
+    }
+    if (planDecision.action === 'deny') {
       if (planApprovalError !== undefined) {
         const classified = classifyRunFailure(planApprovalError, { kind: 'callback' })
         return finish(this.buildTeamRunResult(
@@ -1770,6 +1845,17 @@ export class OpenMultiAgent {
       metrics: taskMetrics.get(task.id),
     }))
 
+    if (ctx.outcomeStatus?.code === 'suspended') {
+      return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        taskRecords,
+        ctx.outcomeStatus,
+        ctx.outcomeErrorInfo,
+      ), activeCheckpoint))
+    }
+
     // ------------------------------------------------------------------
     // Step 5: Coordinator synthesises final result
     // ------------------------------------------------------------------
@@ -1794,7 +1880,7 @@ export class OpenMultiAgent {
         ctx.outcomeStatus = classified.status
         ctx.outcomeErrorInfo = classified.errorInfo
       }
-      return finish(this.buildTeamRunResult(
+      return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
         agentResults,
         identity,
         goal,
@@ -1803,7 +1889,7 @@ export class OpenMultiAgent {
         ctx.outcomeErrorInfo,
         false,
         queue.getPlanRevisions(),
-      ))
+      ), activeCheckpoint))
     }
     agentResults.set('coordinator', synthesis.result)
     cumulativeUsage = synthesis.cumulativeUsage
@@ -1813,7 +1899,7 @@ export class OpenMultiAgent {
     // Only actual user tasks (non-coordinator keys) are counted in
     // buildTeamRunResult, so we do not increment completedTaskCount here.
 
-    return finish(this.buildTeamRunResult(
+    return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
       agentResults,
       identity,
       goal,
@@ -1822,7 +1908,7 @@ export class OpenMultiAgent {
       ctx.outcomeErrorInfo,
       false,
       queue.getPlanRevisions(),
-    ))
+    ), activeCheckpoint))
   }
 
   // -------------------------------------------------------------------------
@@ -2080,7 +2166,15 @@ export class OpenMultiAgent {
     if (!validation.valid) {
       throw new Error(`Invalid checkpoint task dependencies: ${validation.errors.join(' ')}`)
     }
-    const restoredInFlightTasks = snapshot.version === 3 ? snapshot.inFlightTasks : []
+    let restoredInFlightTasks: InFlightTaskCheckpoint[] =
+      snapshot.version === 3 || snapshot.version === 4
+        ? snapshot.inFlightTasks.map((state) => ({
+            ...state,
+            ...(state.pendingToolCalls
+              ? { pendingToolCalls: state.pendingToolCalls.map((pending) => ({ ...pending })) }
+              : {}),
+          }))
+        : []
     for (const state of restoredInFlightTasks) {
       const task = queue.get(state.taskId)
       if (!task || !snapshot.queue.inProgress.includes(state.taskId)) {
@@ -2105,6 +2199,180 @@ export class OpenMultiAgent {
           inFlightTasks: new Map(restoredInFlightTasks.map((state) => [state.taskId, state])),
         }
       : undefined
+
+    if (snapshot.version === 4 && checkpointForResume) {
+      const hasTerminalRejection = snapshot.approvalDecisions.some(
+        (decision) => decision.scope !== 'tool_call' && decision.decision === 'rejected',
+      )
+      for (const decision of snapshot.approvalDecisions) {
+        const primary = await checkpointForResume.approvalLedger.get(decision.requestId)
+        if (!primary?.decision || !this.approvalDecisionsEqual(primary.decision, decision)) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Checkpoint approval decision "${decision.requestId}" does not match the primary ledger.`,
+          )
+        }
+        checkpointForResume.approvalDecisions.set(decision.requestId, decision)
+      }
+
+      const unresolved: ApprovalRequest[] = []
+      let rejectedBoundary: ApprovalRequest | undefined
+      let approvedPlanOnly: ApprovalRequest | undefined
+
+      for (const request of snapshot.pendingApprovals) {
+        if (request.runId !== identity.runId) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Approval request "${request.id}" belongs to another logical run.`,
+          )
+        }
+        this.assertApprovalMatchesCheckpoint(request, snapshot)
+        checkpointForResume.pendingApprovals.set(request.id, request)
+        const primary = await checkpointForResume.approvalLedger.ensureRequest(request)
+        if (!primary.decision) {
+          unresolved.push(request)
+          continue
+        }
+
+        checkpointForResume.approvalDecisions.set(request.id, primary.decision)
+        if (request.scope === 'tool_call') {
+          restoredInFlightTasks = restoredInFlightTasks.map((state) => ({
+            ...state,
+            ...(state.pendingToolCalls
+              ? {
+                  pendingToolCalls: state.pendingToolCalls.map((pending) =>
+                    pending.approvalRequest?.id === request.id
+                      ? { ...pending, approvalDecision: primary.decision }
+                      : pending),
+                }
+              : {}),
+          }))
+          continue
+        }
+
+        if (primary.decision.decision === 'approved') {
+          if (
+            request.content.kind === 'plan'
+            && request.content.continuation === 'plan_only'
+          ) {
+            approvedPlanOnly = request
+          } else if (request.scope === 'plan' || request.scope === 'task_round') {
+            checkpointForResume.pendingApprovals.delete(request.id)
+          } else {
+            checkpointForResume.approvedBoundaries.set(request.id, primary.decision)
+          }
+        } else {
+          rejectedBoundary = request
+        }
+      }
+      checkpointForResume.inFlightTasks.clear()
+      for (const state of restoredInFlightTasks) {
+        checkpointForResume.inFlightTasks.set(state.taskId, state)
+      }
+
+      const taskRecords = (): readonly TaskExecutionRecord[] => queue.list().map((task) => ({
+        id: task.id,
+        title: task.title,
+        assignee: task.assignee,
+        status: task.status,
+        dependsOn: task.dependsOn ?? [],
+        description: task.description,
+        memoryScope: task.memoryScope,
+        dependencyPayload: task.dependencyPayload,
+        role: task.role,
+        priority: task.priority,
+        metadata: task.metadata,
+        requires: task.requires,
+        maxRetries: task.maxRetries,
+        retryDelayMs: task.retryDelayMs,
+        retryBackoff: task.retryBackoff,
+        supersededByRevision: task.supersededByRevision,
+        recoveredByRevision: task.recoveredByRevision,
+      }))
+      const finishRestoreBoundary = (result: TeamRunResult): TeamRunResult => {
+        const completed = {
+          ...this.withCheckpointApprovals(result, checkpointForResume),
+          ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
+        }
+        this.completeOnlineEvaluation(
+          evaluationStartedAtMs === undefined ? undefined : {
+            input: { kind: 'restore', goal: snapshot.goal ?? options?.goal },
+            startedAtMs: evaluationStartedAtMs,
+          },
+          completed,
+        )
+        return completed
+      }
+
+      if (unresolved.length > 0) {
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('suspended', 'Durable approval decision pending.'),
+        ))
+      }
+
+      if (rejectedBoundary) {
+        checkpointForResume.pendingApprovals.delete(rejectedBoundary.id)
+        queue.skipRemaining('Skipped: durable approval rejected.')
+        await saveRunCheckpoint(queue, {
+          team,
+          pool: this.buildPool(team.getAgents()),
+          scheduler: this.createScheduler(options?.modelRouting, () => queue.list()),
+          agentResults,
+          config: this.config,
+          checkpoint: checkpointForResume,
+          identity,
+          ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
+          runId: identity.runId,
+          taskSpans: new Map(),
+          cumulativeUsage: ZERO_USAGE,
+          cumulativeCost: 0,
+          budgetExceededTriggered: false,
+          taskMetrics: new Map(),
+          taskById: new Map(queue.list().map((task) => [task.id, task])),
+          taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+          recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+          recoveryPatchSignatures: new Set(),
+        })
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('rejected', 'Durable approval rejected.'),
+        ))
+      }
+
+      if (hasTerminalRejection) {
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('rejected', 'Durable approval rejected.'),
+        ))
+      }
+
+      if (approvedPlanOnly) {
+        checkpointForResume.pendingApprovals.delete(approvedPlanOnly.id)
+        const goal = snapshot.goal ?? options?.goal
+        if (goal === undefined) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            'A plan-only approval checkpoint has no goal.',
+          )
+        }
+        return finishRestoreBoundary(this.buildPlanOnlyTeamRunResult(
+          agentResults,
+          identity,
+          goal,
+          queue,
+        ))
+      }
+    }
 
     return this.executeExplicitTaskQueue(
       team,
@@ -2489,7 +2757,6 @@ export class OpenMultiAgent {
     }
     const budgets = resolveRunBudgets(this.config, options)
 
-    const pool = this.buildPool(agentConfigs)
     const agentResults = initialAgentResults ?? new Map<string, AgentRunResult>()
     const checkpoint = activeCheckpoint ?? this.createActiveCheckpoint(
       team,
@@ -2497,6 +2764,15 @@ export class OpenMultiAgent {
       'runTasks',
       goal,
     )
+    const restoredConfirmationState = checkpoint?.mode === 'runTeam'
+      && this.config.requireConsequentialConfirmation
+      && [...checkpoint.approvalDecisions.values()].some(
+        (decision) => decision.scope === 'plan' && decision.decision === 'approved',
+      )
+      ? createConsequentialConfirmationState()
+      : undefined
+    if (restoredConfirmationState) restoredConfirmationState.planApproved = true
+    const pool = this.buildPool(agentConfigs, restoredConfirmationState)
     const ctx: RunContext = {
       team,
       pool,
@@ -2535,7 +2811,11 @@ export class OpenMultiAgent {
     // per-task outputs). Best-effort: a missing/unusable coordinator config or
     // a failing synthesis call must not discard the recovered work — on failure
     // we surface `synthesis_failed` and fall back to raw outputs.
-    if (checkpoint?.mode === 'runTeam' && goal !== undefined) {
+    if (
+      ctx.outcomeStatus?.code !== 'suspended'
+      && checkpoint?.mode === 'runTeam'
+      && goal !== undefined
+    ) {
       try {
         const coordinatorBaseConfig = buildCoordinatorBaseConfig(this.config, coordinatorForSynthesis, agentConfigs, false)
         const synthesis = await runCoordinatorSynthesis(this.config, team, queue, goal, coordinatorBaseConfig, {
@@ -2607,7 +2887,7 @@ export class OpenMultiAgent {
       metrics: ctx.taskMetrics.get(task.id),
     }))
 
-    const result = this.buildTeamRunResult(
+    const result = this.withCheckpointApprovals(this.buildTeamRunResult(
       agentResults,
       runIdentity,
       goal,
@@ -2616,7 +2896,7 @@ export class OpenMultiAgent {
       ctx.outcomeErrorInfo,
       false,
       queue.getPlanRevisions(),
-    )
+    ), checkpoint)
     const resultWithRouting = {
       ...result,
       ...(routingDecision !== undefined ? { routingDecision } : {}),
@@ -2661,13 +2941,148 @@ export class OpenMultiAgent {
     const store = explicitStore ?? this.fallbackCheckpointStore
     return {
       manager: new Checkpoint(store, options),
+      approvalLedger: new DurableApprovalLedger(store),
       mode,
       ...(goal !== undefined ? { goal } : {}),
       ...(options.runId !== undefined ? { runId: options.runId } : {}),
       reusesSharedMemoryStore: sharedStore !== undefined && store === sharedStore,
       inFlightTasks: new Map(),
+      pendingApprovals: new Map(),
+      approvalDecisions: new Map(),
+      approvedBoundaries: new Map(),
       saveChain: Promise.resolve(),
     }
+  }
+
+  private withCheckpointApprovals(
+    result: TeamRunResult,
+    checkpoint: ActiveCheckpoint | undefined,
+  ): TeamRunResult {
+    if (!checkpoint) return result
+    const decisions = [...checkpoint.approvalDecisions.values()]
+    const pending = [...checkpoint.pendingApprovals.values()].filter(
+      (request) => !checkpoint.approvalDecisions.has(request.id),
+    )
+    return {
+      ...result,
+      ...(pending.length > 0 ? { pendingApprovals: pending } : {}),
+      ...(decisions.length > 0 ? { approvalDecisions: decisions } : {}),
+    }
+  }
+
+  private approvalContentAtCheckpoint(
+    request: ApprovalRequest,
+    snapshot: CheckpointSnapshot,
+  ): ApprovalRequestContent {
+    const tasks = new Map(snapshot.queue.tasks.map((task) => [task.id, task]))
+    switch (request.content.kind) {
+      case 'plan':
+        if (request.boundary !== 'coordinator-plan') {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Plan approval "${request.id}" has an invalid boundary.`,
+          )
+        }
+        return {
+          kind: 'plan',
+          continuation: request.content.continuation,
+          tasks: snapshot.queue.tasks,
+        }
+      case 'task_dispatch': {
+        const task = tasks.get(request.content.task.id)
+        if (!task || request.boundary !== task.id) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Task-dispatch approval "${request.id}" no longer identifies a pending task.`,
+          )
+        }
+        return { kind: 'task_dispatch', task }
+      }
+      case 'task_round': {
+        const completedTasks = request.content.completedTasks.map((task) => tasks.get(task.id))
+        const nextTasks = request.content.nextTasks.map((task) => tasks.get(task.id))
+        if (completedTasks.some((task) => !task) || nextTasks.some((task) => !task)) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Round approval "${request.id}" references a task that no longer exists.`,
+          )
+        }
+        const boundary = [
+          request.content.completedTasks.map((task) => task.id).join(','),
+          request.content.nextTasks.map((task) => task.id).join(','),
+        ].join('->')
+        if (request.boundary !== boundary) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Round approval "${request.id}" has an invalid boundary.`,
+          )
+        }
+        return {
+          kind: 'task_round',
+          completedTasks: completedTasks as NonNullable<(typeof completedTasks)[number]>[],
+          nextTasks: nextTasks as NonNullable<(typeof nextTasks)[number]>[],
+        }
+      }
+      case 'tool_call': {
+        const content = request.content
+        const state = (snapshot.version === 3 || snapshot.version === 4)
+          ? snapshot.inFlightTasks.find((item) => item.taskId === content.taskId)
+          : undefined
+        const pending = state?.pendingToolCalls?.find(
+          (item) => item.call.id === content.toolCallId,
+        )
+        if (
+          !state
+          || !pending
+          || pending.commit
+          || pending.approvalRequest?.id !== request.id
+          || state.assignee !== content.agentName
+          || pending.call.name !== content.toolName
+          || request.boundary !== `${state.taskId}:${pending.call.id}`
+        ) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Tool approval "${request.id}" no longer identifies the pending invocation.`,
+          )
+        }
+        return {
+          ...content,
+          rawInput: pending.call.input,
+        }
+      }
+    }
+  }
+
+  private assertApprovalMatchesCheckpoint(
+    request: ApprovalRequest,
+    snapshot: CheckpointSnapshot,
+  ): void {
+    const content = this.approvalContentAtCheckpoint(request, snapshot)
+    const currentHash = hashApprovalRequest(
+      request.scope,
+      request.boundary,
+      content,
+    )
+    if (currentHash !== request.requestHash) {
+      throw new DurableApprovalError(
+        'APPROVAL_STALE_DECISION',
+        `Approval request "${request.id}" does not match the checkpointed execution boundary.`,
+      )
+    }
+  }
+
+  private approvalDecisionsEqual(
+    left: ApprovalDecisionRecord,
+    right: ApprovalDecisionRecord,
+  ): boolean {
+    return left.requestId === right.requestId
+      && left.runId === right.runId
+      && left.scope === right.scope
+      && left.requestHash === right.requestHash
+      && left.decision === right.decision
+      && left.reviewer.id === right.reviewer.id
+      && left.reviewer.displayName === right.reviewer.displayName
+      && left.decidedAt === right.decidedAt
   }
 
   private agentResultsFromCheckpoint(

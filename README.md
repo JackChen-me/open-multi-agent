@@ -101,7 +101,7 @@ Set `OPENAI_API_KEY` to run this example. [Providers](docs/providers.md) covers 
 OMA combines dynamic orchestration with the control, evidence, and recovery paths needed to move multi-agent systems from prototype to production.
 
 - **Dynamic orchestration.** Describe the goal and let the coordinator build the task DAG, assign work, and synthesize the result at runtime. There is no hand-wired graph to maintain.
-- **Controlled execution.** Preview and approve plans or individual dispatches and freeze approved plans for replay. Declare required roles and order when topology cannot drift, and verify outputs with multi-agent consensus.
+- **Controlled execution.** Preview, approve, or durably suspend plans, task dispatches, and tool calls; freeze approved plans for replay. Declare required roles and order when topology cannot drift, and verify outputs with multi-agent consensus.
 - **Reliability.** Resume interrupted runs from checkpoints, or opt into append-only plan repair at task outcome barriers. Retries, timeouts, loop detection, and token and cost budgets keep execution bounded.
 - **Observability and evaluation.** Follow each run through stable identity, execution receipts, and traces. Replay the task DAG and span waterfall in the offline Run Viewer, or export through the optional OpenTelemetry adapter. The same records feed versioned EvalSets, offline reports, CI gates, and production sampling.
 - **Safety and privacy.** Tools are default-deny, individual calls are gated, and explicit privacy controls apply to telemetry and persisted state.
@@ -153,7 +153,7 @@ Need to embed agent capabilities in an existing product or business system? We h
 |---|---|
 | Install and run | [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) |
 | Configure models and tools | [Providers](docs/providers.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
-| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
+| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Durable approvals](docs/durable-approvals.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
 | Control orchestration | [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) |
 
 ## Contributing

@@ -18,7 +18,7 @@ import {
 } from './store.js'
 
 const STATUS_CODES = new Set<RunStatusCode>([
-  'ok', 'error', 'cancelled', 'timeout', 'budget_exhausted', 'rejected', 'skipped',
+  'ok', 'error', 'cancelled', 'timeout', 'budget_exhausted', 'rejected', 'suspended', 'skipped',
 ])
 const SPAN_KINDS = new Set(['run', 'routing', 'agent', 'task', 'llm', 'tool', 'plan', 'consensus', 'checkpoint', 'callback'])
 const EVENT_NAMES = new Set([

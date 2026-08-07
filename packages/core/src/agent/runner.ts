@@ -38,6 +38,9 @@ import type {
   InFlightTaskCheckpoint,
   PendingToolCallCheckpoint,
   ToolCallCommitCheckpoint,
+  ApprovalDecisionRecord,
+  ApprovalRequest,
+  ToolCallApprovalContent,
 } from '../types.js'
 import { LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
 import { LoopDetector } from './loop-detector.js'
@@ -55,6 +58,7 @@ import {
   resolveGrantedToolDefinitions,
   TOOL_PRESETS,
 } from '../tool/grants.js'
+import { createApprovalRequest, DurableApprovalError } from '../approval/durable.js'
 
 // ---------------------------------------------------------------------------
 // Tool presets
@@ -199,6 +203,12 @@ export interface RunOptions {
    * recoverable message/tool boundary; failures must be isolated by the caller.
    */
   readonly onCheckpoint?: (state: InFlightTaskCheckpoint) => void | Promise<void>
+  /** Internal primary-ledger write after the pending runner state is durable. */
+  readonly onApprovalRequest?: (request: ApprovalRequest) => void | Promise<void>
+  /** Internal fail-fast check run before a pending approval enters the checkpoint. */
+  readonly onApprovalPrepare?: () => void | Promise<void>
+  /** Internal notification used to remove a reviewed request after commit. */
+  readonly onApprovalConsumed?: (requestId: string) => void | Promise<void>
   /**
    * Fired when the runner detects a potential configuration issue.
    * For example, when a model appears to ignore tool definitions.
@@ -248,6 +258,10 @@ export interface RunResult {
   readonly budgetExceeded?: boolean
   /** True when the runner stopped before its next LLM call because the signal was aborted. */
   readonly aborted?: boolean
+  /** True when one or more tool invocations await durable approval. */
+  readonly suspended?: boolean
+  /** Exact requests that stopped this runner before tool execution. */
+  readonly pendingApprovals?: readonly ApprovalRequest[]
 }
 
 /**
@@ -417,6 +431,13 @@ interface ToolExecution {
   readonly result?: ToolResult
   /** False only when cancellation interrupted the call before a durable result. */
   readonly shouldCommit: boolean
+  /** Present only when the gate requested a durable suspension. */
+  readonly suspension?: {
+    readonly content: ToolCallApprovalContent
+    readonly reason?: string
+  }
+  /** Filled after the pending runner state and primary record are durable. */
+  readonly approvalRequest?: ApprovalRequest
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +880,7 @@ export class AgentRunner implements AgentBackend {
     let turns = restored?.turns ?? 0
     let budgetExceeded = restored?.budgetExceeded ?? false
     let aborted = false
+    let suspended = false
     let loopDetected = restored?.loopDetected ?? false
     let phase: InFlightTaskCheckpoint['phase'] = restored?.phase ?? 'awaiting_model'
     let pendingToolCalls: PendingToolCallCheckpoint[] = restored?.pendingToolCalls
@@ -879,7 +901,7 @@ export class AgentRunner implements AgentBackend {
     // Per-call abortSignal takes precedence over the static one.
     const effectiveAbortSignal = options.abortSignal ?? this.options.abortSignal
 
-    const persistCheckpoint = async (): Promise<void> => {
+    const persistCheckpoint = async (strict = false): Promise<void> => {
       if (!options.onCheckpoint || !options.taskId) return
       const assignee = options.traceAgent ?? this.options.agentName
       if (!assignee) return
@@ -905,7 +927,8 @@ export class AgentRunner implements AgentBackend {
       }
       try {
         await options.onCheckpoint(state)
-      } catch {
+      } catch (error) {
+        if (strict) throw error
         // Checkpoint delivery is best-effort and must never fail the agent run.
       }
     }
@@ -962,14 +985,56 @@ export class AgentRunner implements AgentBackend {
               return { commit: pending.commit, shouldCommit: true } satisfies ToolExecution
             }
 
+            if (pending.approvalRequest && !pending.approvalDecision) {
+              return {
+                commit: this.suspendedToolCommit(pending.call),
+                shouldCommit: false,
+                approvalRequest: pending.approvalRequest,
+                suspension: {
+                  content: pending.approvalRequest.content as ToolCallApprovalContent,
+                  ...(pending.approvalRequest.reason !== undefined
+                    ? { reason: pending.approvalRequest.reason }
+                    : {}),
+                },
+              } satisfies ToolExecution
+            }
+
             const execution = await this.executeToolCall(
               pending.call,
               grantedToolNames,
               toolContext,
               options,
+              pending.approvalRequest && pending.approvalDecision
+                ? {
+                    request: pending.approvalRequest,
+                    decision: pending.approvalDecision,
+                  }
+                : undefined,
             )
+            if (execution.suspension) {
+              const request = createApprovalRequest({
+                runId: options.runId!,
+                scope: 'tool_call',
+                boundary: `${options.taskId!}:${pending.call.id}`,
+                content: execution.suspension.content,
+                ...(execution.suspension.reason !== undefined
+                  ? { reason: execution.suspension.reason }
+                  : {}),
+              })
+              await options.onApprovalPrepare!()
+              pendingToolCalls[index] = { ...pending, approvalRequest: request }
+              // A suspension is not reported until its exact in-flight state
+              // is durable. Unlike ordinary recovery snapshots, failure here
+              // must fail closed rather than pretending the run can resume.
+              await persistCheckpoint(true)
+              await options.onApprovalRequest!(request)
+              return { ...execution, shouldCommit: false, approvalRequest: request }
+            }
             if (execution.shouldCommit) {
-              pendingToolCalls[index] = { ...pending, commit: execution.commit }
+              if (pending.approvalRequest) {
+                await options.onApprovalConsumed?.(pending.approvalRequest.id)
+              }
+              pendingToolCalls[index] = { call: pending.call, commit: execution.commit }
               // Await the checkpoint before any fallible result callback so a
               // callback failure cannot turn a returned side effect into a
               // missing commit that restore would execute again.
@@ -980,6 +1045,16 @@ export class AgentRunner implements AgentBackend {
             }
             return execution
           }))
+
+          const suspendedExecutions = executions.filter(
+            (execution): execution is ToolExecution & { readonly approvalRequest: ApprovalRequest } =>
+              execution.approvalRequest !== undefined,
+          )
+          if (suspendedExecutions.length > 0) {
+            suspended = true
+            await persistCheckpoint(true)
+            break
+          }
 
           let delegationTurnUsage: TokenUsage | undefined
           for (const execution of executions) {
@@ -1257,6 +1332,14 @@ export class AgentRunner implements AgentBackend {
       ...(loopDetected ? { loopDetected: true } : {}),
       ...(budgetExceeded ? { budgetExceeded: true } : {}),
       ...(aborted ? { aborted: true } : {}),
+      ...(suspended ? { suspended: true } : {}),
+      ...(suspended
+        ? {
+            pendingApprovals: pendingToolCalls
+              .map((pending) => pending.approvalRequest)
+              .filter((request): request is ApprovalRequest => request !== undefined),
+          }
+        : {}),
     }
 
     yield { type: 'done', data: runResult } satisfies StreamEvent
@@ -1271,6 +1354,10 @@ export class AgentRunner implements AgentBackend {
     grantedToolNames: ReadonlySet<string>,
     toolContext: ToolUseContext,
     options: RunOptions,
+    durableApproval?: {
+      readonly request: ApprovalRequest
+      readonly decision: ApprovalDecisionRecord
+    },
   ): Promise<ToolExecution> {
     options.onToolCall?.(block.name, block.input)
 
@@ -1298,6 +1385,9 @@ export class AgentRunner implements AgentBackend {
           'Built-in tools are opt-in: grant it via the agent\'s "tools" allowlist or ' +
           '"toolPreset" (or set the orchestrator\'s "defaultToolPreset").',
         isError: true,
+        ...(durableApproval
+          ? { metadata: { approvalError: 'The reviewed tool is no longer granted.' } }
+          : {}),
       }
     } else {
       try {
@@ -1319,13 +1409,37 @@ export class AgentRunner implements AgentBackend {
           block.name,
           block.input,
           executionContext,
-          { onToolCall: this.options.onToolCall },
+          {
+            onToolCall: this.options.onToolCall,
+            ...(durableApproval ? { durableApproval } : {}),
+          },
         )
       } catch (err) {
         // Tool executor errors become error results — the loop continues.
         const message = err instanceof Error ? err.message : String(err)
         result = { data: message, isError: true }
       }
+    }
+
+    const approvalContent = result.metadata?.approvalRequestContent
+    const canSuspend = approvalContent !== undefined
+      && options.onCheckpoint !== undefined
+      && options.onApprovalPrepare !== undefined
+      && options.onApprovalRequest !== undefined
+      && options.taskId !== undefined
+      && options.runId !== undefined
+    if (approvalContent !== undefined && !canSuspend) {
+      const { approvalRequestContent: _approvalRequestContent, ...metadata } = result.metadata ?? {}
+      result = {
+        data:
+          `Tool "${block.name}" requested suspension, but durable tool approval requires ` +
+          'an orchestrated task with checkpoint persistence and MemoryStore.compareAndSet.',
+        isError: true,
+        metadata,
+      }
+    }
+    if (result.metadata?.approvalError) {
+      throw new DurableApprovalError('APPROVAL_STALE_DECISION', result.data)
     }
 
     const endTime = Date.now()
@@ -1396,6 +1510,34 @@ export class AgentRunner implements AgentBackend {
       // a cancellation that became visible during this call: it represents the
       // conservative "no commit record" path and must run again after restore.
       shouldCommit: !(result.isError === true && toolContext.abortSignal?.aborted === true),
+      ...(canSuspend
+        ? {
+            suspension: {
+              content: approvalContent,
+              ...(result.metadata?.toolCallGate?.reason !== undefined
+                ? { reason: result.metadata.toolCallGate.reason }
+                : {}),
+            },
+          }
+        : {}),
+    }
+  }
+
+  private suspendedToolCommit(block: ToolUseBlock): ToolCallCommitCheckpoint {
+    const output = `Tool "${block.name}" is awaiting durable approval.`
+    return {
+      result: {
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: output,
+        is_error: true,
+      },
+      record: {
+        toolName: block.name,
+        input: block.input,
+        output,
+        duration: 0,
+      },
     }
   }
 

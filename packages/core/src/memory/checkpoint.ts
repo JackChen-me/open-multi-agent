@@ -6,8 +6,17 @@
  * SQLite, or any custom backend work without extra hooks.
  */
 
-import type { CheckpointOptions, CheckpointSnapshot, MemoryStore } from '../types.js'
+import type {
+  ApprovalRequest,
+  CheckpointOptions,
+  CheckpointSnapshot,
+  MemoryStore,
+} from '../types.js'
 import { validateRunMetadata } from '../observability/identity.js'
+import {
+  assertApprovalDecision,
+  isApprovalRequest,
+} from '../approval/durable.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -99,6 +108,7 @@ export class Checkpoint {
       snapshot['version'] !== 1
       && snapshot['version'] !== 2
       && snapshot['version'] !== 3
+      && snapshot['version'] !== 4
     ) return false
     if (
       snapshot['mode'] !== 'runTeam'
@@ -125,7 +135,7 @@ export class Checkpoint {
       if (typeof record['lastRootSpanId'] !== 'string') return false
     }
 
-    if (snapshot['version'] === 3) {
+    if (snapshot['version'] === 3 || snapshot['version'] === 4) {
       const inFlightTasks = snapshot['inFlightTasks']
       if (!Array.isArray(inFlightTasks)) return false
       const taskIds = new Set<string>()
@@ -133,6 +143,49 @@ export class Checkpoint {
         if (!Checkpoint.isInFlightTask(state)) return false
         if (taskIds.has(state.taskId)) return false
         taskIds.add(state.taskId)
+      }
+    }
+
+    if (snapshot['version'] === 4) {
+      const pendingApprovals = snapshot['pendingApprovals']
+      const approvalDecisions = snapshot['approvalDecisions']
+      const identity = snapshot['identity'] as Record<string, unknown>
+      if (!Array.isArray(pendingApprovals) || !Array.isArray(approvalDecisions)) return false
+      const pendingIds = new Set<string>()
+      for (const request of pendingApprovals) {
+        if (!isApprovalRequest(request) || request.runId !== identity['runId']) return false
+        if (pendingIds.has(request.id)) return false
+        pendingIds.add(request.id)
+      }
+      const decisionIds = new Set<string>()
+      for (const decision of approvalDecisions) {
+        try {
+          assertApprovalDecision(decision)
+        } catch {
+          return false
+        }
+        if (decision.runId !== identity['runId']) return false
+        if (decisionIds.has(decision.requestId)) return false
+        decisionIds.add(decision.requestId)
+      }
+      for (const state of snapshot['inFlightTasks'] as Array<Record<string, unknown>>) {
+        const pendingToolCalls = state['pendingToolCalls']
+        if (!Array.isArray(pendingToolCalls)) continue
+        for (const pending of pendingToolCalls as Array<Record<string, unknown>>) {
+          const request = pending['approvalRequest']
+          const decision = pending['approvalDecision']
+          if (request !== undefined) {
+            if (!isApprovalRequest(request) || !pendingIds.has(request.id)) return false
+          }
+          if (decision !== undefined) {
+            try {
+              assertApprovalDecision(decision, request as ApprovalRequest)
+            } catch {
+              return false
+            }
+            if (!decisionIds.has(decision.requestId)) return false
+          }
+        }
       }
     }
 
@@ -199,7 +252,28 @@ export class Checkpoint {
     if (!Checkpoint.isRecord(callRecord['input'])) return false
 
     const commit = pending['commit']
+    const approvalRequest = pending['approvalRequest']
+    const approvalDecision = pending['approvalDecision']
+    if (approvalRequest !== undefined) {
+      if (!isApprovalRequest(approvalRequest) || approvalRequest.scope !== 'tool_call') return false
+      const content = approvalRequest.content
+      if (
+        content.kind !== 'tool_call'
+        || content.toolCallId !== callRecord['id']
+        || content.toolName !== callRecord['name']
+      ) return false
+      if (approvalDecision !== undefined) {
+        try {
+          assertApprovalDecision(approvalDecision, approvalRequest)
+        } catch {
+          return false
+        }
+      }
+    } else if (approvalDecision !== undefined) {
+      return false
+    }
     if (commit === undefined) return true
+    if (approvalRequest !== undefined || approvalDecision !== undefined) return false
     if (commit === null || typeof commit !== 'object') return false
     const commitRecord = commit as Record<string, unknown>
     const result = commitRecord['result']

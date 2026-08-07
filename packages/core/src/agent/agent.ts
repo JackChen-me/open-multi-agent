@@ -54,6 +54,7 @@ import { emitTrace, generateSpanId } from '../utils/trace.js'
 import { mergeAbortSignals } from '../utils/abort.js'
 import { createRunIdentity } from '../observability/identity.js'
 import { classifyRunFailure, statusOnly } from '../observability/status.js'
+import { DurableApprovalError } from '../approval/durable.js'
 import { createTraceRuntime } from '../observability/runtime.js'
 import { TokenBudgetExceededError } from '../errors.js'
 import type { ToolDefinition as FrameworkToolDefinition, ToolRegistry } from '../tool/framework.js'
@@ -459,6 +460,19 @@ export class Agent {
       const result = await backend.run(messages, runOptions)
       this.state.tokenUsage = addUsage(this.state.tokenUsage, result.tokenUsage)
 
+      if (result.suspended) {
+        const suspendedResult = this.toAgentRunResult(
+          result,
+          false,
+          undefined,
+          identity,
+          statusOnly('suspended', 'Durable approval required before execution can continue.'),
+        )
+        this.transitionTo('completed')
+        this.emitAgentTrace(runOptions, agentStartMs, suspendedResult)
+        return suspendedResult
+      }
+
       if (result.budgetExceeded) {
         const budgetError = new TokenBudgetExceededError(
           this.name,
@@ -550,6 +564,8 @@ export class Agent {
         ? classifyRunFailure(error, { kind: 'timeout', statusCode: 'timeout' })
         : callerAbort?.aborted
           ? classifyRunFailure(error, { kind: 'cancellation', statusCode: 'cancelled' })
+          : error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
           : classifyRunFailure(error, {
               ...(failureKind !== undefined ? { kind: failureKind } : {}),
               provider: this.config.provider,
@@ -788,15 +804,17 @@ export class Agent {
 
           const status = result.budgetExceeded
             ? statusOnly('budget_exhausted')
+            : result.suspended
+              ? statusOnly('suspended', 'Durable approval required before execution can continue.')
             : timeoutSignal?.aborted
               ? statusOnly('timeout')
               : callerAbort?.aborted && result.aborted
                 ? statusOnly('cancelled')
                 : statusOnly('ok')
           let agentResult = this.toAgentRunResult(
-            result, !result.budgetExceeded, undefined, identity, status,
+            result, !result.budgetExceeded && !result.suspended, undefined, identity, status,
           )
-          if (this.config.afterRun) {
+          if (this.config.afterRun && !result.suspended) {
             failureKind = 'callback'
             agentResult = await this.config.afterRun(agentResult)
             failureKind = undefined
@@ -814,7 +832,9 @@ export class Agent {
           // Backend stream errors originate from the configured provider. Keep
           // the source classification on the event so task retry can make an
           // explicit failover decision without reclassifying a raw Error.
-          const classified = classifyRunFailure(error, { provider: this.config.provider })
+          const classified = error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
+            : classifyRunFailure(error, { provider: this.config.provider })
           this.transitionToError(error)
           this.emitAgentTrace(runOptions, agentStartMs, {
             success: false,
@@ -842,6 +862,8 @@ export class Agent {
         ? classifyRunFailure(error, { kind: 'timeout', statusCode: 'timeout' })
         : callerAbort?.aborted
           ? classifyRunFailure(error, { kind: 'cancellation', statusCode: 'cancelled' })
+          : error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
           : classifyRunFailure(error, {
               ...(failureKind !== undefined ? { kind: failureKind } : {}),
               provider: this.config.provider,
@@ -944,6 +966,7 @@ export class Agent {
       structured,
       ...(result.loopDetected ? { loopDetected: true } : {}),
       ...(result.budgetExceeded ? { budgetExceeded: true } : {}),
+      ...(result.pendingApprovals ? { pendingApprovals: result.pendingApprovals } : {}),
     }
   }
 

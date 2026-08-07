@@ -126,6 +126,39 @@ export class FileStore implements MemoryStore {
   }
 
   /**
+   * Atomically replace one value within this FileStore instance.
+   *
+   * FileStore remains a single-process writer (see the module scope note);
+   * cross-process reviewers should decide only after the suspended runner has
+   * exited, or use a database-backed MemoryStore with cross-process CAS.
+   */
+  compareAndSet(
+    key: string,
+    expectedValue: string | null,
+    value: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<boolean> {
+    const run = this.writeChain.then(async () => {
+      await this.ensureLoaded()
+      const existing = this.data.get(key)
+      if ((existing?.value ?? null) !== expectedValue) return false
+      this.data.set(key, {
+        key,
+        value,
+        metadata: metadata !== undefined ? { ...metadata } : undefined,
+        createdAt: existing?.createdAt ?? new Date(),
+      })
+      await this.flush()
+      return true
+    })
+    this.writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  /**
    * Like {@link set}, but also records a turn-count expiry. Expiry filtering is
    * the caller's responsibility (typically {@link SharedMemory}); this store
    * only persists the field. `createdAt` is preserved on update.

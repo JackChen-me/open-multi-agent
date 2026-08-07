@@ -310,6 +310,7 @@ function taskStatusFromSpan(status: RunStatusCode | undefined, incomplete: boole
     case 'ok': return 'completed'
     case 'skipped': return 'skipped'
     case 'cancelled': return 'blocked'
+    case 'suspended': return 'in_progress'
     case 'error':
     case 'timeout':
     case 'budget_exhausted':

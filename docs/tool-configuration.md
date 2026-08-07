@@ -199,8 +199,10 @@ const orchestrator = new OpenMultiAgent({
 ```
 
 The guard composes with the existing per-call `onToolCall` gateway, after input
-validation and before `execute`. An `allow` continues; a `deny` does not call
-the tool and returns a rejected run outcome. For a dynamically planned
+validation and before `execute`. An `allow` continues; a `deny` returns an error
+`ToolResult` without calling the tool. Inside a checkpointed task, `suspend` can persist the exact invocation
+for an out-of-process decision and later `restore()`; see
+[durable approvals](durable-approvals.md). For a dynamically planned
 `runTeam()`, an approved `onPlanReady` callback can supply the approval when no
 per-call gate is configured. If neither approval path exists, the tool is not
 executed and the result returns `confirmationRequired: true` with
@@ -346,7 +348,8 @@ const orchestrator = new OpenMultiAgent({
 Key semantics:
 
 - **`deny` returns a structured error `ToolResult`; it never throws.** The model sees the `reason` as a normal tool error and can adapt (try a safer command, ask the user, stop) rather than crashing the run. A gate that throws or returns an invalid decision is turned into an error result too (fail closed).
-- **Human-in-the-loop lives inside your callback.** `await` your own CLI prompt, Slack button, or web dialog, then return `allow` or `deny`. The framework prescribes no review channel, keeping the surface small.
+- **`suspend` is durable and returns control.** In a checkpointed built-in LLM task, `{ action: 'suspend' }` saves the exact invocation and returns a top-level `suspended` result. Record a decision with `decideApproval()`, then call `restore()`. Without a resumable checkpoint and atomic store, the call fails closed and the tool does not run. See [durable approvals](durable-approvals.md).
+- **Inline human-in-the-loop still works.** `await` your own CLI prompt, Slack button, or web dialog, then return `allow` or `deny` in the same callback lifetime. The framework prescribes no review channel.
 - **Agent overrides orchestrator.** `AgentConfig.onToolCall` beats `OrchestratorConfig.onToolCall` for that agent, so a team can set a default policy while one specialist tightens or relaxes it. A standalone `new Agent({ ..., onToolCall })` wires the gate straight into its executor.
 - **Runs after the name-based grant.** Default-deny / allowlist / denylist resolution runs **first**; a tool that is not granted is refused before the gate is reached, so the gate only ever sees calls to already-reachable tools. Custom tools and MCP tools route through the same executor, so they are gated too.
 - **The model-issued call ID is stable across recovery.** `toolCallId` identifies
@@ -354,7 +357,7 @@ Key semantics:
   restore, it keeps the same ID; a committed result is replayed without running
   the gate or tool again. See [checkpoint recovery](checkpoint.md#mid-task-tool-recovery).
 - **Orthogonal to task dispatch approval.** `OrchestratorConfig.onApproval` gates legacy task rounds and `onTaskDispatch` gates one ready task before dispatch; `onToolCall` gates a single tool invocation during execution. They operate at different layers and compose. The two task-level approval modes are mutually exclusive with each other.
-- **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny'`, and (on deny) a `gateReason` that is redacted like other sensitive trace text, so `onTrace` consumers can audit every decision.
+- **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny' | 'suspend'`, and an optional redacted `gateReason`. Durable decisions come from the approval ledger and may be summarized in an execution receipt; telemetry is not their source of truth.
 
 > **Not a security boundary.** A gate that returns `deny` still relies on cooperating code; it is a coordination layer, not containment. `bash` remains un-sandboxed (see the callout below). For an actually-untrusted shell, use process-level isolation (a container / VM / seccomp); the gate is for *policy*, not *isolation*.
 

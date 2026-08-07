@@ -232,6 +232,7 @@ export type {
   DiagnosticOptions,
   ExportResult,
   ExecutionReceipt,
+  ExecutionReceiptApprovalDecision,
   ExecutionReceiptDependencyEdge,
   FlushOptions,
   FlushResult,
@@ -272,6 +273,20 @@ export { FileStore } from './memory/file-store.js'
 export { RedactingStore } from './memory/redacting-store.js'
 export type { RedactingStoreOptions } from './memory/redacting-store.js'
 export { SharedMemory } from './memory/shared.js'
+export {
+  APPROVAL_KEY_PREFIX,
+  DurableApprovalError,
+  DurableApprovalLedger,
+  approvalKey,
+  createApprovalRequest,
+  decideApproval,
+  getApprovalRecord,
+  hashApprovalRequest,
+} from './approval/durable.js'
+export type {
+  CreateApprovalRequestInput,
+  DurableApprovalErrorCode,
+} from './approval/durable.js'
 export {
   Checkpoint,
   CHECKPOINT_KEY_PREFIX,
@@ -329,6 +344,18 @@ export type {
   RunStatusCode,
   RunFlag,
   RunOutcomeFields,
+  ApprovalScope,
+  ApprovalRequestContent,
+  PlanApprovalContent,
+  TaskRoundApprovalContent,
+  TaskDispatchApprovalContent,
+  ToolCallApprovalContent,
+  ApprovalRequest,
+  ApprovalReviewer,
+  ApprovalDecisionRecord,
+  ApprovalRecord,
+  ApprovalDecisionInput,
+  ApprovalGateDecision,
   StructuredTraceError,
   TraceErrorKind,
   AgentBackendConfig,
@@ -402,6 +429,7 @@ export type {
   CheckpointSnapshotV1,
   CheckpointSnapshotV2,
   CheckpointSnapshotV3,
+  CheckpointSnapshotV4,
   CheckpointRunIdentity,
   CompletedTaskCheckpoint,
   InFlightTaskCheckpoint,

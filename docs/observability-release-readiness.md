@@ -29,7 +29,7 @@ Baseline: `6339ee50515e149eb1fb5a073f44024d3ab821a3`, including PR #384.
 | `@open-multi-agent/otel` | separate package root | `packages/otel/src` | official in-memory exporter suites |
 | `forceFlush` / `shutdown` | `TraceSink`; OTel sink | batching/composite/legacy/OTel implementations | concurrency, timeout, reentry suites |
 | diagnostics / stats | sink and file-store types | `sink.ts`, `file-store.ts` | payload-free diagnostic and counter tests |
-| checkpoint/restore identity | top-level run results and checkpoint v3 | `memory/checkpoint.ts`, `identity.ts`, orchestrator | v1/v2 read, v3 continuation, runId-conflict tests |
+| checkpoint/restore identity | top-level run results and checkpoint v4 | `memory/checkpoint.ts`, `identity.ts`, orchestrator | v1/v2/v3 read, v4 continuation, runId-conflict tests |
 
 The public contract is the exported type plus the implementation and its tests.
 The private design RFC is historical rationale, not a substitute for current
@@ -171,7 +171,8 @@ does not claim it is browser-safe or attempt an unrelated root-export redesign.
   derives from `status.code === 'ok'`.
 - Identity-aware checkpoint schemas preserve logical identity across restore,
   increment the attempt, start a new trace, and link to the prior root. Schema
-  v1 and v2 remain readable; current v3 writes also carry in-flight runner state.
+  v1, v2, and v3 remain readable; current v4 writes also carry in-flight runner
+  and durable-approval continuation state.
 - TraceRecord schema v2 adds start/event/end records, W3C-compatible IDs,
   structured errors, and DAG/delegation/synthesis/restore links.
 - `TraceSink`, `TraceExporter`, and `BatchingTraceSink` add bounded queueing,

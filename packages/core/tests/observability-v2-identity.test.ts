@@ -273,7 +273,7 @@ describe('OBS-1A outcome semantics', () => {
 })
 
 describe('OBS-1A checkpoint identity restore', () => {
-  it('writes v3 and restores with the same runId, incremented attempt, and a new trace link', async () => {
+  it('writes v4 and restores with the same runId, incremented attempt, and a new trace link', async () => {
     const store = new InMemoryStore()
     const oma = new OpenMultiAgent({ defaultModel: 'test-model' })
     const initial = await oma.runTasks(teamWith(), [
@@ -281,8 +281,8 @@ describe('OBS-1A checkpoint identity restore', () => {
     ], { checkpoint: { store, runId: 'logical-run' } })
     const stored = await new Checkpoint(store, { runId: 'logical-run' }).loadLatest()
 
-    expect(stored?.version).toBe(3)
-    if (stored?.version !== 3) throw new Error('expected checkpoint v3')
+    expect(stored?.version).toBe(4)
+    if (stored?.version !== 4) throw new Error('expected checkpoint v4')
     expect(stored.identity).toEqual({
       runId: initial.identity?.runId,
       attempt: 1,

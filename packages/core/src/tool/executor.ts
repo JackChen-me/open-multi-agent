@@ -10,11 +10,25 @@
  * the framework.
  */
 
-import type { ToolCallGate, ToolCallGateMetadata, ToolResult, ToolResultMetadata, ToolUseContext } from '../types.js'
+import type {
+  ApprovalDecisionRecord,
+  ApprovalRequest,
+  ToolCallApprovalContent,
+  ToolCallGate,
+  ToolCallGateMetadata,
+  ToolResult,
+  ToolResultMetadata,
+  ToolUseContext,
+} from '../types.js'
 import type { ToolDefinition } from '../types.js'
 import { ToolRegistry } from './framework.js'
 import { Semaphore } from '../utils/semaphore.js'
 import type { ZodSchema } from 'zod'
+import {
+  assertApprovalDecision,
+  assertApprovalRequest,
+  hashApprovalRequest,
+} from '../approval/durable.js'
 
 // ---------------------------------------------------------------------------
 // ToolExecutor
@@ -42,6 +56,11 @@ export interface ToolExecutorOptions {
 export interface ToolExecutorExecutionOptions {
   /** Per-execution gate override. Takes priority over the constructor option. */
   readonly onToolCall?: ToolCallGate
+  /** Previously reviewed invocation supplied by checkpoint restore. */
+  readonly durableApproval?: {
+    readonly request: ApprovalRequest
+    readonly decision: ApprovalDecisionRecord
+  }
 }
 
 /** Describes one call in a batch. */
@@ -170,6 +189,9 @@ export class ToolExecutor {
     if (!inputParseResult.success) {
       return this.errorResult(
         `Invalid input for tool "${tool.name}":\n${inputParseResult.issuesMessage}`,
+        options.durableApproval
+          ? { approvalError: 'The current tool schema no longer accepts the reviewed input.' }
+          : undefined,
       )
     }
 
@@ -180,9 +202,51 @@ export class ToolExecutor {
       )
     }
 
+    const approvalContent = this.approvalContent(
+      tool.name,
+      rawInput,
+      inputParseResult.data as Record<string, unknown>,
+      tool.consequential === true,
+      context,
+    )
+    const restoredApproval = options.durableApproval
     const gate = options.onToolCall ?? this.onToolCall
     let gateMetadata: ToolCallGateMetadata | undefined
-    if (gate) {
+    let approvalDecision: ApprovalDecisionRecord | undefined
+    if (restoredApproval) {
+      try {
+        assertApprovalRequest(restoredApproval.request)
+        assertApprovalDecision(restoredApproval.decision, restoredApproval.request)
+        if (!approvalContent) {
+          throw new Error('Current tool context has no task/tool-call identity.')
+        }
+        const currentHash = hashApprovalRequest(
+          'tool_call',
+          restoredApproval.request.boundary,
+          approvalContent,
+        )
+        if (currentHash !== restoredApproval.request.requestHash) {
+          throw new Error('Current validated tool invocation differs from the reviewed content.')
+        }
+      } catch (error) {
+        return this.errorResult(
+          `Tool "${tool.name}" durable approval is stale or tampered: ${this.errorMessage(error)}`,
+          { approvalError: this.errorMessage(error) },
+        )
+      }
+      approvalDecision = restoredApproval.decision
+      if (approvalDecision.decision === 'rejected') {
+        gateMetadata = {
+          action: 'deny',
+          reason: `Rejected by durable reviewer "${approvalDecision.reviewer.id}".`,
+        }
+        return this.errorResult(`Tool "${tool.name}" denied by durable approval.`, {
+          toolCallGate: gateMetadata,
+          approvalDecision,
+        })
+      }
+      gateMetadata = { action: 'allow' }
+    } else if (gate) {
       let decision: unknown
       try {
         decision = await gate({
@@ -215,6 +279,18 @@ export class ToolExecutor {
           toolCallGate: gateMetadata,
         })
       }
+      if (gateMetadata.action === 'suspend') {
+        if (!approvalContent) {
+          return this.errorResult(
+            `Tool "${tool.name}" cannot suspend outside an orchestrated checkpointed task.`,
+            { toolCallGate: gateMetadata },
+          )
+        }
+        return this.errorResult(`Tool "${tool.name}" is awaiting durable approval.`, {
+          toolCallGate: gateMetadata,
+          approvalRequestContent: approvalContent,
+        })
+      }
     }
 
     // --- Execute ---
@@ -229,7 +305,13 @@ export class ToolExecutor {
           )
         }
       }
-      return this.withGateMetadata(this.maybeTruncate(tool, result), gateMetadata)
+      const withApproval = approvalDecision === undefined
+        ? result
+        : {
+            ...result,
+            metadata: { ...result.metadata, approvalDecision },
+          }
+      return this.withGateMetadata(this.maybeTruncate(tool, withApproval), gateMetadata)
     } catch (err) {
       return this.maybeTruncate(
         tool,
@@ -285,10 +367,10 @@ export class ToolExecutor {
   private gateMetadataFromDecision(decision: unknown): ToolCallGateMetadata | undefined {
     if (decision === null || typeof decision !== 'object') return undefined
     const action = (decision as { readonly action?: unknown }).action
-    if (action !== 'allow' && action !== 'deny') return undefined
+    if (action !== 'allow' && action !== 'deny' && action !== 'suspend') return undefined
     const reason = (decision as { readonly reason?: unknown }).reason
     if (reason !== undefined && typeof reason !== 'string') return undefined
-    if (action === 'deny' && reason !== undefined) {
+    if ((action === 'deny' || action === 'suspend') && reason !== undefined) {
       return { action, reason }
     }
     return { action }
@@ -304,6 +386,26 @@ export class ToolExecutor {
       : typeof err === 'string'
         ? err
         : JSON.stringify(err)
+  }
+
+  private approvalContent(
+    toolName: string,
+    rawInput: Record<string, unknown>,
+    input: Record<string, unknown>,
+    consequential: boolean,
+    context: ToolUseContext,
+  ): ToolCallApprovalContent | undefined {
+    if (!context.taskId || !context.toolCallId) return undefined
+    return {
+      kind: 'tool_call',
+      toolName,
+      rawInput,
+      input,
+      agentName: context.agent.name,
+      taskId: context.taskId,
+      toolCallId: context.toolCallId,
+      consequential,
+    }
   }
 
   /** Construct an error ToolResult. */
