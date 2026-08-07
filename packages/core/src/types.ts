@@ -161,6 +161,28 @@ export interface TokenUsage {
   readonly output_tokens: number
 }
 
+/**
+ * Declarative policy for network requests opened by framework-owned LLM
+ * transports.
+ *
+ * - `'offline'` permits only loopback HTTP(S) origins (`localhost`,
+ *   `*.localhost`, `127.0.0.0/8`, and `[::1]`).
+ * - `'allowlist'` permits only the listed exact HTTP(S) origins. Entries must
+ *   be origins such as `https://api.openai.com` or
+ *   `http://127.0.0.1:11434`, without credentials, paths, query strings, or
+ *   fragments.
+ *
+ * This is deliberately narrower than a process firewall. It does not govern
+ * application callbacks, tools, subprocesses, MCP-server internals, or
+ * application-owned telemetry exporters.
+ */
+export type EgressPolicy =
+  | { readonly mode: 'offline' }
+  | {
+      readonly mode: 'allowlist'
+      readonly allowedOrigins: readonly string[]
+    }
+
 // ---------------------------------------------------------------------------
 // Run identity and outcome
 // ---------------------------------------------------------------------------
@@ -209,6 +231,12 @@ export interface RunIdentityOptions {
    * and echoed on the run result.
    */
   readonly metadata?: Readonly<Record<string, TraceAttributeValue>>
+  /**
+   * Per-run framework-owned LLM egress restriction. When agent- or
+   * orchestrator-level policies are also configured, all scopes are
+   * intersected: a more specific scope may narrow but never widen another.
+   */
+  readonly egressPolicy?: EgressPolicy
 }
 
 /** Per-call options for {@link OpenMultiAgent.runAgent}. */
@@ -738,6 +766,13 @@ export interface AgentConfig {
    * non-empty placeholder (e.g. `'ollama'`) because the OpenAI SDK validates it.
    */
   readonly baseURL?: string
+  /**
+   * Agent-level restriction for framework-owned LLM requests. It intersects
+   * with run- and orchestrator-level policies, so it can narrow inherited
+   * access but cannot widen it. External backends and tool code are outside
+   * this policy's scope.
+   */
+  readonly egressPolicy?: EgressPolicy
   /** API key override; falls back to the provider's standard env var. */
   readonly apiKey?: string
   /** AWS region override for the `bedrock` provider; falls back to `AWS_REGION` env var, then `'us-east-1'`. Ignored by all other providers. */
@@ -2000,6 +2035,12 @@ export interface OrchestratorConfig {
   readonly defaultProvider?: SupportedProvider
   readonly defaultBaseURL?: string
   readonly defaultApiKey?: string
+  /**
+   * Default restriction for framework-owned LLM network requests. Per-run and
+   * per-agent policies intersect with this default; omission preserves legacy
+   * unrestricted behavior.
+   */
+  readonly egressPolicy?: EgressPolicy
   /**
    * Default checkpoint configuration for `runTeam`, `runTasks`, `runFromPlan`,
    * and `restore`. Per-call options override this value. Defaults to off.

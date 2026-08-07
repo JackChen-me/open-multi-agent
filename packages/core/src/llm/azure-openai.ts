@@ -53,6 +53,7 @@ import type {
   StreamEvent,
   TextBlock,
   ToolUseBlock,
+  EgressPolicy,
 } from '../types.js'
 
 import {
@@ -64,6 +65,7 @@ import {
 } from './openai-common.js'
 import { assertValidMessages } from './validate.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
+import { createEgressFetch } from './egress.js'
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
@@ -106,11 +108,24 @@ export class AzureOpenAIAdapter implements LLMAdapter {
    * @param endpoint - Azure endpoint URL (falls back to AZURE_OPENAI_ENDPOINT env var)
    * @param apiVersion - API version string (falls back to AZURE_OPENAI_API_VERSION, defaults to '2024-10-21')
    */
-  constructor(apiKey?: string, endpoint?: string, apiVersion?: string) {
+  constructor(
+    apiKey?: string,
+    endpoint?: string,
+    apiVersion?: string,
+    egressPolicy?: EgressPolicy,
+  ) {
     this.#client = new AzureOpenAI({
       apiKey: apiKey ?? process.env['AZURE_OPENAI_API_KEY'],
       endpoint: endpoint ?? process.env['AZURE_OPENAI_ENDPOINT'],
       apiVersion: apiVersion ?? process.env['AZURE_OPENAI_API_VERSION'] ?? DEFAULT_AZURE_OPENAI_API_VERSION,
+      ...(egressPolicy !== undefined
+        ? {
+            // Explicit null suppresses OpenAI SDK's unrelated
+            // OPENAI_BASE_URL fallback so the checked Azure endpoint wins.
+            baseURL: null,
+            fetch: createEgressFetch(egressPolicy, this.name),
+          }
+        : {}),
     })
   }
 
@@ -338,4 +353,3 @@ export class AzureOpenAIAdapter implements LLMAdapter {
     }
   }
 }
-

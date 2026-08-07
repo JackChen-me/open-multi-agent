@@ -60,6 +60,7 @@ import type { ToolDefinition as FrameworkToolDefinition, ToolRegistry } from '..
 import type { ToolExecutor } from '../tool/executor.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import { createAdapter } from '../llm/adapter.js'
+import { normalizeEgressPolicy, rejectUnsupportedEgress } from '../llm/egress.js'
 import { AgentRunner, type AgentBackend, type RunnerOptions, type RunOptions, type RunResult } from './runner.js'
 import {
   buildStructuredOutputInstruction,
@@ -122,7 +123,10 @@ export class Agent {
           `or run it through OpenMultiAgent to inherit 'defaultModel'.`,
       )
     }
-    this.config = config
+    const egressPolicy = normalizeEgressPolicy(config.egressPolicy)
+    this.config = egressPolicy === undefined
+      ? config
+      : { ...config, egressPolicy }
     this._toolRegistry = toolRegistry
     this._toolExecutor = toolExecutor
     this.messageHistory = config.history ? [...config.history] : []
@@ -160,9 +164,29 @@ export class Agent {
     }
 
     const provider = this.config.provider ?? 'anthropic'
-    const adapter =
-      this.config.adapter ??
-      (await createAdapter(provider, this.config.apiKey, this.config.baseURL, this.config.region))
+    let adapter = this.config.adapter
+    if (adapter !== undefined) {
+      rejectUnsupportedEgress(
+        this.config.egressPolicy,
+        adapter.name,
+        'custom and AI SDK adapters do not expose an enforceable request transport or target contract to OMA.',
+      )
+    } else {
+      adapter = this.config.egressPolicy === undefined
+        ? await createAdapter(
+            provider,
+            this.config.apiKey,
+            this.config.baseURL,
+            this.config.region,
+          )
+        : await createAdapter(
+            provider,
+            this.config.apiKey,
+            this.config.baseURL,
+            this.config.region,
+            this.config.egressPolicy,
+          )
+    }
 
     // Append structured-output instructions when an outputSchema is configured.
     let effectiveSystemPrompt = this.config.systemPrompt

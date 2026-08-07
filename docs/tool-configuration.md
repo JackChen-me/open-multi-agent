@@ -582,5 +582,6 @@ Notes:
 - Current transport support is stdio.
 - MCP input validation is delegated to the MCP server (`inputSchema` is `z.any()`).
 - Prefer locally installed or pinned MCP server binaries and pass only the environment variables that server needs. Avoid spreading `process.env` into MCP subprocesses.
+- `egressPolicy` does not constrain connections opened inside the MCP child, by `bash`, or by custom tools. See the [egress enforcement matrix](egress-policy.md#enforcement-matrix).
 
 See [`integrations/mcp-github`](../packages/core/examples/integrations/mcp-github.ts) for a full runnable setup.

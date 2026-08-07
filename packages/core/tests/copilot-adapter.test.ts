@@ -110,6 +110,54 @@ describe('CopilotAdapter', () => {
     })
   })
 
+  describe('egress policy', () => {
+    it('checks every required origin before opening the first auth connection', async () => {
+      const fetchMock = vi.fn()
+      globalThis.fetch = fetchMock
+      const adapter = new CopilotAdapter({
+        apiKey: 'gh_token',
+        egressPolicy: {
+          mode: 'allowlist',
+          allowedOrigins: ['https://api.githubcopilot.com'],
+        },
+      })
+
+      await expect(adapter.chat([textMsg('user', 'Hi')], chatOpts())).rejects.toMatchObject({
+        code: 'EGRESS_POLICY_DENIED',
+        origin: 'https://api.github.com',
+      })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(OpenAIMock).not.toHaveBeenCalled()
+    })
+
+    it('guards the token exchange and Copilot API transport when both origins are allowed', async () => {
+      const fetchMock = mockFetchForToken('session_guarded')
+      globalThis.fetch = fetchMock
+      mockCreate.mockResolvedValue(makeCompletion())
+      const adapter = new CopilotAdapter({
+        apiKey: 'gh_token',
+        egressPolicy: {
+          mode: 'allowlist',
+          allowedOrigins: [
+            'https://api.github.com',
+            'https://api.githubcopilot.com',
+          ],
+        },
+      })
+
+      await adapter.chat([textMsg('user', 'Hi')], chatOpts())
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.github.com/copilot_internal/v2/token',
+        expect.objectContaining({ redirect: 'error' }),
+      )
+      expect(OpenAIMock).toHaveBeenCalledWith(expect.objectContaining({
+        baseURL: 'https://api.githubcopilot.com',
+        fetch: expect.any(Function),
+      }))
+    })
+  })
+
   // =========================================================================
   // Token management
   // =========================================================================

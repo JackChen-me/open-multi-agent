@@ -100,6 +100,29 @@ describe('AzureOpenAIAdapter', () => {
     expect(adapter.name).toBe('azure-openai')
   })
 
+  it('injects a guarded fetch and suppresses OPENAI_BASE_URL under policy', async () => {
+    new AzureOpenAIAdapter(
+      'test-key',
+      'https://resource.openai.azure.com',
+      undefined,
+      {
+        mode: 'allowlist',
+        allowedOrigins: ['https://resource.openai.azure.com'],
+      },
+    )
+    const init = AzureOpenAIMock.mock.calls.at(-1)?.[0] as {
+      baseURL?: string | null
+      fetch?: typeof globalThis.fetch
+    }
+
+    expect(init.baseURL).toBeNull()
+    expect(init.fetch).toEqual(expect.any(Function))
+    await expect(init.fetch!('https://other.example/v1')).rejects.toMatchObject({
+      code: 'EGRESS_POLICY_DENIED',
+      origin: 'https://other.example',
+    })
+  })
+
   it('uses AZURE_OPENAI_API_KEY by default', () => {
     const originalKey = process.env['AZURE_OPENAI_API_KEY']
     const originalEndpoint = process.env['AZURE_OPENAI_ENDPOINT']

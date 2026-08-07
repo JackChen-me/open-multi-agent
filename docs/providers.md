@@ -2,6 +2,11 @@
 
 `open-multi-agent` keeps the agent config shape stable across hosted, cloud, and local providers. Change `provider`, `model`, and the relevant credential; the rest of your team definition stays the same.
 
+To restrict connections opened by enforceable built-in LLM adapters, see the
+[framework-owned LLM egress policy](egress-policy.md). That policy deliberately
+does not claim to sandbox tools, subprocesses, MCP servers, or application-owned
+exporters.
+
 The supported runtime is Node.js 20 or newer; Node.js 22 or 24 is recommended.
 Node.js 20 is upstream-EOL and retained only as a migration compatibility
 window. OMA will remove Node.js 20 support in its next major release, no earlier
@@ -109,6 +114,12 @@ one model turn. `preferredUnderBudget: 'degrade'` is an application-declared
 policy choice, not a prediction that a particular plan would exceed budget.
 
 ## Vercel AI SDK (optional)
+
+The AI SDK model is an opaque application-supplied transport. When
+`egressPolicy` is configured, OMA rejects `AISdkAdapter` before invocation
+rather than claiming it can constrain the model's requests. Use the provider's
+own transport controls or an infrastructure firewall when the bridge needs an
+egress boundary; see [framework-owned LLM egress policy](egress-policy.md).
 
 The AI SDK bridge routes an agent through [any AI SDK provider](https://ai-sdk.dev/providers) instead of the built-in `provider` factory. Install the optional peers with `npm i ai @ai-sdk/<provider>`; the peer range accepts AI SDK 5, 6, and 7, and AI SDK 7 requires Node.js >= 22.
 

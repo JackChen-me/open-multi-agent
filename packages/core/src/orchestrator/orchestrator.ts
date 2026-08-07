@@ -49,6 +49,7 @@ import type {
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
+  EgressPolicy,
   ExecutionRoutingConfig,
   ModelRoutingPolicy,
   PlanArtifact,
@@ -79,6 +80,10 @@ import type { RunOptions } from '../agent/runner.js'
 import { Agent } from '../agent/agent.js'
 import { AgentPool } from '../agent/pool.js'
 import { createAdapter } from '../llm/adapter.js'
+import {
+  intersectEgressPolicies,
+  rejectUnsupportedEgress,
+} from '../llm/egress.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
 import { mergeAbortSignals } from '../utils/abort.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
@@ -228,6 +233,50 @@ interface EffectiveRunBudgets {
   readonly maxCostBudget?: number
 }
 
+type EffectiveOrchestratorConfig = Required<
+  Omit<
+    OrchestratorConfig,
+    | 'onApproval'
+    | 'onTaskDispatch'
+    | 'onAgentStream'
+    | 'onPlanReady'
+    | 'onProgress'
+    | 'onTrace'
+    | 'onToolCall'
+    | 'observability'
+    | 'evaluation'
+    | 'defaultBaseURL'
+    | 'defaultApiKey'
+    | 'egressPolicy'
+    | 'maxTokenBudget'
+    | 'maxCostBudget'
+    | 'estimateCost'
+    | 'defaultToolPreset'
+    | 'checkpoint'
+    | 'recovery'
+  >
+> & Pick<
+  OrchestratorConfig,
+  | 'onApproval'
+  | 'onTaskDispatch'
+  | 'onAgentStream'
+  | 'onPlanReady'
+  | 'onProgress'
+  | 'onTrace'
+  | 'onToolCall'
+  | 'observability'
+  | 'evaluation'
+  | 'defaultBaseURL'
+  | 'defaultApiKey'
+  | 'egressPolicy'
+  | 'maxTokenBudget'
+  | 'maxCostBudget'
+  | 'estimateCost'
+  | 'defaultToolPreset'
+  | 'checkpoint'
+  | 'recovery'
+>
+
 interface SemanticProfileRun {
   readonly assessment: SemanticRoutingAssessment
   readonly usage?: TokenUsage
@@ -305,9 +354,7 @@ function resolveRunBudgets(
  * Most users will interact with this class exclusively.
  */
 export class OpenMultiAgent {
-  private readonly config: Required<
-    Omit<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
-  > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
+  private readonly config: EffectiveOrchestratorConfig
 
   private readonly teams: Map<string, Team> = new Map()
   private readonly hasConfiguredCustomExecutionRouter: boolean
@@ -384,6 +431,7 @@ export class OpenMultiAgent {
       defaultProvider: config.defaultProvider ?? 'anthropic',
       defaultBaseURL: config.defaultBaseURL,
       defaultApiKey: config.defaultApiKey,
+      egressPolicy: intersectEgressPolicies(config.egressPolicy),
       // `defaultCwd === undefined` means "use the default sandbox rooted at
       // <cwd>/.agent-workspace". An explicit `null` propagates through to
       // disable the filesystem sandbox; a string sets a custom sandbox root.
@@ -404,6 +452,14 @@ export class OpenMultiAgent {
       onTrace: config.onTrace ?? (hasExplicitLegacyBridge ? LEGACY_TRACE_METADATA_ONLY : undefined),
       onToolCall: config.onToolCall,
       requireConsequentialConfirmation: config.requireConsequentialConfirmation ?? false,
+    }
+  }
+
+  private configForRun(egressPolicy?: EgressPolicy): EffectiveOrchestratorConfig {
+    const effectivePolicy = intersectEgressPolicies(this.config.egressPolicy, egressPolicy)
+    return {
+      ...this.config,
+      egressPolicy: effectivePolicy,
     }
   }
 
@@ -490,18 +546,35 @@ export class OpenMultiAgent {
   private async resolveTaskProfiler(
     routingConfig: ExecutionRoutingConfig,
     coordinator?: CoordinatorConfig,
+    config: EffectiveOrchestratorConfig = this.config,
   ): Promise<TaskProfiler> {
     if (routingConfig.profiler !== undefined) return routingConfig.profiler
-    const adapter = routingConfig.adapter
-      ?? coordinator?.adapter
-      ?? await createAdapter(
-        this.config.defaultProvider,
-        this.config.defaultApiKey,
-        this.config.defaultBaseURL,
+    const configuredAdapter = routingConfig.adapter ?? coordinator?.adapter
+    if (configuredAdapter !== undefined) {
+      rejectUnsupportedEgress(
+        config.egressPolicy,
+        configuredAdapter.name,
+        'custom and AI SDK adapters do not expose an enforceable request transport or target contract to OMA.',
       )
+    }
+    const adapter = configuredAdapter ?? (
+      config.egressPolicy === undefined
+        ? await createAdapter(
+            config.defaultProvider,
+            config.defaultApiKey,
+            config.defaultBaseURL,
+          )
+        : await createAdapter(
+            config.defaultProvider,
+            config.defaultApiKey,
+            config.defaultBaseURL,
+            undefined,
+            config.egressPolicy,
+          )
+    )
     return new LLMTaskProfiler({
       adapter,
-      model: routingConfig.model ?? coordinator?.model ?? this.config.defaultModel,
+      model: routingConfig.model ?? coordinator?.model ?? config.defaultModel,
     })
   }
 
@@ -509,6 +582,7 @@ export class OpenMultiAgent {
     context: ReturnType<typeof buildRoutingContext>,
     routingConfig: ReturnType<OpenMultiAgent['resolveExecutionRoutingConfig']>,
     coordinator: CoordinatorConfig | undefined,
+    config: EffectiveOrchestratorConfig,
     traceRuntime: TraceRuntime | undefined,
     facts: {
       readonly hasConsequentialTools: boolean
@@ -527,7 +601,7 @@ export class OpenMultiAgent {
       },
     })
     try {
-      profiler = await this.resolveTaskProfiler(routingConfig, coordinator)
+      profiler = await this.resolveTaskProfiler(routingConfig, coordinator, config)
       if (typeof profiler.version !== 'string' || profiler.version.length === 0) {
         throw new TaskProfileValidationError(
           'Task profiler version must be a non-empty string.',
@@ -755,14 +829,15 @@ export class OpenMultiAgent {
     prompt: string,
     options?: RunAgentOptions,
   ): Promise<AgentRunResult> {
+    const runConfig = this.configForRun(options?.egressPolicy)
     const pendingEvaluation = this.beginOnlineEvaluation(prompt)
     const { identity, metadata } = createRunFacts(options)
     const traceRuntime = this.startTrace(identity, metadata)
     const effectiveBudget = resolveBudgetCeiling(config.maxTokenBudget, this.config.maxTokenBudget)
     const effective: AgentConfig = applyDefaultToolPreset({
-      ...applyAgentDefaults(config, this.config),
+      ...applyAgentDefaults(config, runConfig),
       maxTokenBudget: effectiveBudget,
-    }, this.config.defaultToolPreset)
+    }, runConfig.defaultToolPreset)
     const consequential = hasGrantedConsequentialTool(effective)
     const confirmationState = createConsequentialConfirmationState()
     const guardedEffective = consequential && this.config.requireConsequentialConfirmation
@@ -896,9 +971,10 @@ export class OpenMultiAgent {
     goal: string,
     options?: RunTeamOptions,
   ): Promise<TeamRunResult> {
+    const runConfig = this.configForRun(options?.egressPolicy)
     const pendingEvaluation = this.beginOnlineEvaluation(goal)
     const agentConfigs = team.getAgents()
-    const budgets = resolveRunBudgets(this.config, options)
+    const budgets = resolveRunBudgets(runConfig, options)
     const explicitMode = options?.mode
     if (explicitMode === 'single' && options?.planOnly) {
       throw new Error("runTeam mode 'single' cannot be combined with planOnly.")
@@ -1004,14 +1080,15 @@ export class OpenMultiAgent {
       const deterministicSingleDecision = routerDecision!
       const effectiveAgents = agentConfigs.map((agentConfig) =>
         applyDefaultToolPreset(
-          applyAgentDefaults(agentConfig, this.config),
-          this.config.defaultToolPreset,
+          applyAgentDefaults(agentConfig, runConfig),
+          runConfig.defaultToolPreset,
         ))
       try {
         semanticProfileRun = await this.runSemanticProfiler(
           routingContext,
           executionRouting,
           options?.coordinator,
+          runConfig,
           traceRuntime,
           {
             hasConsequentialTools: effectiveAgents.some((agentConfig) =>
@@ -1152,8 +1229,8 @@ export class OpenMultiAgent {
     const confirmationState = createConsequentialConfirmationState()
     let consequentialUndeclared = undeclared && agentConfigs.some((agentConfig) => {
       const effective = applyDefaultToolPreset(
-        applyAgentDefaults(agentConfig, this.config),
-        this.config.defaultToolPreset,
+        applyAgentDefaults(agentConfig, runConfig),
+        runConfig.defaultToolPreset,
       )
       return hasGrantedConsequentialTool(effective, { includeDelegateTool: true })
     })
@@ -1242,9 +1319,9 @@ export class OpenMultiAgent {
         budgets.maxTokenBudget,
       )
       const effective: AgentConfig = withModelRoute(applyDefaultToolPreset({
-        ...applyAgentDefaults(bestAgent, this.config),
+        ...applyAgentDefaults(bestAgent, runConfig),
         maxTokenBudget: effectiveBudget,
-      }, this.config.defaultToolPreset), routeMatches(options?.modelRouting, { phase: 'short-circuit', agent: bestAgent.name }))
+      }, runConfig.defaultToolPreset), routeMatches(options?.modelRouting, { phase: 'short-circuit', agent: bestAgent.name }))
       const selectedConsequential = undeclared
         && hasGrantedConsequentialTool(effective)
       const guardedEffective = selectedConsequential
@@ -1365,7 +1442,7 @@ export class OpenMultiAgent {
     // Step 1: Coordinator decomposes goal into tasks
     // ------------------------------------------------------------------
     const unguardedCoordinatorBaseConfig = buildCoordinatorBaseConfig(
-      this.config,
+      runConfig,
       coordinatorOverrides,
       agentConfigs,
       (options?.verifyJudges?.length ?? 0) > 0,
@@ -1622,6 +1699,7 @@ export class OpenMultiAgent {
       undeclared && this.config.requireConsequentialConfirmation
         ? confirmationState
         : undefined,
+      runConfig,
     )
     const activeCheckpoint = this.createActiveCheckpoint(
       team,
@@ -1634,7 +1712,7 @@ export class OpenMultiAgent {
       pool,
       scheduler,
       agentResults,
-      config: this.config,
+      config: runConfig,
       ...(activeCheckpoint ? { checkpoint: activeCheckpoint } : {}),
       runId,
       identity,
@@ -1773,7 +1851,7 @@ export class OpenMultiAgent {
     // ------------------------------------------------------------------
     // Step 5: Coordinator synthesises final result
     // ------------------------------------------------------------------
-    const synthesis = await runCoordinatorSynthesis(this.config, team, queue, goal, coordinatorBaseConfig, {
+    const synthesis = await runCoordinatorSynthesis(runConfig, team, queue, goal, coordinatorBaseConfig, {
       identity,
       modelRouting: options?.modelRouting,
       runId,
@@ -2178,6 +2256,7 @@ export class OpenMultiAgent {
     prompt: string,
     options: ConsensusOptions,
   ): Promise<ConsensusResult> {
+    const runConfig = this.configForRun(options.egressPolicy)
     const pendingEvaluation = this.beginOnlineEvaluation(prompt)
     const { identity, metadata } = createRunFacts(options)
     const proposers = Array.isArray(options.proposer) ? options.proposer : [options.proposer]
@@ -2230,6 +2309,7 @@ export class OpenMultiAgent {
       defaultProvider: this.config.defaultProvider,
       defaultBaseURL: this.config.defaultBaseURL,
       defaultApiKey: this.config.defaultApiKey,
+      egressPolicy: runConfig.egressPolicy,
       defaultCwd: this.config.defaultCwd,
       onToolCall: this.config.onToolCall,
       maxConcurrency: this.config.maxConcurrency,
@@ -2439,6 +2519,7 @@ export class OpenMultiAgent {
     governanceDeclaration?: GovernanceDeclaration,
     routingDecisionInput?: RoutingDecisionRecordInput,
   ): Promise<TeamRunResult> {
+    const runConfig = this.configForRun(options?.egressPolicy)
     const agentConfigs = team.getAgents()
     const requirementIssues = validateTaskRequirements(
       queue.list(),
@@ -2471,9 +2552,9 @@ export class OpenMultiAgent {
     if (this.config.onApproval) {
       scheduler.autoAssign(queue, agentConfigs)
     }
-    const budgets = resolveRunBudgets(this.config, options)
+    const budgets = resolveRunBudgets(runConfig, options)
 
-    const pool = this.buildPool(agentConfigs)
+    const pool = this.buildPool(agentConfigs, undefined, runConfig)
     const agentResults = initialAgentResults ?? new Map<string, AgentRunResult>()
     const checkpoint = activeCheckpoint ?? this.createActiveCheckpoint(
       team,
@@ -2486,7 +2567,7 @@ export class OpenMultiAgent {
       pool,
       scheduler,
       agentResults,
-      config: this.config,
+      config: runConfig,
       ...(checkpoint ? { checkpoint } : {}),
       identity: runIdentity,
       ...(metadata !== undefined ? { metadata } : {}),
@@ -2521,8 +2602,8 @@ export class OpenMultiAgent {
     // we surface `synthesis_failed` and fall back to raw outputs.
     if (checkpoint?.mode === 'runTeam' && goal !== undefined) {
       try {
-        const coordinatorBaseConfig = buildCoordinatorBaseConfig(this.config, coordinatorForSynthesis, agentConfigs, false)
-        const synthesis = await runCoordinatorSynthesis(this.config, team, queue, goal, coordinatorBaseConfig, {
+        const coordinatorBaseConfig = buildCoordinatorBaseConfig(runConfig, coordinatorForSynthesis, agentConfigs, false)
+        const synthesis = await runCoordinatorSynthesis(runConfig, team, queue, goal, coordinatorBaseConfig, {
           identity: runIdentity,
           modelRouting: options?.modelRouting,
           runId: ctx.runId,
@@ -2688,12 +2769,13 @@ export class OpenMultiAgent {
   private buildPool(
     agentConfigs: AgentConfig[],
     confirmationState?: ConsequentialConfirmationState,
+    config: EffectiveOrchestratorConfig = this.config,
   ): AgentPool {
-    const pool = new AgentPool(this.config.maxConcurrency)
-    for (const config of agentConfigs) {
+    const pool = new AgentPool(config.maxConcurrency)
+    for (const agentConfig of agentConfigs) {
       const effective: AgentConfig = applyDefaultToolPreset(
-        applyAgentDefaults(config, this.config),
-        this.config.defaultToolPreset,
+        applyAgentDefaults(agentConfig, config),
+        config.defaultToolPreset,
       )
       const guardedEffective = confirmationState
         && hasGrantedConsequentialTool(effective, { includeDelegateTool: true })

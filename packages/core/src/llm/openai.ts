@@ -49,6 +49,7 @@ import type {
   TextBlock,
   ThinkingConfig,
   ToolUseBlock,
+  EgressPolicy,
 } from '../types.js'
 
 import {
@@ -63,6 +64,7 @@ import {
 import { assertValidMessages } from './validate.js'
 import type { ReasoningOutboundOptions } from './reasoning-fallback.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
+import { createEgressFetch } from './egress.js'
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
@@ -94,10 +96,18 @@ export class OpenAIAdapter implements LLMAdapter {
 
   readonly #client: OpenAI
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(
+    apiKey?: string,
+    baseURL?: string,
+    egressPolicy?: EgressPolicy,
+    egressProvider = 'openai',
+  ) {
     this.#client = new OpenAI({
       apiKey: apiKey ?? process.env['OPENAI_API_KEY'],
       baseURL,
+      ...(egressPolicy !== undefined
+        ? { fetch: createEgressFetch(egressPolicy, egressProvider) }
+        : {}),
     })
   }
 

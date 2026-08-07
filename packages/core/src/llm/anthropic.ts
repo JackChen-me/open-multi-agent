@@ -52,6 +52,7 @@ import type {
   ThinkingConfig,
   ToolResultBlock,
   ToolUseBlock,
+  EgressPolicy,
 } from '../types.js'
 import {
   reasoningBlockToInlineText,
@@ -59,6 +60,7 @@ import {
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
+import { createEgressFetch } from './egress.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -326,10 +328,13 @@ export class AnthropicAdapter implements LLMAdapter {
 
   readonly #client: Anthropic
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     this.#client = new Anthropic({
       apiKey: apiKey ?? process.env['ANTHROPIC_API_KEY'],
       baseURL,
+      ...(egressPolicy !== undefined
+        ? { fetch: createEgressFetch(egressPolicy, this.name) }
+        : {}),
     })
   }
 

@@ -503,6 +503,7 @@ export function buildCoordinatorBaseConfig(
     provider: coordinatorOverrides?.provider ?? config.defaultProvider,
     baseURL: coordinatorOverrides?.baseURL ?? config.defaultBaseURL,
     apiKey: coordinatorOverrides?.apiKey ?? config.defaultApiKey,
+    egressPolicy: config.egressPolicy,
     systemPrompt: buildCoordinatorPrompt(
       agentConfigs,
       coordinatorOverrides,
