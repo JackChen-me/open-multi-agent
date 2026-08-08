@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## 1.15.0 - 2026-08-09
+
+### Added
+
+- Durable approval gates can suspend plan, round, task-dispatch, and tool-call
+  decisions, persist content-bound pending requests and first-wins reviewer
+  decisions in a checkpoint `MemoryStore`, and resume only the approved plan,
+  task, or validated tool invocation. Missing state, stale hashes, schema drift,
+  and tampering fail closed, while derived execution receipts carry the review
+  evidence without making telemetry the authoritative record. New checkpoint
+  writes use schema version 4 to preserve approval continuation state.
+- Checkpoint recovery preserves in-flight built-in runner messages, turn and
+  token accounting, pending tool calls, and independently committed tool
+  results. Restore replays committed results without re-executing their tools,
+  reruns only missing calls, and exposes the stable model-issued `toolCallId`
+  to tools and per-call gates for external idempotency.
+- `Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` accept
+  complete structured message histories. Persistent `Agent.prompt()`
+  conversations can accept one structured user turn, including image input,
+  with runtime validation, defensive copies, and full-message access in
+  `beforeRun`.
+- Rich tool results separate application-owned `ToolResult.data` from validated,
+  model-visible text, image, and file `modelOutput`. Built-in adapters and MCP
+  map supported content explicitly, while runner context, checkpoints,
+  recovery, progress, evaluation, and privacy-safe trace summaries preserve the
+  richer result.
+- `AgentConfig.history` restores persisted conversation messages into a new
+  `Agent` so subsequent `prompt()` calls can continue an earlier conversation.
+
+### Compatibility
+
+- Existing string inputs, string/error tool results, and compression markers
+  keep their previous behavior. Structured input and rich tool output are
+  additive; adapter- and model-specific media limits still apply.
+- Checkpoint readers remain compatible with version 1, version 2, and version 3
+  snapshots. OMA cannot atomically commit an arbitrary external side effect
+  together with its checkpoint write, so consequential integrations still need
+  external idempotency for that crash window.
+- `runTeam()` and `runTasks()` remain text-only. Process and ACP backends remain
+  task-grained and reject structured input rather than silently dropping it.
+- Existing approval callbacks can continue returning allow or deny. Suspension
+  is additive; task gates with live verification wiring, standalone
+  `runAgent()`, the simple-goal shortcut, process backends, and ACP backends do
+  not expose every resumable private tool-loop path.
+- `@open-multi-agent/otel@0.1.1` is not republished. Its
+  `@open-multi-agent/core@^1.11.0` dependency remains compatible with core
+  `1.15.0`.
+
 ## 1.14.0 - 2026-08-01
 
 ### Breaking changes
