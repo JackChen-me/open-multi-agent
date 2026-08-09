@@ -1,0 +1,31 @@
+{
+  "name": "@open-multi-agent/release-bot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository-local OMA release planning and publishing automation.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "oma-release-bot": "dist/cli.js"
+  },
+  "scripts": {
+    "prebuild": "npm run build -w @open-multi-agent/core",
+    "build": "tsc",
+    "prelint": "npm run build -w @open-multi-agent/core",
+    "lint": "tsc --noEmit",
+    "pretest": "npm run build -w @open-multi-agent/core",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@open-multi-agent/core": "*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

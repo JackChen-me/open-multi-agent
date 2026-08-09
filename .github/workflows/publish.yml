@@ -1,0 +1,113 @@
+name: Publish
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact merged release commit to recover
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oma-publish
+  cancel-in-progress: false
+
+jobs:
+  detect_release_commit:
+    if: >-
+      github.repository == 'open-multi-agent/open-multi-agent' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      is_release: ${{ steps.detect.outputs.is_release }}
+      sha: ${{ steps.detect.outputs.sha }}
+    env:
+      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Verify the candidate belongs to main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Verify manual recovery already passed CI
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_SHA&status=completed&per_page=100" \
+            --jq '.workflow_runs[] | select(.name == "CI" and .conclusion == "success") | .head_sha' \
+            | grep -Fxq "$RELEASE_SHA"
+
+      - name: Detect a release version commit
+        id: detect
+        run: |
+          set -euo pipefail
+          echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          if git diff --quiet "$RELEASE_SHA^" "$RELEASE_SHA" -- packages/core/package.json; then
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "core version manifest did not change; publication is a no-op"
+            exit 0
+          fi
+          if git diff --quiet "$RELEASE_SHA^" "$RELEASE_SHA" -- packages/create-oma-app/package.json; then
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "create-oma-app version manifest did not change; publication is a no-op"
+            exit 0
+          fi
+          echo "is_release=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: detect_release_commit
+    if: needs.detect_release_commit.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_SHA: ${{ needs.detect_release_commit.outputs.sha }}
+    steps:
+      - name: Create narrowly scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_BOT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Publish missing packages, tag, and create the GitHub Release
+        env:
+          RELEASE_BOT_EXPECTED_SHA: ${{ env.RELEASE_SHA }}
+          RELEASE_BOT_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: node packages/release-bot/dist/cli.js publish

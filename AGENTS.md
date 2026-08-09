@@ -11,6 +11,7 @@ This is a private npm-workspaces root. Run the commands below from the repositor
 | `@open-multi-agent/core` | Multi-agent orchestration framework and `oma` CLI | `packages/core/src/`, `packages/core/tests/`, `packages/core/examples/` |
 | `@open-multi-agent/otel` | Optional OpenTelemetry adapter; versioned independently from core | `packages/otel/src/`, `packages/otel/tests/` |
 | `create-oma-app` | Published scaffolder and starter templates | `packages/create-oma-app/src/`, `packages/create-oma-app/templates/`, `packages/create-oma-app/tests/` |
+| `@open-multi-agent/release-bot` | Private OMA-powered release planning and deterministic publication automation; never published | `packages/release-bot/src/`, `packages/release-bot/tests/`, `.github/workflows/release-bot.yml`, `.github/workflows/publish.yml` |
 
 Root-level `README.md`, `docs/`, `.github/`, and `scripts/` apply across workspaces. Paths in this file are repository-relative; do not assume an unprefixed `src/` or `tests/` means the workspace you intend.
 
