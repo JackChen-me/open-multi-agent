@@ -100,7 +100,7 @@ console.log(result.totalTokenUsage)
 OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来，帮助多智能体系统从原型走向生产环境。
 
 - **动态编排。** 只需描述目标，Coordinator 就会在运行时生成任务 DAG、分配工作并合成结果，无需手工维护工作流图。
-- **受控执行。** 可预览和审批计划或单任务派发，并固化已审批计划以供重放；当拓扑不容漂移时可声明必需的角色与执行顺序，并通过多 Agent 共识验证结果。
+- **受控执行。** 可预览、审批或持久化挂起计划、任务派发与工具调用，并固化已审批计划以供重放；当拓扑不容漂移时可声明必需的角色与执行顺序，并通过多 Agent 共识验证结果。
 - **可靠性。** 通过 Checkpoint 从断点恢复中断的运行，或选择在任务结果屏障处启用仅追加式计划修复；重试、超时、循环检测与 token、成本双预算让执行始终有明确边界。
 - **可观测与评测。** 通过稳定的运行标识、执行回执与 Trace 跟踪每次运行，在离线 Run Viewer 中回放任务 DAG 与 span 瀑布，或通过可选的 OpenTelemetry 适配器导出；同一套运行记录可直接支撑版本化 EvalSet、离线报告、CI gate 与线上采样。
 - **安全与隐私。** 内置工具默认拒绝，支持逐次调用 gate，并对遥测与持久化状态应用显式的隐私控制。
@@ -156,7 +156,7 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 |---|---|
 | 安装与运行 | [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) |
 | 配置模型与工具 | [Provider](docs/providers.md) · [工具与沙箱](docs/tool-configuration.md) · [外部 Agent](docs/external-agents.md) |
-| 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) |
+| 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) |
 | 控制编排 | [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) |
 
 ## 参与贡献

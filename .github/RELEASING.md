@@ -71,12 +71,15 @@ published. A release commit contains:
 - the `CHANGELOG.md` entry, moved out of `## Unreleased`
 - the regenerated `package-lock.json`
 
-The first three are what users receive, and the `package` job in `ci.yml`
-asserts each of them equals the current core version. The base manifest is not
-covered by that assertion and is not user-facing either, because every overlay
-ships its own `package.json` that overwrites the base copy at scaffold time. Keep
-it in sync anyway so local tooling and the base layer do not disagree with the
-release, but a stale pin there does not reach a generated project. See
+The three package manifests are what users receive, and their package versions
+remain independent as described above. The `package` job in `ci.yml` asserts
+that every `templates/*/package.json` overlay pins the current core version; it
+does not require the otel or create-oma-app package version to equal core. The
+base template manifest is not covered by that assertion and is not user-facing
+either, because every overlay ships its own `package.json` that overwrites the
+base copy at scaffold time. Keep it in sync anyway so local tooling and the base
+layer do not disagree with the release, but a stale pin there does not reach a
+generated project. See
 [`packages/create-oma-app/AGENTS.md`](../packages/create-oma-app/AGENTS.md) for
 the full set of template traps.
 
