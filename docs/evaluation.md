@@ -185,6 +185,10 @@ all use the same evaluator owned by the `OpenMultiAgent` instance. Its
 `evalRunId` therefore remains stable for that instance lifetime. Each sampled
 run produces one `EvalRecord` per scorer with `source: 'online'`, no EvalSet or
 case ID, and a `runRef` containing the exact logical run and attempt.
+For structured `runAgent()` input, the evaluator receives a defensive copy of
+the caller's `LLMMessage[]`; string calls retain their existing string input.
+Payload omission, bounding, redaction, and persistence still follow
+`storePayloads` below.
 
 Numeric sampling uses `Math.random() < sample`. A rule can select by normalized
 status and validated run metadata without implementing tail sampling:

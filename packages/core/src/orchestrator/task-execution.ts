@@ -12,6 +12,10 @@ import type { RunOptions } from '../agent/runner.js'
 import type {
   AgentConfig,
   AgentRunResult,
+  ApprovalDecisionRecord,
+  ApprovalGateDecision,
+  ApprovalRequest,
+  ApprovalRequestContent,
   CheckpointSnapshot,
   OrchestratorEvent,
   StreamEvent,
@@ -59,6 +63,11 @@ import {
   planPatchSignature,
   validatePlanPatchEligibility,
 } from './recovery.js'
+import {
+  assertDurableTaskApprovalSupport,
+  createApprovalRequest,
+  DurableApprovalError,
+} from '../approval/durable.js'
 
 /**
  * Build {@link TeamInfo} for tool context, including nested `runDelegatedAgent`
@@ -187,7 +196,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
   // Best-effort: a checkpoint write must never take down the run it protects.
   // Both snapshot construction and the store write are guarded, so a failing
   // store (e.g. a transient Redis/SQLite error) is surfaced via `onProgress`
-  // and the run continues — the next completed task retries the write.
+  // and the run continues — the next safe runner or task boundary retries it.
   const save = async (): Promise<void> => {
     const sharedMem = ctx.team.getSharedMemoryInstance()
     const completedTaskResults = queue.getByStatus('completed').map((task) => {
@@ -207,8 +216,17 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       }
     })
 
+    const pendingApprovals = new Map(active.pendingApprovals)
+    for (const state of active.inFlightTasks.values()) {
+      for (const pending of state.pendingToolCalls ?? []) {
+        if (pending.approvalRequest && !pending.commit) {
+          pendingApprovals.set(pending.approvalRequest.id, pending.approvalRequest)
+        }
+      }
+    }
+
     const snapshot: CheckpointSnapshot = {
-      version: 2,
+      version: 4,
       mode: active.mode,
       createdAt: new Date().toISOString(),
       ...(ctx.metadata !== undefined ? { metadata: ctx.metadata } : {}),
@@ -221,7 +239,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       ...(active.goal !== undefined ? { goal: active.goal } : {}),
       queue: queue.snapshot(),
       // When the checkpoint store IS the shared-memory store, the entries are
-      // already durable there — embedding a full snapshot on every task would
+      // already durable there — embedding a full snapshot at every boundary would
       // be ~O(N^2) write volume. Persist only the turn counter (cheap) so TTL
       // expiry stays correct; restore reads the entries straight from the store.
       ...(sharedMem && !active.reusesSharedMemoryStore
@@ -230,6 +248,9 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       messageBus: ctx.team.snapshotMessageBus(),
       ...(sharedMem ? { turnCount: sharedMem.getTurnCount() } : {}),
       completedTaskResults,
+      inFlightTasks: [...active.inFlightTasks.values()],
+      pendingApprovals: [...pendingApprovals.values()],
+      approvalDecisions: [...active.approvalDecisions.values()],
     }
 
     await active.manager.save(snapshot)
@@ -253,6 +274,102 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
     } satisfies OrchestratorEvent)
     return false
   }
+}
+
+interface NormalizedApprovalDecision {
+  readonly action: 'allow' | 'deny' | 'suspend'
+  readonly reason?: string
+}
+
+function normalizeApprovalDecision(
+  value: ApprovalGateDecision,
+  callbackName: string,
+): NormalizedApprovalDecision {
+  if (value === true) return { action: 'allow' }
+  if (value === false) return { action: 'deny' }
+  if (value === null || typeof value !== 'object') {
+    throw new Error(`${callbackName} returned an invalid approval decision.`)
+  }
+  if (value.action !== 'allow' && value.action !== 'deny' && value.action !== 'suspend') {
+    throw new Error(`${callbackName} returned an invalid approval decision.`)
+  }
+  if ('reason' in value && value.reason !== undefined && typeof value.reason !== 'string') {
+    throw new Error(`${callbackName} returned an invalid approval reason.`)
+  }
+  const reason = 'reason' in value ? value.reason : undefined
+  return reason === undefined
+    ? { action: value.action }
+    : { action: value.action, reason }
+}
+
+function approvalCandidate(
+  ctx: RunContext,
+  scope: ApprovalRequest['scope'],
+  boundary: string,
+  content: ApprovalRequestContent,
+): ApprovalRequest {
+  return createApprovalRequest({
+    runId: ctx.identity.runId,
+    scope,
+    boundary,
+    content,
+  })
+}
+
+function consumeApprovedBoundary(
+  ctx: RunContext,
+  candidate: ApprovalRequest,
+): ApprovalDecisionRecord | undefined {
+  const active = ctx.checkpoint
+  const decision = active?.approvedBoundaries.get(candidate.id)
+  if (!decision || decision.requestHash !== candidate.requestHash) return undefined
+  active!.approvedBoundaries.delete(candidate.id)
+  active!.pendingApprovals.delete(candidate.id)
+  return decision
+}
+
+function approvedDispatchTaskId(ctx: RunContext): string | undefined {
+  const active = ctx.checkpoint
+  if (!active) return undefined
+  for (const request of active.pendingApprovals.values()) {
+    if (
+      request.content.kind === 'task_dispatch'
+      && active.approvedBoundaries.has(request.id)
+    ) {
+      return request.content.task.id
+    }
+  }
+  return undefined
+}
+
+/** Persist a boundary before exposing it to an out-of-process reviewer. */
+export async function persistPendingApproval(
+  queue: TaskQueue,
+  ctx: RunContext,
+  request: ApprovalRequest,
+): Promise<void> {
+  const active = ctx.checkpoint
+  if (!active) {
+    throw new DurableApprovalError(
+      'APPROVAL_ATOMIC_STORE_REQUIRED',
+      'A suspend decision requires durable checkpoint configuration.',
+    )
+  }
+  active.approvalLedger.assertAtomicSupport()
+  active.pendingApprovals.set(request.id, request)
+  const saved = await saveRunCheckpoint(queue, ctx)
+  if (!saved) {
+    active.pendingApprovals.delete(request.id)
+    throw new DurableApprovalError(
+      'APPROVAL_INTEGRITY_ERROR',
+      'The approval boundary could not be checkpointed; suspension was not reported.',
+    )
+  }
+  await active.approvalLedger.ensureRequest(request)
+  ctx.config.onProgress?.({
+    type: 'approval_pending',
+    data: request,
+  } satisfies OrchestratorEvent)
 }
 
 function toCheckpointAgentResult(
@@ -554,6 +671,7 @@ export async function executeQueue(
   const inFlight = new Map<string, Promise<void>>()
   const dispatchErrors: unknown[] = []
   let stopDispatch: { readonly reason: string } | undefined
+  let suspendDispatch = false
   let fatalError: unknown
   let wakeCount = 0
   let wakeResolver: (() => void) | undefined
@@ -575,6 +693,11 @@ export async function executeQueue(
 
   const requestStop = (reason: string): void => {
     stopDispatch ??= { reason }
+    signalLoop()
+  }
+
+  const requestSuspend = (): void => {
+    suspendDispatch = true
     signalLoop()
   }
 
@@ -670,6 +793,19 @@ export async function executeQueue(
           dispatchErrors.length = 0
         }
 
+        if (ctx.outcomeStatus?.code === 'suspended') requestSuspend()
+
+        // A durable suspension drains work that was already admitted but
+        // preserves every not-yet-started task for restore.
+        if (suspendDispatch) {
+          if (inFlight.size > 0) {
+            await waitForSignal()
+            continue
+          }
+          await saveRunCheckpoint(queue, ctx)
+          break
+        }
+
         // drain-then-skip: once any terminal gate closes, no new task is
         // admitted. Existing task promises settle before the queue is skipped.
         if (stopDispatch) {
@@ -722,7 +858,17 @@ export async function executeQueue(
             task?.status === 'pending'
             && !(task.dependsOn ?? []).some((dependencyId) => inFlight.has(dependencyId)),
           )
-        const nextReady = scheduler.orderReadyTasks(readyTasks, queue.list())[0]
+        const approvedTaskId = approvedDispatchTaskId(ctx)
+        const nextReady = approvedTaskId === undefined
+          ? scheduler.orderReadyTasks(readyTasks, queue.list())[0]
+          : readyTasks.find((task) => task.id === approvedTaskId)
+
+        if (approvedTaskId !== undefined && !nextReady) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Approved task-dispatch boundary "${approvedTaskId}" is no longer ready.`,
+          )
+        }
 
         if (!nextReady) {
           if (inFlight.size === 0) break
@@ -752,6 +898,19 @@ export async function executeQueue(
         }
 
         if (config.onTaskDispatch && assigned.assignee) {
+          const taskSnapshot = queue.snapshot().tasks.find((task) => task.id === assigned.id)
+          if (!taskSnapshot) throw new Error(`Task "${assigned.id}" has no approval snapshot.`)
+          const content = {
+            kind: 'task_dispatch',
+            task: taskSnapshot,
+          } as const
+          const candidate = approvalCandidate(
+            ctx,
+            'task_dispatch',
+            assigned.id,
+            content,
+          )
+          const priorApproval = consumeApprovedBoundary(ctx, candidate)
           const approvalSpan = ctx.traceRuntime?.startSpan({
             kind: 'callback',
             name: 'task_dispatch_callback',
@@ -762,27 +921,56 @@ export async function executeQueue(
               'oma.task.title': assigned.title,
             },
           })
-          let approved: boolean
-          try {
-            approved = await config.onTaskDispatch(assigned)
-          } catch (error) {
-            const classified = classifyRunFailure(error, { kind: 'callback' })
-            approvalSpan?.end({ status: classified.status, error: classified.errorInfo })
-            if (requestTerminalGateStop()) continue
-            ctx.outcomeStatus = classified.status
-            ctx.outcomeErrorInfo = classified.errorInfo
-            requestStop(
-              `Skipped: task dispatch callback error — ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            )
-            continue
+          let decision: NormalizedApprovalDecision = { action: 'allow' }
+          if (!priorApproval) {
+            try {
+              decision = normalizeApprovalDecision(
+                await config.onTaskDispatch(assigned),
+                'onTaskDispatch',
+              )
+              if (decision.action === 'suspend') {
+                assertDurableTaskApprovalSupport([assigned])
+                const request = createApprovalRequest({
+                  runId: ctx.identity.runId,
+                  scope: 'task_dispatch',
+                  boundary: assigned.id,
+                  content,
+                  ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+                })
+                await persistPendingApproval(queue, ctx, request)
+                ctx.outcomeStatus = statusOnly('suspended', 'Task dispatch approval pending.')
+                requestSuspend()
+              }
+            } catch (error) {
+              const classified = classifyRunFailure(error, { kind: 'callback' })
+              approvalSpan?.end({ status: classified.status, error: classified.errorInfo })
+              if (requestTerminalGateStop()) continue
+              ctx.outcomeStatus = classified.status
+              ctx.outcomeErrorInfo = classified.errorInfo
+              requestStop(
+                `Skipped: task dispatch callback error — ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              )
+              continue
+            }
           }
 
-          approvalSpan?.event('approval_decision', { 'oma.approval.approved': approved })
-          approvalSpan?.end({ status: statusOnly(approved ? 'ok' : 'rejected') })
+          approvalSpan?.event('approval_decision', {
+            'oma.approval.decision': priorApproval ? 'approved' : decision.action,
+          })
+          approvalSpan?.end({
+            status: statusOnly(
+              priorApproval || decision.action === 'allow'
+                ? 'ok'
+                : decision.action === 'suspend'
+                  ? 'suspended'
+                  : 'rejected',
+            ),
+          })
           if (requestTerminalGateStop()) continue
-          if (!approved) {
+          if (decision.action === 'suspend') continue
+          if (decision.action === 'deny') {
             ctx.outcomeStatus = statusOnly('rejected', 'Task dispatch approval rejected.')
             requestStop('Skipped: task dispatch approval rejected.')
             continue
@@ -986,10 +1174,41 @@ export async function executeQueue(
           return
         }
 
+        const restoredRunnerState = ctx.checkpoint?.inFlightTasks.get(task.id)
+        const onRunnerCheckpoint = ctx.checkpoint
+          ? async (state: Parameters<NonNullable<RunOptions['onCheckpoint']>>[0]) => {
+              ctx.checkpoint!.inFlightTasks.set(task.id, state)
+              const saved = await saveRunCheckpoint(queue, ctx)
+              if (!saved) throw new Error('Runner checkpoint persistence failed.')
+            }
+          : undefined
+        const onApprovalRequest = ctx.checkpoint
+          ? async (request: ApprovalRequest) => {
+              ctx.checkpoint!.pendingApprovals.set(request.id, request)
+              await ctx.checkpoint!.approvalLedger.ensureRequest(request)
+              config.onProgress?.({
+                type: 'approval_pending',
+                task: task.id,
+                agent: assignee,
+                data: request,
+              } satisfies OrchestratorEvent)
+            }
+          : undefined
+        const onApprovalPrepare = ctx.checkpoint
+          ? () => ctx.checkpoint!.approvalLedger.assertAtomicSupport()
+          : undefined
+        const onApprovalConsumed = ctx.checkpoint
+          ? (requestId: string) => {
+              ctx.checkpoint!.pendingApprovals.delete(requestId)
+            }
+          : undefined
+
         // Trace + abort + team tool context (delegate_to_agent)
         const traceBase: Partial<RunOptions> = {
           identity: ctx.identity,
           runId: ctx.runId,
+          taskId: task.id,
+          traceAgent: assignee,
           ...(ctx.traceRuntime ? {
             traceRuntime: ctx.traceRuntime,
             traceSpan: taskSpan ?? ctx.traceRuntime.root,
@@ -997,8 +1216,6 @@ export async function executeQueue(
           ...(config.onTrace
             ? {
                 onTrace: config.onTrace,
-                taskId: task.id,
-                traceAgent: assignee,
                 ...(taskSpanId ? { traceParentId: taskSpanId } : {}),
                 ...(agentSpanId ? { traceSpanId: agentSpanId } : {}),
               }
@@ -1008,6 +1225,11 @@ export async function executeQueue(
         const runOptions: Partial<RunOptions> = {
           ...traceBase,
           team: buildTaskAgentTeamInfo(ctx, task.id, traceBase, 0, [assignee]),
+          ...(restoredRunnerState ? { resumeState: restoredRunnerState } : {}),
+          ...(onRunnerCheckpoint ? { onCheckpoint: onRunnerCheckpoint } : {}),
+          ...(onApprovalPrepare ? { onApprovalPrepare } : {}),
+          ...(onApprovalRequest ? { onApprovalRequest } : {}),
+          ...(onApprovalConsumed ? { onApprovalConsumed } : {}),
         }
         const workerRoute = routeMatches(ctx.modelRouting, {
           phase: 'worker',
@@ -1064,6 +1286,12 @@ export async function executeQueue(
 
         const result = await executeWithRetry(
           async (attempt) => {
+            if (attempt > 1 && ctx.checkpoint) {
+              ctx.checkpoint.inFlightTasks.delete(task.id)
+              await saveRunCheckpoint(queue, ctx)
+            }
+            const { resumeState: _resumeState, ...freshRunOptions } = runOptions
+            const attemptRunOptions = attempt === 1 ? runOptions : freshRunOptions
             const activeRouteIndex = Math.min(routeIndex, routedAgents.length - 1)
             const routedAgent = routedAgents.length > 0
               ? routedAgents[activeRouteIndex]
@@ -1077,13 +1305,13 @@ export async function executeQueue(
                 ? await pool.runEphemeral(
                     routedAgent,
                     prompt,
-                    { ...runOptions, traceAgentAttempt: attempt },
+                    { ...attemptRunOptions, traceAgentAttempt: attempt },
                     streamCallback,
                   )
                 : await pool.run(
                     assignee,
                     prompt,
-                    { ...runOptions, traceAgentAttempt: attempt },
+                    { ...attemptRunOptions, traceAgentAttempt: attempt },
                     streamCallback,
                   )
               attemptUsages.push({ usage: attemptResult.tokenUsage, config: activeConfig })
@@ -1127,6 +1355,8 @@ export async function executeQueue(
           { abortSignal: ctx.abortSignal },
         )
 
+        if (result.error instanceof DurableApprovalError) throw result.error
+
         const taskEndMs = Date.now()
 
         const taskLegacyEvent = legacyTaskEvent(result.success, taskEndMs, retryCount)
@@ -1167,6 +1397,7 @@ export async function executeQueue(
             output: message,
             error,
           })
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           queue.fail(task.id, message)
           const classified = classifyRunFailure(error, { kind: 'budget' })
           taskSpan?.event('budget_exhausted', {})
@@ -1180,6 +1411,25 @@ export async function executeQueue(
             task: task.id,
             agent: assignee,
             data: message,
+          } satisfies OrchestratorEvent)
+          return
+        }
+
+        if (result.status?.code === 'suspended') {
+          ctx.outcomeStatus = statusOnly(
+            'suspended',
+            'Durable approval required before task execution can continue.',
+          )
+          taskSpan?.end({
+            status: ctx.outcomeStatus,
+            attributes: { 'oma.task.retries': retryCount },
+            ...(taskLegacyEvent ? { legacyEvent: taskLegacyEvent } : {}),
+          })
+          config.onProgress?.({
+            type: 'agent_complete',
+            agent: assignee,
+            task: task.id,
+            data: result,
           } satisfies OrchestratorEvent)
           return
         }
@@ -1212,6 +1462,7 @@ export async function executeQueue(
             sharedMem.advanceTurn()
           }
 
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           const completedTask = queue.complete(task.id, effective.output)
           completedThisRound.push(completedTask)
           await saveRunCheckpoint(queue, ctx)
@@ -1237,6 +1488,7 @@ export async function executeQueue(
           })
         } else {
           await applyRecoveryAtOutcome(queue, task, result, undefined, ctx)
+          ctx.checkpoint?.inFlightTasks.delete(task.id)
           queue.fail(task.id, result.output)
           taskSpan?.end({
             status: result.status ?? statusOnly('error', result.output),
@@ -1263,7 +1515,9 @@ export async function executeQueue(
         void taskPromise.then(
           () => {
             inFlight.delete(task.id)
-            if (ctx.budgetExceededTriggered) {
+            if (ctx.outcomeStatus?.code === 'suspended') {
+              requestSuspend()
+            } else if (ctx.budgetExceededTriggered) {
               requestStop(ctx.budgetExceededReason ?? 'Skipped: token budget exceeded.')
             } else {
               signalLoop()
@@ -1282,6 +1536,10 @@ export async function executeQueue(
 
       // Compatibility mode deliberately retains the complete batch barrier.
       await Promise.all(dispatchPromises)
+      if (ctx.outcomeStatus?.code === 'suspended') {
+        await saveRunCheckpoint(queue, ctx)
+        break
+      }
       if (ctx.budgetExceededTriggered) {
         queue.skipRemaining(ctx.budgetExceededReason ?? 'Skipped: token budget exceeded.')
         break
@@ -1293,32 +1551,71 @@ export async function executeQueue(
         const nextPending = queue.getByStatus('pending')
 
         if (nextPending.length > 0) {
+          const taskSnapshots = new Map(
+            queue.snapshot().tasks.map((task) => [task.id, task]),
+          )
+          const content = {
+            kind: 'task_round',
+            completedTasks: completedThisRound.map((task) => taskSnapshots.get(task.id)!),
+            nextTasks: nextPending.map((task) => taskSnapshots.get(task.id)!),
+          } as const
+          const boundary = [
+            completedThisRound.map((task) => task.id).join(','),
+            nextPending.map((task) => task.id).join(','),
+          ].join('->')
+          const candidate = approvalCandidate(ctx, 'task_round', boundary, content)
+          const priorApproval = consumeApprovedBoundary(ctx, candidate)
           const approvalSpan = ctx.traceRuntime?.startSpan({
             kind: 'callback',
             name: 'approval_callback',
             parent: ctx.traceRuntime.root,
             attributes: { 'oma.callback.name': 'onApproval' },
           })
-          let approved: boolean
-          try {
-            approved = await config.onApproval(completedThisRound, nextPending)
-          } catch (err) {
-            const reason = `Skipped: approval callback error — ${err instanceof Error ? err.message : String(err)}`
-            queue.skipRemaining(reason)
-            const classified = classifyRunFailure(err, { kind: 'callback' })
-            approvalSpan?.end({ status: classified.status, error: classified.errorInfo })
-            ctx.outcomeStatus = classified.status
-            ctx.outcomeErrorInfo = classified.errorInfo
+          let decision: NormalizedApprovalDecision = { action: 'allow' }
+          if (!priorApproval) {
+            try {
+              decision = normalizeApprovalDecision(
+                await config.onApproval(completedThisRound, nextPending),
+                'onApproval',
+              )
+              if (decision.action === 'suspend') {
+                assertDurableTaskApprovalSupport(nextPending)
+                const request = createApprovalRequest({
+                  runId: ctx.identity.runId,
+                  scope: 'task_round',
+                  boundary,
+                  content,
+                  ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+                })
+                await persistPendingApproval(queue, ctx, request)
+                ctx.outcomeStatus = statusOnly('suspended', 'Round approval pending.')
+              }
+            } catch (err) {
+              const reason = `Skipped: approval callback error — ${err instanceof Error ? err.message : String(err)}`
+              queue.skipRemaining(reason)
+              const classified = classifyRunFailure(err, { kind: 'callback' })
+              approvalSpan?.end({ status: classified.status, error: classified.errorInfo })
+              ctx.outcomeStatus = classified.status
+              ctx.outcomeErrorInfo = classified.errorInfo
+              break
+            }
+          }
+          if (decision.action === 'suspend') {
+            approvalSpan?.event('approval_decision', { 'oma.approval.decision': 'suspend' })
+            approvalSpan?.end({ status: statusOnly('suspended') })
             break
           }
-          if (!approved) {
+          if (decision.action === 'deny') {
             approvalSpan?.event('approval_decision', { 'oma.approval.approved': false })
             approvalSpan?.end({ status: statusOnly('rejected') })
             queue.skipRemaining('Skipped: approval rejected.')
             ctx.outcomeStatus = statusOnly('rejected', 'Approval rejected.')
             break
           }
-          approvalSpan?.event('approval_decision', { 'oma.approval.approved': true })
+          approvalSpan?.event('approval_decision', {
+            'oma.approval.approved': true,
+            ...(priorApproval ? { 'oma.approval.durable': true } : {}),
+          })
           approvalSpan?.end({ status: statusOnly('ok') })
         }
       }

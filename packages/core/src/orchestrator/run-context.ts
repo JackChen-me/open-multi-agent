@@ -10,7 +10,10 @@
 
 import type {
   AgentRunResult,
+  ApprovalDecisionRecord,
+  ApprovalRequest,
   CheckpointSnapshot,
+  InFlightTaskCheckpoint,
   ModelRoutingPolicy,
   OrchestratorConfig,
   RunIdentity,
@@ -27,6 +30,7 @@ import type { AgentPool } from '../agent/pool.js'
 import type { Team } from '../team/team.js'
 import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
+import type { DurableApprovalLedger } from '../approval/durable.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import type { ResolvedRecoveryOptions } from './recovery.js'
 import { createRunIdentity, validateRunMetadata } from '../observability/identity.js'
@@ -175,6 +179,7 @@ export interface RunContext {
 
 export interface ActiveCheckpoint {
   readonly manager: Checkpoint
+  readonly approvalLedger: DurableApprovalLedger
   readonly mode: CheckpointSnapshot['mode']
   readonly goal?: string
   readonly runId?: string
@@ -185,5 +190,13 @@ export interface ActiveCheckpoint {
    * (avoids ~O(N^2) write volume) and persists only the turn counter.
    */
   readonly reusesSharedMemoryStore: boolean
+  /** Latest safe runner state for every task currently between queue boundaries. */
+  readonly inFlightTasks: Map<string, InFlightTaskCheckpoint>
+  /** Reviewed boundaries not yet durably consumed by execution. */
+  readonly pendingApprovals: Map<string, ApprovalRequest>
+  /** Primary decisions loaded from the approval ledger and copied into results/checkpoints. */
+  readonly approvalDecisions: Map<string, ApprovalDecisionRecord>
+  /** Approved task/round boundaries that the execution loop may consume once. */
+  readonly approvedBoundaries: Map<string, ApprovalDecisionRecord>
   saveChain: Promise<void>
 }

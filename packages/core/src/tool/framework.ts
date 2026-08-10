@@ -68,7 +68,7 @@ export type JSONSchemaProperty =
  * })
  * ```
  */
-export function defineTool<TInput>(config: {
+export function defineTool<TInput, TData = string>(config: {
   name: string
   description: string
   inputSchema: ZodSchema<TInput>
@@ -80,11 +80,10 @@ export function defineTool<TInput>(config: {
    * Optional runtime validator for `ToolResult.data`.
    * When omitted, output validation is skipped.
    *
-   * `ToolResult.data` is always a `string`, so the schema is fixed to
-   * `ZodSchema<string>` — use `z.string().refine(...)` / `z.string().regex(...)`
-   * (or similar) to enforce structural constraints on the serialised output.
+   * The schema validates the application-owned `ToolResult.data`. Existing
+   * string tools may keep using `z.string()`; rich tools can validate objects.
    */
-  outputSchema?: ZodSchema<string>
+  outputSchema?: ZodSchema<TData>
   /**
    * Optional JSON Schema for the LLM (bypasses Zod → JSON Schema conversion).
    */
@@ -95,8 +94,8 @@ export function defineTool<TInput>(config: {
    * Takes priority over agent-level `maxToolOutputChars`.
    */
   maxOutputChars?: number
-  execute: (input: TInput, context: ToolUseContext) => Promise<ToolResult>
-}): ToolDefinition<TInput> {
+  execute: (input: TInput, context: ToolUseContext) => Promise<ToolResult<TData>>
+}): ToolDefinition<TInput, TData> {
   return {
     name: config.name,
     description: config.description,
@@ -127,7 +126,7 @@ export function defineTool<TInput>(config: {
  */
 export class ToolRegistry {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private readonly tools = new Map<string, ToolDefinition<any>>()
+  private readonly tools = new Map<string, ToolDefinition<any, any>>()
   private readonly runtimeToolNames = new Set<string>()
 
   /**
@@ -136,7 +135,7 @@ export class ToolRegistry {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   register(
-    tool: ToolDefinition<any>,
+    tool: ToolDefinition<any, any>,
     options?: { runtimeAdded?: boolean },
   ): void {
     if (this.tools.has(tool.name)) {
@@ -153,7 +152,7 @@ export class ToolRegistry {
 
   /** Return a tool by name, or `undefined` if not found. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  get(name: string): ToolDefinition<any> | undefined {
+  get(name: string): ToolDefinition<any, any> | undefined {
     return this.tools.get(name)
   }
 
@@ -164,7 +163,7 @@ export class ToolRegistry {
    * This matches the agent's `getTools()` pattern.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  list(): ToolDefinition<any>[] {
+  list(): ToolDefinition<any, any>[] {
     return Array.from(this.tools.values())
   }
 
@@ -173,7 +172,7 @@ export class ToolRegistry {
    * Alias for {@link list} — available for callers that prefer explicit naming.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  getAll(): ToolDefinition<any>[] {
+  getAll(): ToolDefinition<any, any>[] {
     return Array.from(this.tools.values())
   }
 

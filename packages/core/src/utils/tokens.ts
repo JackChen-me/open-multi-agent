@@ -1,4 +1,5 @@
 import type { LLMMessage } from '../types.js'
+import { toolResultContentSize } from '../tool/result.js'
 
 /**
  * Estimate token count using a lightweight character heuristic.
@@ -14,7 +15,7 @@ export function estimateTokens(messages: LLMMessage[]): number {
       } else if (block.type === 'reasoning') {
         chars += block.text.length
       } else if (block.type === 'tool_result') {
-        chars += block.content.length
+        chars += toolResultContentSize(block.content)
       } else if (block.type === 'tool_use') {
         chars += JSON.stringify(block.input).length
       } else if (block.type === 'image') {

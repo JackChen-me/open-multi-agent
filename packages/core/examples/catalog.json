@@ -15,6 +15,17 @@
       "featuredOrder": 1
     },
     {
+      "id": "structured-input",
+      "path": "basics/structured-input.ts",
+      "title": "Structured Multimodal Input",
+      "description": "Send caller-owned message history and an image through runAgent() as structured input.",
+      "section": "goal",
+      "goal": "start-here",
+      "capabilities": ["run-agent", "multi-turn"],
+      "format": "script",
+      "level": "beginner"
+    },
+    {
       "id": "team-collaboration",
       "path": "basics/team-collaboration.ts",
       "title": "Team Collaboration",
@@ -260,6 +271,17 @@
       "featuredOrder": 1
     },
     {
+      "id": "rich-tool-results",
+      "path": "patterns/rich-tool-results.ts",
+      "title": "Rich Tool Results",
+      "description": "Keep application-owned tool data separate while returning image content to the model.",
+      "section": "goal",
+      "goal": "production-controls",
+      "capabilities": ["custom-tools", "tool-use"],
+      "format": "script",
+      "level": "intermediate"
+    },
+    {
       "id": "task-retry",
       "path": "patterns/task-retry.ts",
       "title": "Task Retry",
@@ -282,6 +304,17 @@
       "format": "script",
       "level": "advanced",
       "featuredOrder": 3
+    },
+    {
+      "id": "durable-approval",
+      "path": "patterns/durable-approval.ts",
+      "title": "Durable Approval",
+      "description": "Suspend a task dispatch, record one atomic reviewer decision, and restore the exact approved task with a fresh orchestrator.",
+      "section": "goal",
+      "goal": "production-controls",
+      "capabilities": ["run-tasks"],
+      "format": "script",
+      "level": "advanced"
     },
     {
       "id": "plan-replay",

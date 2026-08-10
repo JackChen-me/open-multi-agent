@@ -101,6 +101,15 @@ still shapes the external agent because OMA — lacking any ACP system-prompt fi
 prepends it to the agent's first prompt (once per session), on top of seeding the
 coordinator's routing as it does for every agent.
 
+External backends have a text transport boundary. Their public Agent APIs accept
+the existing string form, but reject structured `LLMMessage[]` / `ContentBlock[]`
+arguments with `InvalidMessageError` before spawning a process or opening an ACP
+session. This avoids silently dropping image blocks or caller-owned history.
+`beforeRun.prompt` remains supported; changing `beforeRun.messages` is rejected
+for the same reason. `AgentConfig.history` does not seed a process or ACP
+session; it restores messages only for LLM-backed `prompt()` conversations. See
+[Structured Agent Input](structured-input.md).
+
 For `process`, OMA starts a fresh subprocess per run. Use `input: 'stdin'` for
 commands that read a prompt from stdin, `input: 'argument'` when the command
 expects the prompt as the final argument, and `input: 'none'` for fixed adapters

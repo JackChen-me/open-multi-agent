@@ -4,6 +4,10 @@ Long-running task workflows can persist their progress and resume after a crash,
 
 It covers the orchestration paths (`runTeam`, `runTasks`, `runFromPlan`, and `restore`). A single `runAgent` call has nothing to resume and is not checkpointed.
 
+Checkpoint schema v4 also carries suspended continuation state for
+[durable approval gates](durable-approvals.md). Approval decisions live in
+separate primary records in the same store; they are not telemetry.
+
 ## Enable it
 
 Pass `checkpoint` per call, or set a default for every run via `OrchestratorConfig.checkpoint`. Per-call options override the config default.
@@ -21,7 +25,7 @@ const team = new Team({
 
 const orchestrator = new OpenMultiAgent()
 
-// Snapshots are written after each completed task.
+// Snapshots are written at safe in-flight boundaries and after completed tasks.
 await orchestrator.runTasks(team, tasks, { checkpoint: { store } })
 ```
 
@@ -63,13 +67,13 @@ await orchestrator.runTasks(team, tasks, {
 })
 ```
 
-**Which store gets the `FileStore`.** Prefer it as the *checkpoint* store, leaving shared memory on a fast `InMemoryStore` (above). A separate checkpoint store self-embeds the shared-memory snapshot (see [What gets saved](#what-gets-saved)), so resume rebuilds everything from the one file — while durability I/O stays at checkpoint cadence (once per completed task) instead of firing on every agent memory write. Using `FileStore` as `sharedMemoryStore` also works and is durable, but then *every* shared-memory write rewrites the whole file; reach for that only when shared memory itself must survive a restart independently of checkpoints.
+**Which store gets the `FileStore`.** Prefer it as the *checkpoint* store, leaving shared memory on a fast `InMemoryStore` (above). A separate checkpoint store self-embeds the shared-memory snapshot (see [What gets saved](#what-gets-saved)), so resume rebuilds everything from the one file — while durability I/O stays at checkpoint cadence (safe agent/tool boundaries and completed tasks) instead of firing on every agent memory write. Using `FileStore` as `sharedMemoryStore` also works and is durable, but then *every* shared-memory write rewrites the whole file; reach for that only when shared memory itself must survive a restart independently of checkpoints.
 
 **Scope.** One process at a time — there is no cross-process file lock, so this is not a shared database. Concurrent writes *within* a process are serialized and safe. That matches the resume story, which is inherently sequential (process A crashes, process B resumes). A corrupt or unreadable state file makes the store throw rather than silently start empty, so durable data is never quietly discarded.
 
 ## Resume
 
-`restore()` loads the latest checkpoint, rebuilds the task queue and shared memory, skips completed tasks, and runs the remainder.
+`restore()` loads the latest checkpoint, rebuilds the task queue and shared memory, skips completed tasks, and runs the remainder. If a built-in LLM runner stopped mid-task, restore also reloads its completed turns, token usage, and tool-call state before continuing.
 
 ```typescript
 // After a crash/restart: same team wiring, same store.
@@ -104,14 +108,14 @@ await orchestrator.restore(team,        { checkpoint: { store } })  // resume-on
 
 ## What gets saved
 
-On each successfully completed task, the orchestrator writes a `CheckpointSnapshot`:
+At each safe in-flight runner boundary and after each successfully completed task, the orchestrator writes the latest `CheckpointSnapshot`:
 
-- **Execution identity (schema v2)** — `runId`, current `attempt`,
+- **Execution identity (schema v4)** — `runId`, current `attempt`,
   `lastTraceId`, and `lastRootSpanId`. Restore preserves the logical `runId`,
   increments `attempt`, creates fresh trace/root IDs, and returns a
   `continued_from` link to the prior attempt.
 - **Task queue state** — every task and its status partition (pending / in-progress / completed / failed / blocked / skipped).
-- **Shared memory** — the turn counter is always recorded. The full entry snapshot is embedded **only when the checkpoint store differs from the team's shared-memory store**. When they are the same store (the default for `checkpoint: true`), the entries are already durable there, so re-embedding them every task would be wasted ~O(N²) write volume across a long run; resume reads them straight from the store instead. Either way, resume rehydrates shared memory correctly.
+- **Shared memory** — the turn counter is always recorded. The full entry snapshot is embedded **only when the checkpoint store differs from the team's shared-memory store**. When they are the same store (the default for `checkpoint: true`), the entries are already durable there, so re-embedding them at every safe boundary would be wasted write volume across a long run; resume reads them straight from the store instead. Either way, resume rehydrates shared memory correctly.
 - **Completed task results** — `taskId`, `assignee`, raw `result`, and the
   JSON-safe `AgentRunResult` for each finished task. This preserves per-task
   `structured`, normalized status/error details, token usage, tool calls, and
@@ -119,21 +123,41 @@ On each successfully completed task, the orchestrator writes a `CheckpointSnapsh
   in-process-only raw `error` object is not persisted. If caller-added result
   data cannot be JSON-serialized, checkpoint durability wins: the full result
   is omitted for that task and restore rebuilds the legacy minimal result.
+- **In-flight runner state** — for every active built-in LLM worker: the full
+  model conversation, messages produced by the task, completed turn count,
+  token usage, tool-call records, the next recovery phase, and any pending tool
+  calls. Tool results are committed independently by model-issued tool-call ID,
+  so a parallel turn may contain both replayable results and calls that still
+  need execution. Model-visible image/file tool results are part of those
+  messages: inline base64 is embedded in checkpoint JSON, while URL references
+  are stored as URLs. Application-owned `ToolResult.data` is not part of the
+  conversation unless the application separately puts it there.
+- **Approval continuation state** — exact pending approval requests plus the
+  decisions already consumed by this logical run. The authoritative request /
+  decision row is stored separately under `__oma_approval__/<requestId>` and is
+  checked against the checkpoint during restore.
 - **Task handoff/provenance config** — `dependencyPayload`, logical `role`, and
   validated task `metadata` remain on the queue snapshot, so resumed consumers
   use the same data-flow and trace references as the original run.
 
-Snapshots are stored as JSON under a reserved namespace: `__oma_checkpoint__/<runId>/latest` (or `__oma_checkpoint__/latest` when no `runId` is set). Keys under `__oma_checkpoint__/` are reserved — shared-memory snapshot/restore deliberately skips them so one store can hold both agent memory and checkpoints.
+Snapshots are stored as JSON under a reserved namespace: `__oma_checkpoint__/<runId>/latest` (or `__oma_checkpoint__/latest` when no `runId` is set). Keys under `__oma_checkpoint__/` and `__oma_approval__/` are reserved — shared-memory snapshot/restore deliberately skips them so one store can hold agent memory, checkpoints, and primary approval records.
 
-New writes use checkpoint schema v2. Schema v1 remains readable: its optional
-top-level `runId` is preserved, and restore treats the saved execution as
-attempt 1. A v1 checkpoint without `runId` receives a new logical run ID. If a
-caller-supplied restore `runId` conflicts with the snapshot, restore throws a
-validation error instead of joining unrelated runs.
+New writes use checkpoint schema v4. Schemas v1, v2, and v3 remain readable;
+v1 and v2 contain no in-flight runner state, so their active tasks resume from
+the task boundary. Schema v3 retains mid-task tool recovery but has no durable
+approval continuation. A v1 checkpoint's optional top-level `runId` is preserved, and
+restore treats the saved execution as attempt 1. A v1 checkpoint without
+`runId` receives a new logical run ID. If a caller-supplied restore `runId`
+conflicts with the snapshot, restore throws a validation error instead of
+joining unrelated runs.
 
 ### Saves are best-effort
 
-A checkpoint write must never take down the run it protects. If the store rejects (a transient Redis/SQLite error), the failure is surfaced via `onProgress` and the run continues; the next completed task retries the write.
+An ordinary checkpoint write must never take down the run it protects. If the store rejects (a transient Redis/SQLite error), the failure is surfaced via `onProgress` and the run continues; the next safe runner boundary or completed task retries the write.
+
+Suspension is the exception: OMA cannot return a resumable approval request
+until the exact pending boundary has been saved. That save is strict and fails
+closed. See [durable approvals](durable-approvals.md#rejection-and-recovery-semantics).
 
 ```typescript
 const orchestrator = new OpenMultiAgent({
@@ -147,12 +171,13 @@ const orchestrator = new OpenMultiAgent({
 
 ## Redacting persisted secrets
 
-A checkpoint stores completed task results — including structured values,
-messages, and tool calls — and, for a separate checkpoint store, the
-shared-memory snapshot **verbatim**. Task metadata has its own validation and
-credential redaction boundary, but agent-produced results do not. Redaction
-elsewhere (traces, dashboard) does **not** reach this path, so a secret an agent
-emits into its answer lands on disk. To scrub it, wrap the durable store with
+A checkpoint stores completed task results and in-flight runner state —
+including structured values, messages, tool inputs/results, and tool-call
+records — and, for a separate checkpoint store, the shared-memory snapshot
+**verbatim**. Task metadata has its own validation and credential redaction
+boundary, but agent-produced results do not. Redaction elsewhere (traces,
+dashboard) does **not** reach this path, so a secret an agent emits into its
+answer lands on disk. To scrub it, wrap the durable store with
 **`RedactingStore`**:
 
 ```typescript
@@ -171,6 +196,57 @@ await orchestrator.runTasks(team, tasks, {
 Wrap **every durable store you persist to**: in a split setup — wrapped shared store, separate *unwrapped* checkpoint store — the checkpoint's `completedTaskResults` (sourced from the queue, not the store) would still be raw. Add custom value patterns (e.g. PII) via `new RedactingStore(store, { patterns: [/…/] })`.
 
 Redaction is opt-in by construction and lossy on purpose: a **resumed** run sees `[redacted]` in place of the masked values. Don't enable it if a downstream agent legitimately needs a persisted secret on resume.
+
+The same lossiness makes `RedactingStore` unsuitable for durable approvals,
+whose hash must bind verbatim reviewed content. It deliberately does not expose
+`compareAndSet`, so a suspend decision fails closed before OMA reports a pending
+request. Use a protected, non-redacting checkpoint/approval store for those
+runs.
+
+## Mid-task tool recovery
+
+For the built-in LLM runner, a tool-use turn crosses three durable boundaries:
+
+1. The assistant message and every requested tool call are saved before tools execute.
+2. Each returned `ToolResult` is saved separately as a per-call commit record.
+3. Once all calls have committed, their result blocks are saved as the next user message and the model continues at the following turn.
+
+On restore, committed results are replayed verbatim — including normal error
+results — without invoking the tool again. Calls with no commit record are run
+conservatively. Parallel tool calls are independent: one committed result does
+not force a missing sibling to be skipped or an already committed sibling to
+run twice. The completed turn count and accumulated token usage also resume, so
+`maxTurns` and token budgets do not restart from zero.
+
+Every tool receives the model-issued call ID as `context.toolCallId`. OMA
+persists that ID and reuses it when a missing call runs after restore. A
+consequential tool can pass it to the external system as an idempotency key:
+
+```typescript
+import { defineTool } from '@open-multi-agent/core'
+import { z } from 'zod'
+
+const charge = defineTool({
+  name: 'charge',
+  description: 'Create a charge.',
+  inputSchema: z.object({ amount: z.number() }),
+  execute: async ({ amount }, context) => {
+    const idempotencyKey = [context.runId, context.taskId, context.toolCallId]
+      .filter(Boolean)
+      .join(':')
+    const result = await payments.charge({ amount, idempotencyKey })
+    return { data: JSON.stringify(result) }
+  },
+})
+```
+
+This key matters because OMA cannot make an arbitrary external side effect and
+a `MemoryStore.set()` one cross-system transaction. If the process dies after
+the external service commits but before the tool returns and its checkpoint
+write succeeds, the snapshot still shows a missing result and restore runs the
+call again. Use `toolCallId` (or another domain idempotency key) for operations
+where duplicates are unsafe. The bundled `FileStore` makes each local snapshot
+write atomic, but it cannot close that external transaction window.
 
 ## Advanced: the `Checkpoint` class
 
@@ -194,12 +270,20 @@ await cp.delete()                      // drop the persisted checkpoint
 
 Per-run snapshot/restore over `MemoryStore`. What it does *not* yet do:
 
-- **Resume is task-grained, not mid-task.** A task interrupted while running re-runs from the start on resume — the in-flight agent's conversation history inside a running task is not persisted. Recovery happens at task boundaries.
 - **Snapshot-based, not event-sourced.** Each checkpoint overwrites the previous one; there is no transition log to replay.
+- **External agent backends remain task-grained.** Process and ACP backends own
+  their own loops, so OMA cannot persist their private mid-task conversation or
+  tool state.
+- **Suspendable tool gates require the built-in LLM runner.** Standalone agents,
+  the simple-goal short circuit, and external backends fail closed on a tool
+  `suspend` decision because they have no resumable private tool-loop state.
+- **Only runner tool results have per-call commit records.** Application hooks,
+  custom context-strategy callbacks, and an LLM request interrupted before a
+  response may run again from the last safe boundary.
 
 Two notes on the shared-memory optimization described above:
 
 - A *separate* durable checkpoint store (shared memory in store X, `checkpoint: { store: Y }`) still embeds the full memory snapshot on each save — necessary, since Y holds no other copy of the entries.
-- The reused-store path does not point-in-time roll back shared memory. The default framework writes results only on task completion (so a crashed in-progress task has written nothing), but a custom tool that writes to shared memory mid-task would not have those partial writes rolled back on resume.
+- The reused-store path does not point-in-time roll back shared memory. A custom tool that writes to shared memory mid-task leaves that write in the reused store; use the same idempotency discipline as for any other external side effect.
 
-These are tracked as follow-ups: [#312](https://github.com/open-multi-agent/open-multi-agent/issues/312) (mid-task recovery) and [#313](https://github.com/open-multi-agent/open-multi-agent/issues/313) (event-sourced replay).
+Append-only transition replay remains tracked separately in [#313](https://github.com/open-multi-agent/open-multi-agent/issues/313).

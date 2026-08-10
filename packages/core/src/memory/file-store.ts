@@ -20,8 +20,9 @@
  * (`checkpoint: { store: new FileStore(path) }`) and leave shared memory on a
  * fast {@link InMemoryStore}: a separate checkpoint store self-embeds the
  * shared-memory snapshot, so resume rebuilds everything from the one file while
- * durability I/O stays at checkpoint cadence (once per completed task) instead
- * of on every agent memory write. Using it as `sharedMemoryStore` also works
+ * durability I/O stays at checkpoint cadence (safe runner boundaries and task
+ * completion) instead of on every agent memory write. Using it as
+ * `sharedMemoryStore` also works
  * and is durable, but then every shared-memory write flushes the whole file.
  *
  * **Scope.** Single Node process at a time — there is no cross-process file
@@ -122,6 +123,39 @@ export class FileStore implements MemoryStore {
       createdAt: existing?.createdAt ?? new Date(),
     })
     await this.persist()
+  }
+
+  /**
+   * Atomically replace one value within this FileStore instance.
+   *
+   * FileStore remains a single-process writer (see the module scope note);
+   * cross-process reviewers should decide only after the suspended runner has
+   * exited, or use a database-backed MemoryStore with cross-process CAS.
+   */
+  compareAndSet(
+    key: string,
+    expectedValue: string | null,
+    value: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<boolean> {
+    const run = this.writeChain.then(async () => {
+      await this.ensureLoaded()
+      const existing = this.data.get(key)
+      if ((existing?.value ?? null) !== expectedValue) return false
+      this.data.set(key, {
+        key,
+        value,
+        metadata: metadata !== undefined ? { ...metadata } : undefined,
+        createdAt: existing?.createdAt ?? new Date(),
+      })
+      await this.flush()
+      return true
+    })
+    this.writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 
   /**

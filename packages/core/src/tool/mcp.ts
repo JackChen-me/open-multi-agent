@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { defineTool } from './framework.js'
-import type { ToolDefinition } from '../types.js'
+import type { ToolDefinition, ToolResultContentPart } from '../types.js'
 
 interface MCPToolDescriptor {
   name: string
@@ -53,6 +53,8 @@ interface MCPModules {
 }
 
 const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 60_000
+const DEFAULT_MCP_MEDIA_TYPE = 'application/octet-stream'
+const MEDIA_TYPE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/
 
 async function loadMCPModules(): Promise<MCPModules> {
   const [{ Client }, { StdioClientTransport }] = await Promise.all([
@@ -221,6 +223,153 @@ function toToolResultData(result: MCPCallToolResponse): string {
   }
 }
 
+function validMediaType(value: unknown): string | undefined {
+  if (typeof value === 'string' && MEDIA_TYPE_PATTERN.test(value)) return value
+  return undefined
+}
+
+function httpUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function filenameFromResource(value: Record<string, unknown>): string {
+  if (typeof value['name'] === 'string' && value['name'].trim().length > 0) {
+    return value['name']
+  }
+  if (typeof value['uri'] === 'string') {
+    try {
+      const lastSegment = new URL(value['uri']).pathname.split('/').filter(Boolean).at(-1)
+      if (lastSegment) return decodeURIComponent(lastSegment)
+    } catch {
+      const lastSegment = value['uri'].split('/').filter(Boolean).at(-1)
+      if (lastSegment) return lastSegment
+    }
+  }
+  return 'mcp-resource'
+}
+
+function serializeMcpBlock(block: Record<string, unknown>): string {
+  const existing = contentBlockToText(block)
+  if (existing !== undefined) return existing
+  try {
+    return `[${String(block.type ?? 'unknown')}]\n${JSON.stringify(block, null, 2)}`
+  } catch {
+    return '[mcp content block]'
+  }
+}
+
+function mcpBlockToModelParts(
+  block: Record<string, unknown>,
+): { readonly parts: ToolResultContentPart[]; readonly hasMedia: boolean } {
+  if (block.type === 'text' && typeof block.text === 'string') {
+    return { parts: [{ type: 'text', text: block.text }], hasMedia: false }
+  }
+
+  if (block.type === 'image' && typeof block.data === 'string') {
+    const mediaType = validMediaType(block.mimeType)
+    if (mediaType !== undefined) {
+      return {
+        parts: [{
+          type: 'image',
+          source: { type: 'base64', media_type: mediaType, data: block.data },
+        }],
+        hasMedia: true,
+      }
+    }
+  }
+
+  if (
+    block.type === 'resource'
+    && block.resource !== null
+    && typeof block.resource === 'object'
+  ) {
+    const resource = block.resource as Record<string, unknown>
+    if (typeof resource.text === 'string') {
+      return {
+        parts: [{ type: 'text', text: serializeMcpBlock(block) }],
+        hasMedia: false,
+      }
+    }
+    if (typeof resource.blob === 'string') {
+      const filename = filenameFromResource(resource)
+      const label = typeof resource.uri === 'string' && resource.uri.length > 0
+        ? `[resource ${resource.uri}]`
+        : `[resource ${filename}]`
+      return {
+        parts: [
+          { type: 'text', text: label },
+          {
+            type: 'file',
+            filename,
+            source: {
+              type: 'base64',
+              media_type: validMediaType(resource.mimeType) ?? DEFAULT_MCP_MEDIA_TYPE,
+              data: resource.blob,
+            },
+          },
+        ],
+        hasMedia: true,
+      }
+    }
+  }
+
+  if (block.type === 'resource_link') {
+    const url = httpUrl(block.uri)
+    if (url !== undefined) {
+      const parts: ToolResultContentPart[] = []
+      if (typeof block.description === 'string' && block.description.length > 0) {
+        parts.push({ type: 'text', text: block.description })
+      }
+      parts.push({
+        type: 'file',
+        filename: filenameFromResource(block),
+        source: {
+          type: 'url',
+          media_type: validMediaType(block.mimeType) ?? DEFAULT_MCP_MEDIA_TYPE,
+          url,
+        },
+      })
+      return { parts, hasMedia: true }
+    }
+  }
+
+  // Audio, malformed media, non-HTTP resource links, and future MCP block
+  // types keep the existing explicit text representation. Nothing vanishes.
+  return {
+    parts: [{ type: 'text', text: serializeMcpBlock(block) }],
+    hasMedia: false,
+  }
+}
+
+function toToolResultModelOutput(
+  result: MCPCallToolResponse,
+  data: string,
+): ToolResultContentPart[] | undefined {
+  // Preserve the framework's text-only error contract.
+  if (result.isError === true) return undefined
+
+  const converted = (result.content ?? [])
+    .filter((block): block is Record<string, unknown> => block !== null && typeof block === 'object')
+    .map(mcpBlockToModelParts)
+  if (!converted.some(item => item.hasMedia)) return undefined
+
+  if ('toolResult' in result && result.toolResult !== undefined) {
+    // `toolResult` was the legacy model-visible value. Keep it and add only
+    // the media that the old string serialization could not carry.
+    return [
+      { type: 'text', text: data },
+      ...converted.flatMap(item => item.parts.filter(part => part.type !== 'text')),
+    ]
+  }
+  return converted.flatMap(item => item.parts)
+}
+
 async function listAllMcpTools(
   client: MCPClientLike,
   requestOpts: { timeout: number },
@@ -294,8 +443,11 @@ export async function connectMCPTools(
                 signal: context.abortSignal,
               },
             )
+            const data = toToolResultData(result)
+            const modelOutput = toToolResultModelOutput(result, data)
             return {
-              data: toToolResultData(result),
+              data,
+              ...(modelOutput !== undefined ? { modelOutput } : {}),
               isError: result.isError === true,
             }
           } catch (error) {

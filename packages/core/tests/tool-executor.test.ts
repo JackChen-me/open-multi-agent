@@ -122,7 +122,7 @@ describe('ToolExecutor', () => {
     const result = await executor.execute(
       'bash',
       { command: 'rm -rf /tmp/demo' },
-      { ...dummyContext, runId: 'run-1', taskId: 'task-1' },
+      { ...dummyContext, runId: 'run-1', taskId: 'task-1', toolCallId: 'call-1' },
     )
 
     expect(gate).toHaveBeenCalledWith({
@@ -131,6 +131,7 @@ describe('ToolExecutor', () => {
       agentName: 'test-agent',
       runId: 'run-1',
       taskId: 'task-1',
+      toolCallId: 'call-1',
     })
     expect(execute).not.toHaveBeenCalled()
     expect(result.isError).toBe(true)

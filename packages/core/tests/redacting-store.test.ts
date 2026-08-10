@@ -29,6 +29,11 @@ class NoExpiryStore implements MemoryStore {
 }
 
 describe('RedactingStore', () => {
+  it('does not advertise lossy compare-and-set for exact durable approvals', () => {
+    const store: MemoryStore = new RedactingStore(new InMemoryStore())
+    expect(store.compareAndSet).toBeUndefined()
+  })
+
   describe('set / read', () => {
     it('redacts a plain-string value on set; get returns the redacted value', async () => {
       const inner = new InMemoryStore()

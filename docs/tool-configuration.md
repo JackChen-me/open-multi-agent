@@ -199,8 +199,10 @@ const orchestrator = new OpenMultiAgent({
 ```
 
 The guard composes with the existing per-call `onToolCall` gateway, after input
-validation and before `execute`. An `allow` continues; a `deny` does not call
-the tool and returns a rejected run outcome. For a dynamically planned
+validation and before `execute`. An `allow` continues; a `deny` returns an error
+`ToolResult` without calling the tool. Inside a checkpointed task, `suspend` can persist the exact invocation
+for an out-of-process decision and later `restore()`; see
+[durable approvals](durable-approvals.md). For a dynamically planned
 `runTeam()`, an approved `onPlanReady` callback can supply the approval when no
 per-call gate is configured. If neither approval path exists, the tool is not
 executed and the result returns `confirmationRequired: true` with
@@ -333,7 +335,7 @@ import type { ToolCallContext, ToolCallDecision } from '@open-multi-agent/core'
 const orchestrator = new OpenMultiAgent({
   // Orchestrator-level default, inherited by any agent that sets no gate of its own.
   onToolCall: async (ctx: ToolCallContext): Promise<ToolCallDecision> => {
-    // ctx: { toolName, input (post-validation), agentName, consequential?, runId?, taskId? }
+    // ctx: { toolName, input (post-validation), agentName, consequential?, runId?, taskId?, toolCallId? }
     if (ctx.toolName !== 'bash') return { action: 'allow' }
     if (/^\s*rm\b/.test(String(ctx.input.command))) {
       return { action: 'deny', reason: 'rm is blocked' }
@@ -346,11 +348,16 @@ const orchestrator = new OpenMultiAgent({
 Key semantics:
 
 - **`deny` returns a structured error `ToolResult`; it never throws.** The model sees the `reason` as a normal tool error and can adapt (try a safer command, ask the user, stop) rather than crashing the run. A gate that throws or returns an invalid decision is turned into an error result too (fail closed).
-- **Human-in-the-loop lives inside your callback.** `await` your own CLI prompt, Slack button, or web dialog, then return `allow` or `deny`. The framework prescribes no review channel, keeping the surface small.
+- **`suspend` is durable and returns control.** In a checkpointed built-in LLM task, `{ action: 'suspend' }` saves the exact invocation and returns a top-level `suspended` result. Record a decision with `decideApproval()`, then call `restore()`. Without a resumable checkpoint and atomic store, the call fails closed and the tool does not run. See [durable approvals](durable-approvals.md).
+- **Inline human-in-the-loop still works.** `await` your own CLI prompt, Slack button, or web dialog, then return `allow` or `deny` in the same callback lifetime. The framework prescribes no review channel.
 - **Agent overrides orchestrator.** `AgentConfig.onToolCall` beats `OrchestratorConfig.onToolCall` for that agent, so a team can set a default policy while one specialist tightens or relaxes it. A standalone `new Agent({ ..., onToolCall })` wires the gate straight into its executor.
 - **Runs after the name-based grant.** Default-deny / allowlist / denylist resolution runs **first**; a tool that is not granted is refused before the gate is reached, so the gate only ever sees calls to already-reachable tools. Custom tools and MCP tools route through the same executor, so they are gated too.
+- **The model-issued call ID is stable across recovery.** `toolCallId` identifies
+  this invocation. If an uncommitted call must run again after checkpoint
+  restore, it keeps the same ID; a committed result is replayed without running
+  the gate or tool again. See [checkpoint recovery](checkpoint.md#mid-task-tool-recovery).
 - **Orthogonal to task dispatch approval.** `OrchestratorConfig.onApproval` gates legacy task rounds and `onTaskDispatch` gates one ready task before dispatch; `onToolCall` gates a single tool invocation during execution. They operate at different layers and compose. The two task-level approval modes are mutually exclusive with each other.
-- **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny'`, and (on deny) a `gateReason` that is redacted like other sensitive trace text, so `onTrace` consumers can audit every decision.
+- **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny' | 'suspend'`, and an optional redacted `gateReason`. Durable decisions come from the approval ledger and may be summarized in an execution receipt; telemetry is not their source of truth.
 
 > **Not a security boundary.** A gate that returns `deny` still relies on cooperating code; it is a coordination layer, not containment. `bash` remains un-sandboxed (see the callout below). For an actually-untrusted shell, use process-level isolation (a container / VM / seccomp); the gate is for *policy*, not *isolation*.
 
@@ -380,6 +387,109 @@ const orchestrator = new OpenMultiAgent({
 Compound commands are segmented on shell separators (`&&`, `||`, `;`, `|`, substitutions) and the **highest** risk found wins, so a safe prefix cannot smuggle a destructive suffix (`ls && rm -rf /` becomes `high`). Quoted spans are stripped first, so `echo "rm -rf /"` stays `safe`.
 
 The classifier is a **shallow heuristic, not a parser**; it can be fooled by obfuscation (variable indirection, base64-decode-then-exec, exotic quoting). It is convenience only: extend the tables, wrap it, or replace it entirely. See [`examples/patterns/risk-gated-bash.ts`](../packages/core/examples/patterns/risk-gated-bash.ts) for an end-to-end demo.
+
+## Shell Executors
+
+The granted `bash` built-in delegates command execution through a
+`ShellExecutor`. With no executor configured, OMA uses `LocalShellExecutor`,
+which preserves the existing `bash -c` behavior on the host:
+
+```typescript
+import { OpenMultiAgent } from '@open-multi-agent/core'
+import type { AgentConfig } from '@open-multi-agent/core'
+import type { ShellExecutor } from '@open-multi-agent/core/shell'
+
+declare const sharedRemoteExecutor: ShellExecutor
+declare const specialistExecutor: ShellExecutor
+
+const orchestrator = new OpenMultiAgent({
+  // Inherited by agents that do not set shellExecutor.
+  defaultShellExecutor: sharedRemoteExecutor,
+})
+
+const agent: AgentConfig = {
+  name: 'builder',
+  model: 'claude-sonnet-4-6',
+  tools: ['bash'],
+  // Per-agent value wins over the orchestrator default.
+  shellExecutor: specialistExecutor,
+}
+```
+
+The executor changes **where an already-granted command runs**. It does not
+grant `bash` or bypass `disallowedTools`; command execution still happens only
+after `onToolCall` allows it. The existing default-deny and per-call gate rules
+are unchanged. The tool wrapper also keeps the model-facing behavior uniform
+across executors: input validation, the 30-second default timeout,
+stdout/stderr formatting, output redaction, and
+`isError` on a nonzero exit code.
+
+The public type contract is available from `@open-multi-agent/core/shell` and
+has no runtime imports:
+
+```typescript
+interface ShellExecutor {
+  start?(): Promise<void>
+  exec(command: string, options: ShellExecOptions): Promise<ShellExecResult>
+  dispose?(): Promise<void>
+}
+```
+
+`ShellExecOptions` contains `cwd`, `timeoutMs`, and `abortSignal`.
+`ShellExecResult` contains `stdout`, `stderr`, and `exitCode`. Executors must
+use exit code `124` for timeout, `130` for abort, and `127` when the process or
+remote command could not be started. The tool wrapper adds a short deadline
+backstop so an executor that ignores timeout or abort cannot stall the tool
+loop indefinitely, but implementations still own prompt cancellation and
+termination of the process, job, or remote session they control.
+
+### Lifecycle and concurrent use
+
+One executor instance represents one reusable session:
+
+- OMA calls `start()` lazily, immediately before the first allowed `bash`
+  execution in a run. A granted tool that is never called (or is denied by
+  `onToolCall`) creates no session. Later shell calls in that run reuse it.
+- OMA always attempts `dispose()` when the run succeeds, fails, is aborted, or
+  a streaming consumer stops early. If `start()` partially allocates resources
+  and then rejects, OMA attempts `dispose()` too.
+- If overlapping runs share the same executor instance (as agents inheriting
+  one `defaultShellExecutor` do), OMA reference-counts them: one `start()`, then
+  one `dispose()` after the final run finishes. `exec()` may be called
+  concurrently, including when one model turn requests multiple shell calls.
+  An executor that cannot run commands concurrently must serialize internally;
+  use distinct per-agent instances when each agent needs its own session.
+- A process crash cannot execute JavaScript cleanup. Remote adapters should
+  also configure a provider-side TTL, lease expiry, or out-of-band reaper for
+  crash recovery.
+
+These lifecycle calls belong to Agent/Orchestrator runs. If application code
+invokes the low-level exported `bashTool.execute()` directly, that caller owns
+`start()` / `dispose()` around its tool calls.
+
+`LocalShellExecutor` is stateless. It keeps the existing safe environment
+allowlist, captures stdout/stderr, runs the command in a separate process group
+on POSIX, and kills the process tree on timeout or abort. It executes with the
+host Node.js process's permissions: **it is not a sandbox or security
+boundary**. A custom executor is only as isolated as the environment and
+adapter implementation behind it; OMA does not ship Docker, VM, or hosted
+sandbox adapters in core.
+
+### Host and remote filesystems diverge
+
+> **A remote shell executor does not move the built-in filesystem tools.**
+> `file_read`, `file_write`, `file_edit`, `grep`, and `glob` still operate on
+> the host inside `AgentConfig.cwd` / `defaultCwd`. The `cwd` passed to `bash`
+> is interpreted inside the executor's environment. For example, `file_write`
+> may create `report.md` in the host `.agent-workspace`, while a following
+> remote `bash` call to `wc -l report.md` sees no such file. Unless the
+> application provides its own synchronization layer, do not co-grant the
+> host filesystem tools to a remote-shell agent, or explicitly design around
+> the two separate filesystems.
+
+Shell executors apply only inside the normal LLM runner tool loop. Process and
+ACP agent backends replace that loop and continue to manage their own command
+execution and `cwd`; `shellExecutor` does not affect them.
 
 ## Filesystem Working Directory
 
@@ -431,7 +541,10 @@ const agent: AgentConfig = {
 
 **Auto-creation.** The sandbox root is `mkdir -p`'d on first write, so callers do not need to pre-create `.agent-workspace` (or any custom path).
 
-The `bash` tool runs in its own process group on POSIX, so timeouts and abort signals kill any backgrounded children rather than letting them outlive the parent.
+The default `LocalShellExecutor` runs `bash` in its own process group on POSIX,
+so timeouts and abort signals kill any backgrounded children rather than
+letting them outlive the parent. Custom executors own equivalent cleanup in
+their execution environment.
 
 ## Custom Tools
 
@@ -499,18 +612,19 @@ This is a **scoping convenience, not an isolation boundary**. Tool code runs in-
 
 ## Tool Output Control
 
-Long tool outputs can blow up conversation size and cost. Two controls work together.
+Long tool outputs can blow up conversation size and cost. The following
+validation and context controls compose with the rich-result contract.
 
 **Validation (optional).** Add `outputSchema` to catch malformed tool results before they are forwarded:
 
 > **Note — two different `outputSchema` fields.** The one on `defineTool()` /
 > `ToolDefinition` (shown below) validates a single **tool's** `ToolResult.data`
-> — it is always a `ZodSchema<string>` because tool output is serialised as
-> text. The `outputSchema` on [`AgentConfig`](../packages/core/examples/patterns/structured-output.ts)
+> — string tools use `ZodSchema<string>`, while tools with application-owned
+> object data can use the corresponding object schema. The `outputSchema` on
+> [`AgentConfig`](../packages/core/examples/patterns/structured-output.ts)
 > is different: it validates the **agent's final answer** as parsed JSON
 > against an arbitrary Zod schema (see _Structured output_ in `packages/core/examples/`).
-> Different types, different scopes — TypeScript won't warn you if you mix
-> them up, so pick the one that matches the layer you're working at.
+> Different scopes — pick the one that matches the layer you're working at.
 
 ```typescript
 const jsonTool = defineTool({
@@ -528,6 +642,116 @@ const jsonTool = defineTool({
   execute: async () => ({ data: '{"ok": true}' }),
 })
 ```
+
+### Rich image and file results
+
+`ToolResult` separates the value your application keeps from the content sent
+back to the model:
+
+```typescript
+const renderChart = defineTool({
+  name: 'render_chart',
+  description: 'Render a chart and return a preview.',
+  inputSchema: z.object({ metric: z.string() }),
+  outputSchema: z.object({ chartId: z.string(), storageKey: z.string() }),
+  execute: async ({ metric }) => ({
+    // Application-owned value: available to onToolResult; not serialized into
+    // the model conversation.
+    data: { chartId: 'chart-42', storageKey: `artifacts/${metric}.png` },
+
+    // Model-visible value: validated and copied before it enters the transcript.
+    modelOutput: [
+      { type: 'text', text: `Preview for ${metric}` },
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: pngBytes.toString('base64'),
+        },
+      },
+      {
+        type: 'file',
+        filename: 'report.pdf',
+        source: {
+          type: 'url',
+          media_type: 'application/pdf',
+          url: signedReportUrl,
+        },
+      },
+    ],
+  }),
+})
+```
+
+Existing `{ data: 'plain text' }` tools are unchanged: when `modelOutput` is
+omitted, the string in `data` follows the existing `maxOutputChars` behavior
+and is sent to the model. A non-string `data` value requires `modelOutput`; OMA
+never guesses a JSON serialization. Invalid content becomes a normal text error
+`ToolResult` (`isError: true`) so the tool loop keeps its existing error
+behavior. Error results remain text-only.
+
+`modelOutput` is either a string or a non-empty array of `text`, `image`, and
+`file` parts. Media sources are either raw base64 bytes (not a `data:` URL) or
+an absolute HTTP(S) reference and must include a MIME type without parameters.
+File parts also require a display filename. OMA defensively copies nested
+content at the tool boundary and again before callbacks can affect the model
+transcript; `data` remains application-owned and is not cloned.
+
+Provider conversion is faithful or explicit—media is never silently dropped:
+
+| Adapter family | Mapping | Deterministic local rejection |
+|---|---|---|
+| OpenAI Chat Completions, Azure OpenAI, Copilot, and built-in OpenAI-compatible adapters | Text stays in the `tool` message; attachments follow in a `user` message. Images accept inline data or URLs; files accept inline data. | File URL references. |
+| Anthropic | Images stay in `tool_result`; PDF files are adjacent document blocks. Inline data and URLs are accepted for those mapped types. | Unsupported image MIME types and non-PDF files. |
+| Gemini | Media maps to `functionResponse.parts` as `inlineData` or `fileData`. | No additional protocol-level rejection after shared validation. |
+| Bedrock Converse | Inline images and supported document formats map to native tool-result blocks. | URL media, unknown image MIME types, and unmapped document MIME types. |
+| `AISdkAdapter` | Media maps to AI SDK `file-data` or `file-url` content. | No additional protocol-level rejection after shared validation. |
+
+These are wire-format mappings, not a promise that every model behind an
+adapter accepts every mapped part. A selected model or OpenAI-compatible
+endpoint can still reject otherwise valid content; that provider error
+propagates instead of falling back to a text placeholder. Known unmappable
+parts throw the terminal `UnsupportedToolResultContentError` before the SDK
+request. Use a text-only `modelOutput` yourself when that is the desired
+fallback.
+
+Choose inline data versus references deliberately:
+
+- Inline base64 is self-contained, but it expands request bodies and is stored
+  in `AgentRunResult.messages` and task checkpoints. OMA does not impose a
+  framework byte cap; provider request and media limits still apply.
+- HTTP(S) references keep the transcript smaller, but the provider must be able
+  to fetch them. Treat signed URLs, query tokens, filenames, and referenced
+  content as data disclosed to the model provider.
+- `maxOutputChars` preserves its legacy meaning for implicit string results.
+  It does not rewrite explicit rich `modelOutput`; bound or resize rich payloads
+  in the tool before returning them.
+- Context summary paths replace old media with textual placeholders;
+  `compressToolResults` and `compact` can replace consumed rich results with a
+  marker. The newest result stays intact.
+- Stream `tool_result` events, result messages, `onToolResult`, and progress
+  result payloads can expose the full rich content to application handlers.
+  Legacy tool-call traces and `ToolCallRecord.output` use a redacted text/media
+  summary that omits inline bytes and reference URLs. Online scorers receive the
+  normal run result, while stored evaluation payloads continue to follow the
+  configured evaluation payload policy.
+
+Task checkpoints JSON-serialize model-visible rich content in completed
+`AgentRunResult.messages`, so restored task results preserve it. Checkpoint
+stores are not covered by trace redaction; wrap the store with `RedactingStore`
+when that tradeoff is appropriate. Mid-task recovery remains task-grained: an
+interrupted in-flight tool call still re-runs as described in
+[`checkpoint.md`](checkpoint.md#limitations).
+
+Current boundaries: the native rich contract does not include audio, local
+filesystem paths, automatic uploads, resizing, malware scanning, URL fetching,
+or MIME sniffing. Process and ACP backends own their execution and do not use
+the runner's tool loop. Adapter tests validate local wire conversion without
+contacting provider APIs; verify the exact provider/model combination you plan
+to operate before relying on media support in production.
+
+See the runnable [`rich-tool-results` example](../packages/core/examples/patterns/rich-tool-results.ts).
 
 **Truncation.** Cap an individual tool result to a head + tail excerpt with a marker in between:
 
@@ -581,6 +805,10 @@ Notes:
 - `@modelcontextprotocol/sdk` is an optional peer dependency, only needed when using MCP.
 - Current transport support is stdio.
 - MCP input validation is delegated to the MCP server (`inputSchema` is `z.any()`).
+- MCP text output keeps its existing string behavior. Successful MCP `image`,
+  embedded blob resource, and HTTP(S) `resource_link` blocks also receive a
+  rich `modelOutput`; errors, audio, malformed media, and non-HTTP resource
+  links retain an explicit text representation.
 - Prefer locally installed or pinned MCP server binaries and pass only the environment variables that server needs. Avoid spreading `process.env` into MCP subprocesses.
 - `egressPolicy` does not constrain connections opened inside the MCP child, by `bash`, or by custom tools. See the [egress enforcement matrix](egress-policy.md#enforcement-matrix).
 

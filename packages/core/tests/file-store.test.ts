@@ -121,6 +121,21 @@ describe('FileStore — concurrency and atomicity', () => {
     expect(seen).toEqual([...keys].sort())
   })
 
+  it('allows only one concurrent compare-and-set decision on one instance', async () => {
+    const store = new FileStore(filePath)
+    await store.set('approval', 'pending')
+
+    const outcomes = await Promise.all([
+      store.compareAndSet('approval', 'pending', 'approved'),
+      store.compareAndSet('approval', 'pending', 'rejected'),
+    ])
+
+    expect(outcomes.filter(Boolean)).toHaveLength(1)
+    expect(['approved', 'rejected']).toContain((await store.get('approval'))?.value)
+    expect((await new FileStore(filePath).get('approval'))?.value)
+      .toBe((await store.get('approval'))?.value)
+  })
+
   it('leaves no temp files behind after writes', async () => {
     const store = new FileStore(filePath)
     await Promise.all([store.set('a', '1'), store.set('b', '2'), store.set('c', '3')])

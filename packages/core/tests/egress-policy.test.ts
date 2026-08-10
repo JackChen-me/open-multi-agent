@@ -308,6 +308,38 @@ describe('run-level precedence and error contracts', () => {
     expect(result.toolCalls).toEqual([])
   })
 
+  it('applies the run policy to structured input before provider I/O', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error('test must not open a network connection'),
+    )
+    const oma = new OpenMultiAgent({
+      defaultModel: 'test-model',
+      defaultProvider: 'openai',
+      defaultApiKey: 'test-key',
+    })
+
+    const result = await oma.runAgent({
+      name: 'structured-restricted',
+      baseURL: 'https://api.openai.com/v1',
+    }, [{
+      role: 'user',
+      content: [{ type: 'text', text: 'hello' }],
+    }], {
+      egressPolicy: { mode: 'offline' },
+    })
+
+    expect(result).toMatchObject({
+      success: false,
+      status: { code: 'rejected' },
+      errorInfo: {
+        kind: 'validation',
+        code: 'EGRESS_POLICY_DENIED',
+        retryable: false,
+      },
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('lets an agent policy narrow an orchestrator allowlist', async () => {
     const oma = new OpenMultiAgent({
       defaultModel: 'test-model',

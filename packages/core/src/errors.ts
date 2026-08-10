@@ -126,10 +126,10 @@ export class RoutingDeclarationRequiredError extends Error {
 }
 
 /**
- * Raised when a message list passed to an adapter violates the
- * {@link LLMMessage}[] contract (e.g. a `content` that isn't a `ContentBlock[]`).
- * Surfaced at the adapter entry so the violation fails loudly instead of
- * crashing deep in provider-specific message conversion.
+ * Raised when structured input passed to a public Agent API or adapter violates
+ * the {@link LLMMessage}[] contract (e.g. a `content` that isn't a
+ * `ContentBlock[]`), cannot be copied safely, or crosses a text-only backend
+ * boundary. Surfaced before provider-specific conversion or external execution.
  */
 export class InvalidMessageError extends Error {
   readonly code = 'INVALID_MESSAGE'
@@ -190,6 +190,27 @@ export class EgressPolicyError extends Error {
 }
 
 /**
+ * Raised before an SDK request when a built-in adapter cannot faithfully map a
+ * model-visible tool-result part. This is terminal: retrying the same adapter
+ * and content cannot add a missing wire-format capability.
+ */
+export class UnsupportedToolResultContentError extends Error {
+  readonly code = 'UNSUPPORTED_TOOL_RESULT_CONTENT'
+
+  constructor(
+    readonly provider: string,
+    readonly contentType: string,
+    detail?: string,
+  ) {
+    super(
+      `${provider} cannot represent tool-result content type "${contentType}"` +
+        (detail ? `: ${detail}` : ''),
+    )
+    this.name = 'UnsupportedToolResultContentError'
+  }
+}
+
+/**
  * Read an HTTP-style status code off an unknown error, if present. Provider
  * SDK errors (`Anthropic.APIError`, `OpenAI.APIError`) expose it as `.status`;
  * some libraries use `.statusCode`. Returns `undefined` for network/unknown
@@ -235,6 +256,7 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof InvalidMessageError) return false
   if (error instanceof UnsupportedToolCallError) return false
   if (error instanceof EgressPolicyError) return false
+  if (error instanceof UnsupportedToolResultContentError) return false
   if (error instanceof LLMCallTimeoutError) return true
   if (error instanceof RoutingTimeoutError) return true
   if (error instanceof RoutingProfilerFailedError) return false

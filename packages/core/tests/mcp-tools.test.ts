@@ -187,6 +187,81 @@ describe('connectMCPTools', () => {
     const result = await connected.tools[0].execute({}, context)
     expect(result.data).toContain('image')
     expect(result.data).toContain('base64 length=3')
+    expect(result.modelOutput).toEqual([{
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'AAA' },
+    }])
+  })
+
+  it('preserves MCP blob resources and HTTP resource links as file parts', async () => {
+    listToolsMock.mockResolvedValue({
+      tools: [{ name: 'files', description: 'Files', inputSchema: { type: 'object' } }],
+    })
+    callToolMock.mockResolvedValue({
+      content: [
+        {
+          type: 'resource',
+          resource: {
+            uri: 'file:///reports/inline.pdf',
+            mimeType: 'application/pdf',
+            blob: 'JVBERi0xLjQ=',
+          },
+        },
+        {
+          type: 'resource_link',
+          name: 'remote.csv',
+          uri: 'https://example.com/remote.csv',
+          mimeType: 'text/csv',
+          description: 'Remote export',
+        },
+      ],
+      isError: false,
+    })
+
+    const { connectMCPTools } = await import('../src/tool/mcp.js')
+    const connected = await connectMCPTools({ command: 'npx', args: ['x'] })
+    const result = await connected.tools[0].execute({}, context)
+
+    expect(result.modelOutput).toEqual([
+      { type: 'text', text: '[resource file:///reports/inline.pdf]' },
+      {
+        type: 'file',
+        filename: 'inline.pdf',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: 'JVBERi0xLjQ=',
+        },
+      },
+      { type: 'text', text: 'Remote export' },
+      {
+        type: 'file',
+        filename: 'remote.csv',
+        source: {
+          type: 'url',
+          media_type: 'text/csv',
+          url: 'https://example.com/remote.csv',
+        },
+      },
+    ])
+  })
+
+  it('keeps MCP error results text-only even when the server includes media', async () => {
+    listToolsMock.mockResolvedValue({
+      tools: [{ name: 'failed_pic', description: 'Pic', inputSchema: { type: 'object' } }],
+    })
+    callToolMock.mockResolvedValue({
+      content: [{ type: 'image', data: 'AAA', mimeType: 'image/png' }],
+      isError: true,
+    })
+
+    const { connectMCPTools } = await import('../src/tool/mcp.js')
+    const connected = await connectMCPTools({ command: 'npx', args: ['x'] })
+    const result = await connected.tools[0].execute({}, context)
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('base64 length=3')
+    expect(result.modelOutput).toBeUndefined()
   })
 
   it('marks tool result as error when MCP returns isError', async () => {

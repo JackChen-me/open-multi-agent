@@ -7,6 +7,7 @@ import {
   InvalidMessageError,
   LLMCallTimeoutError,
   UnsupportedToolCallError,
+  UnsupportedToolResultContentError,
 } from '../src/errors.js'
 import { classifyRunFailure } from '../src/observability/status.js'
 
@@ -45,6 +46,9 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new TokenBudgetExceededError('a', 100, 50))).toBe(false)
     expect(isRetryableError(new InvalidMessageError('bad'))).toBe(false)
     expect(isRetryableError(new UnsupportedToolCallError('openai', 'custom'))).toBe(false)
+    expect(isRetryableError(
+      new UnsupportedToolResultContentError('openai', 'file-url'),
+    )).toBe(false)
     expect(isRetryableError(new InvalidTaskRequirementsError([{
       code: 'NO_ELIGIBLE_AGENT',
       taskId: 'task-1',

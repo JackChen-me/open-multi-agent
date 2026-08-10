@@ -11,6 +11,17 @@ export interface ExecutionReceiptDependencyEdge {
   readonly to: string
 }
 
+/** Approval fact derived from a run result; the primary row stays in MemoryStore. */
+export interface ExecutionReceiptApprovalDecision {
+  readonly requestId: string
+  readonly scope: 'plan' | 'task_round' | 'task_dispatch' | 'tool_call'
+  readonly requestHash: string
+  readonly decision: 'approved' | 'rejected'
+  readonly reviewerId: string
+  readonly reviewerDisplayName?: string
+  readonly decidedAt: string
+}
+
 /**
  * Structured execution facts derived from run records and optional trace events.
  * Agent output text is deliberately excluded as a source of evidence.
@@ -35,6 +46,7 @@ export interface ExecutionReceipt {
   readonly dependencyEdges: readonly ExecutionReceiptDependencyEdge[]
   readonly independentRolesCount: number
   readonly independentReviewOccurred: boolean
+  readonly approvalDecisions?: readonly ExecutionReceiptApprovalDecision[]
   readonly totalTokens: {
     readonly input: number
     readonly output: number
@@ -93,6 +105,44 @@ function readFlags(value: unknown): readonly RunFlag[] | undefined {
     || flag === 'governance-overridden'
     || flag === 'review-skipped-due-to-budget')
   return flags.length > 0 ? [...new Set(flags)] : undefined
+}
+
+function readApprovalDecisions(
+  value: unknown,
+): readonly ExecutionReceiptApprovalDecision[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const decisions: ExecutionReceiptApprovalDecision[] = []
+  for (const item of value) {
+    if (!isRecord(item) || !isRecord(item['reviewer'])) continue
+    const requestId = readString(item['requestId'])
+    const scope = item['scope']
+    const requestHash = readString(item['requestHash'])
+    const decision = item['decision']
+    const reviewerId = readString(item['reviewer']['id'])
+    const reviewerDisplayName = readString(item['reviewer']['displayName'])
+    const decidedAt = readString(item['decidedAt'])
+    if (
+      !requestId
+      || (scope !== 'plan'
+        && scope !== 'task_round'
+        && scope !== 'task_dispatch'
+        && scope !== 'tool_call')
+      || !requestHash
+      || (decision !== 'approved' && decision !== 'rejected')
+      || !reviewerId
+      || !decidedAt
+    ) continue
+    decisions.push({
+      requestId,
+      scope,
+      requestHash,
+      decision,
+      reviewerId,
+      ...(reviewerDisplayName ? { reviewerDisplayName } : {}),
+      decidedAt,
+    })
+  }
+  return decisions.length > 0 ? decisions : undefined
 }
 
 function readTraceFacts(trace: readonly TraceEvent[] | undefined): TraceFacts {
@@ -186,6 +236,7 @@ function buildAgentReceipt(result: AgentRunResult, trace: TraceFacts): Execution
     : null
   const totalTokens = readTokenUsage(rawResult['tokenUsage'])
   const flags = readFlags(rawResult['flags'])
+  const approvalDecisions = readApprovalDecisions(rawResult['approvalDecisions'])
   const partial = trace.partial
     || workerAgentEvents.length === 0
     || rolesExecuted.length === 0
@@ -195,6 +246,7 @@ function buildAgentReceipt(result: AgentRunResult, trace: TraceFacts): Execution
 
   return {
     ...(flags ? { flags } : {}),
+    ...(approvalDecisions ? { approvalDecisions } : {}),
     mode: rolesExecuted.length > 1 ? 'multi-agent' : 'single',
     rolesExecuted,
     workerInstancesExecuted: rolesExecuted,
@@ -302,6 +354,7 @@ function buildTeamReceipt(result: TeamRunResult, trace: TraceFacts): ExecutionRe
 
   const totalTokens = readTokenUsage(rawResult['totalTokenUsage'])
   const flags = readFlags(rawResult['flags'])
+  const approvalDecisions = readApprovalDecisions(rawResult['approvalDecisions'])
   const rawMetrics = rawResult['metrics']
   const durationMs = isRecord(rawMetrics) && isFiniteNumber(rawMetrics['totalDurationMs'])
     ? rawMetrics['totalDurationMs']
@@ -315,6 +368,7 @@ function buildTeamReceipt(result: TeamRunResult, trace: TraceFacts): ExecutionRe
     ...(routingDecisionId ? { routingDecisionId } : {}),
     ...(routingDecisionSpanId ? { routingDecisionSpanId } : {}),
     ...(flags ? { flags } : {}),
+    ...(approvalDecisions ? { approvalDecisions } : {}),
     mode: rolesExecuted.length > 1 ? 'multi-agent' : 'single',
     rolesExecuted,
     workerInstancesExecuted: rolesExecuted,

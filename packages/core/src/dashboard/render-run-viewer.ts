@@ -223,6 +223,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     .source-chip { color: var(--mint); }
     .status-ok, .status-completed { color: var(--mint); }
     .status-error, .status-failed, .status-timeout, .status-budget_exhausted, .status-rejected { color: var(--coral); }
+    .status-suspended { color: var(--amber); }
     .status-in_progress, .status-pending { color: var(--amber); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     @media (max-width: 940px) {

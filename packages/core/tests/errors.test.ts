@@ -4,6 +4,7 @@ import {
   InvalidMessageError,
   LLMCallTimeoutError,
   UnsupportedToolCallError,
+  UnsupportedToolResultContentError,
 } from '../src/errors.js'
 
 describe('TokenBudgetExceededError', () => {
@@ -75,6 +76,21 @@ describe('UnsupportedToolCallError', () => {
     expect(err.provider).toBe('openai')
     expect(err.toolType).toBe('custom')
     expect(err.message).toBe('openai returned unsupported tool-call type "custom"')
+  })
+})
+
+describe('UnsupportedToolResultContentError', () => {
+  it('identifies the provider and unmappable content type', () => {
+    const err = new UnsupportedToolResultContentError(
+      'Anthropic Messages',
+      'file:text/plain',
+      'only PDF files are supported',
+    )
+    expect(err.name).toBe('UnsupportedToolResultContentError')
+    expect(err.code).toBe('UNSUPPORTED_TOOL_RESULT_CONTENT')
+    expect(err.provider).toBe('Anthropic Messages')
+    expect(err.contentType).toBe('file:text/plain')
+    expect(err.message).toContain('only PDF files are supported')
   })
 })
 

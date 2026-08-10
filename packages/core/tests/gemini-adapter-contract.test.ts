@@ -120,7 +120,7 @@ describe('GeminiAdapter (contract)', () => {
       expect(parts[0].functionResponse.name).toBe('unknown_id')
     })
 
-    it('serializes non-string tool_result content to JSON', async () => {
+    it('maps rich tool_result media to functionResponse parts', async () => {
       mockGenerateContent.mockResolvedValue(makeGeminiResponse([{ text: 'ok' }]))
 
       await adapter.chat(
@@ -129,18 +129,48 @@ describe('GeminiAdapter (contract)', () => {
           content: [{
             type: 'tool_result',
             tool_use_id: 'call_1',
-            content: { answer: 42 } as never,
+            content: [
+              { type: 'text', text: 'Rendered preview' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+              },
+              {
+                type: 'file',
+                filename: 'report.pdf',
+                source: {
+                  type: 'url',
+                  media_type: 'application/pdf',
+                  url: 'https://example.com/report.pdf',
+                },
+              },
+            ],
             is_error: false,
-          } as never],
+          }],
         }],
         chatOpts(),
       )
 
       const parts = mockGenerateContent.mock.calls[0][0].contents[0].parts
       expect(parts[0].functionResponse.response).toEqual({
-        content: '{"answer":42}',
+        content: 'Rendered preview',
         isError: false,
       })
+      expect(parts[0].functionResponse.parts).toEqual([
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+        {
+          fileData: {
+            mimeType: 'application/pdf',
+            fileUri: 'https://example.com/report.pdf',
+            displayName: 'report.pdf',
+          },
+        },
+      ])
     })
 
     it('converts image blocks to inlineData parts', async () => {

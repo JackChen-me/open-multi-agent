@@ -34,7 +34,7 @@ export interface RegisterBuiltInToolsOptions {
  * APIs that accept any ToolDefinition without requiring a union type.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const BUILT_IN_TOOLS: ToolDefinition<any>[] = [
+export const BUILT_IN_TOOLS: ToolDefinition<any, any>[] = [
   bashTool,
   fileReadTool,
   fileWriteTool,
@@ -44,7 +44,7 @@ export const BUILT_IN_TOOLS: ToolDefinition<any>[] = [
 ]
 
 /** All built-ins including `delegate_to_agent` (for team registry setup). */
-export const ALL_BUILT_IN_TOOLS_WITH_DELEGATE: ToolDefinition<any>[] = [
+export const ALL_BUILT_IN_TOOLS_WITH_DELEGATE: ToolDefinition<any, any>[] = [
   ...BUILT_IN_TOOLS,
   delegateToAgentTool,
 ]

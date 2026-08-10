@@ -42,6 +42,7 @@ export interface ConsensusAgentDefaults {
   readonly defaultApiKey: OrchestratorConfig['defaultApiKey']
   readonly egressPolicy: OrchestratorConfig['egressPolicy']
   readonly defaultCwd: OrchestratorConfig['defaultCwd']
+  readonly defaultShellExecutor: OrchestratorConfig['defaultShellExecutor']
   readonly onToolCall: OrchestratorConfig['onToolCall']
   readonly maxConcurrency: number
 }
@@ -372,6 +373,7 @@ export async function runTaskVerify(
       defaultApiKey: config.defaultApiKey,
       egressPolicy: config.egressPolicy,
       defaultCwd: config.defaultCwd,
+      defaultShellExecutor: config.defaultShellExecutor,
       onToolCall: config.onToolCall,
       maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
     },

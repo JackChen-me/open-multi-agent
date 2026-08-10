@@ -27,7 +27,7 @@ result.errorInfo // redacted, JSON-safe details on failures
 characters). `attempt` starts at 1. Each execution attempt gets a new 32-hex
 `traceId` and 16-hex `rootSpanId`. Restore preserves `runId`, increments
 `attempt`, generates new trace/root IDs, and links to the previous attempt when
-restoring a v2 checkpoint.
+restoring an identity-aware v2 or v3 checkpoint.
 
 Status codes are `ok`, `error`, `cancelled`, `timeout`, `budget_exhausted`,
 `rejected`, and `skipped`. Existing `success` fields remain available and are
@@ -450,7 +450,7 @@ exported to OTel or another vendor.
 |---|---|---|
 | Run Viewer | static post-run task DAG plus span Waterfall, timing, token/cost facts, and safe details | derived artifact; no live delivery or authoritative state |
 | TraceStore | append/query telemetry, retention, and trace deletion | best-effort; no CAS, lease, suspend, or resume |
-| CheckpointStore | task-grained execution snapshot consumed by `restore()` | execution recovery state; not a trace query system |
+| CheckpointStore | safe-boundary execution snapshot consumed by `restore()` | execution recovery state; not a trace query system |
 | future RunStore | authoritative durable run state machine | not implemented by Observability v2 |
 
 Losing telemetry must not roll back a durable run. Deleting traces must not

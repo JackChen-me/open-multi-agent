@@ -25,10 +25,12 @@ import type {
   ReasoningBlock,
   TextBlock,
   ThinkingConfig,
+  ToolResultContentPart,
   ToolUseBlock,
 } from '../types.js'
-import { UnsupportedToolCallError } from '../errors.js'
+import { UnsupportedToolCallError, UnsupportedToolResultContentError } from '../errors.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
+import { toolResultContentParts } from '../tool/result.js'
 import { reasoningBlockToInlineText, resolveReasoningOutboundMaxChars, type ReasoningOutboundOptions } from './reasoning-fallback.js'
 
 // ---------------------------------------------------------------------------
@@ -94,6 +96,36 @@ function hasToolResults(msg: LLMMessage): boolean {
   return msg.content.some((b) => b.type === 'tool_result')
 }
 
+type OpenAIUserContentPart = OpenAI.Chat.ChatCompletionContentPart
+
+function toOpenAIToolAttachmentPart(part: Exclude<ToolResultContentPart, { type: 'text' }>): OpenAIUserContentPart {
+  if (part.type === 'image') {
+    return {
+      type: 'image_url',
+      image_url: {
+        url: part.source.type === 'base64'
+          ? `data:${part.source.media_type};base64,${part.source.data}`
+          : part.source.url,
+      },
+    }
+  }
+
+  if (part.source.type === 'url') {
+    throw new UnsupportedToolResultContentError(
+      'OpenAI-compatible Chat Completions',
+      'file-url',
+      'file content parts accept inline base64 data, not remote URLs',
+    )
+  }
+  return {
+    type: 'file',
+    file: {
+      filename: part.filename,
+      file_data: `data:${part.source.media_type};base64,${part.source.data}`,
+    },
+  }
+}
+
 /**
  * Convert framework {@link LLMMessage}s into OpenAI
  * {@link ChatCompletionMessageParam} entries.
@@ -143,19 +175,41 @@ export function toOpenAIMessages(
         result.push(toOpenAIUserMessage(msg))
       } else {
         // Emit tool messages first to satisfy OpenAI's strict ordering rule.
+        const attachmentParts: OpenAIUserContentPart[] = []
         for (const block of msg.content) {
           if (block.type === 'tool_result') {
+            const parts = toolResultContentParts(block.content)
+            const textParts = parts
+              .filter((part): part is Extract<ToolResultContentPart, { type: 'text' }> => part.type === 'text')
+              .map((part): OpenAI.Chat.ChatCompletionContentPartText => ({ type: 'text', text: part.text }))
+            const mediaParts = parts.filter(
+              (part): part is Exclude<ToolResultContentPart, { type: 'text' }> => part.type !== 'text',
+            )
+            if (mediaParts.length > 0) {
+              textParts.push({
+                type: 'text',
+                text: `[${mediaParts.length} tool-result attachment(s) follow in the next user message.]`,
+              })
+              attachmentParts.push({
+                type: 'text',
+                text: `Attachments for tool call ${block.tool_use_id}:`,
+              })
+              attachmentParts.push(...mediaParts.map(toOpenAIToolAttachmentPart))
+            }
             const toolMsg: ChatCompletionToolMessageParam = {
               role: 'tool',
               tool_call_id: block.tool_use_id,
-              content: block.content,
+              content: typeof block.content === 'string' ? block.content : textParts,
             }
             result.push(toolMsg)
           }
         }
 
         const nonToolBlocks = msg.content.filter((b) => b.type !== 'tool_result')
-        if (nonToolBlocks.length > 0) {
+        if (attachmentParts.length > 0) {
+          attachmentParts.push(...toOpenAIUserContentParts({ role: 'user', content: nonToolBlocks }))
+          result.push({ role: 'user', content: attachmentParts })
+        } else if (nonToolBlocks.length > 0) {
           result.push(toOpenAIUserMessage({ role: 'user', content: nonToolBlocks }))
         }
       }
@@ -174,8 +228,11 @@ function toOpenAIUserMessage(msg: LLMMessage): ChatCompletionUserMessageParam {
     return { role: 'user', content: msg.content[0].text }
   }
 
-  type ContentPart = OpenAI.Chat.ChatCompletionContentPartText | OpenAI.Chat.ChatCompletionContentPartImage
-  const parts: ContentPart[] = []
+  return { role: 'user', content: toOpenAIUserContentParts(msg) }
+}
+
+function toOpenAIUserContentParts(msg: LLMMessage): OpenAIUserContentPart[] {
+  const parts: OpenAIUserContentPart[] = []
 
   for (const block of msg.content) {
     if (block.type === 'text') {
@@ -191,7 +248,7 @@ function toOpenAIUserMessage(msg: LLMMessage): ChatCompletionUserMessageParam {
     // tool_result blocks are handled by the caller (toOpenAIMessages); skip here.
   }
 
-  return { role: 'user', content: parts }
+  return parts
 }
 
 /**

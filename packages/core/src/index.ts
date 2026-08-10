@@ -165,6 +165,12 @@ export type { TaskQueueEvent } from './task/queue.js'
 export { defineTool, ToolRegistry, zodToJsonSchema } from './tool/framework.js'
 export { ToolExecutor, truncateToolOutput } from './tool/executor.js'
 export type { ToolExecutorExecutionOptions, ToolExecutorOptions, BatchToolCall } from './tool/executor.js'
+export { LocalShellExecutor } from './tool/shell/local.js'
+export type {
+  ShellExecOptions,
+  ShellExecResult,
+  ShellExecutor,
+} from './tool/shell/types.js'
 export {
   registerBuiltInTools,
   BUILT_IN_TOOLS,
@@ -192,6 +198,7 @@ export {
   InvalidTaskRequirementsError,
   LLMCallTimeoutError,
   UnsupportedToolCallError,
+  UnsupportedToolResultContentError,
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
   RoutingTimeoutError,
@@ -233,6 +240,7 @@ export type {
   DiagnosticOptions,
   ExportResult,
   ExecutionReceipt,
+  ExecutionReceiptApprovalDecision,
   ExecutionReceiptDependencyEdge,
   FlushOptions,
   FlushResult,
@@ -274,6 +282,20 @@ export { RedactingStore } from './memory/redacting-store.js'
 export type { RedactingStoreOptions } from './memory/redacting-store.js'
 export { SharedMemory } from './memory/shared.js'
 export {
+  APPROVAL_KEY_PREFIX,
+  DurableApprovalError,
+  DurableApprovalLedger,
+  approvalKey,
+  createApprovalRequest,
+  decideApproval,
+  getApprovalRecord,
+  hashApprovalRequest,
+} from './approval/durable.js'
+export type {
+  CreateApprovalRequestInput,
+  DurableApprovalErrorCode,
+} from './approval/durable.js'
+export {
   Checkpoint,
   CHECKPOINT_KEY_PREFIX,
   DEFAULT_CHECKPOINT_KEY,
@@ -291,6 +313,12 @@ export type {
   TextBlock,
   ToolUseBlock,
   ToolResultBlock,
+  ToolResultContent,
+  ToolResultContentPart,
+  ToolResultFilePart,
+  ToolResultImagePart,
+  ToolResultMediaSource,
+  ToolResultTextPart,
   ImageBlock,
   ContentBlock,
 
@@ -319,6 +347,8 @@ export type {
 
   // Agent
   AgentConfig,
+  AgentPromptInput,
+  AgentRunInput,
   AgentState,
   AgentRunResult,
   RunAgentOptions,
@@ -331,6 +361,18 @@ export type {
   RunStatusCode,
   RunFlag,
   RunOutcomeFields,
+  ApprovalScope,
+  ApprovalRequestContent,
+  PlanApprovalContent,
+  TaskRoundApprovalContent,
+  TaskDispatchApprovalContent,
+  ToolCallApprovalContent,
+  ApprovalRequest,
+  ApprovalReviewer,
+  ApprovalDecisionRecord,
+  ApprovalRecord,
+  ApprovalDecisionInput,
+  ApprovalGateDecision,
   StructuredTraceError,
   TraceErrorKind,
   AgentBackendConfig,
@@ -339,6 +381,7 @@ export type {
   AcpPermissionPolicy,
   AcpPermissionRequest,
   BeforeRunHookContext,
+  BeforeRunHookResult,
   ToolCallRecord,
   LoopDetectionConfig,
   LoopDetectionInfo,
@@ -403,8 +446,13 @@ export type {
   CheckpointSnapshot,
   CheckpointSnapshotV1,
   CheckpointSnapshotV2,
+  CheckpointSnapshotV3,
+  CheckpointSnapshotV4,
   CheckpointRunIdentity,
   CompletedTaskCheckpoint,
+  InFlightTaskCheckpoint,
+  PendingToolCallCheckpoint,
+  ToolCallCommitCheckpoint,
   TaskQueueSnapshot,
   TaskQueueSnapshotV1,
   TaskQueueSnapshotV2,
