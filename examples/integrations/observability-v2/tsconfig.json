@@ -1,0 +1,16 @@
+{
+  "extends": "../../../packages/core/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": "../../..",
+    "rootDir": "../../..",
+    "paths": {
+      "@open-multi-agent/core": ["packages/core/src/index.ts"],
+      "@open-multi-agent/core/observability": ["packages/core/src/observability/index.ts"],
+      "@open-multi-agent/core/observability/file": ["packages/core/src/observability/file.ts"],
+      "@open-multi-agent/otel": ["packages/otel/src/index.ts"]
+    }
+  },
+  "include": ["./*.ts"],
+  "exclude": []
+}

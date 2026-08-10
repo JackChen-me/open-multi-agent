@@ -33,6 +33,7 @@
 <p align="center">
   <a href="https://open-multi-agent.com">Website</a> ·
   <a href="https://open-multi-agent.com/getting-started/introduction/">Docs</a> ·
+  <a href="./examples/">Examples</a> ·
   <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a> ·
   <a href="https://github.com/open-multi-agent/open-multi-agent/discussions">Discussions</a>
 </p>
@@ -57,6 +58,14 @@ npm create oma-app@latest my-oma
 ```
 
 In an interactive terminal, that one command selects a starter and runtime, installs dependencies, and runs a deterministic local demo. The demo needs no API key and makes no model request: scripted model responses drive the real OMA scheduler, result aggregation, and offline dashboard. The [Core package guide](packages/core/README.md#quick-start) covers the flags and runtime choices.
+
+Prefer to inspect a single file first? Install this repository's dependencies once, then try one of these no-key examples:
+
+- [`event-driven-dag`](examples/patterns/event-driven-dag.ts) — dependency-driven task dispatch.
+- [`durable-approval`](examples/patterns/durable-approval.ts) — suspend, review, and restore a run.
+- [`eval-offline-regression`](examples/patterns/eval-offline-regression.ts) — deterministic evaluation and gating.
+
+Run them with `npx tsx examples/<category>/<name>.ts`, or browse the complete [example index](examples/README.md).
 
 Or add OMA to an existing backend:
 
@@ -94,7 +103,7 @@ console.log(result.totalTokenUsage)
 
 Set `OPENAI_API_KEY` to run this example. [Providers](docs/providers.md) covers other hosted models, local servers, OpenAI-compatible endpoints, and AI SDK providers.
 
-`runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](packages/core/examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
+`runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](examples/README.md) lists 60+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Why OMA
 
@@ -125,7 +134,7 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 - **[Bilig WorkPaper](https://github.com/proompteng/bilig)**: Formula-workbook MCP server with a reciprocal OMA integration for editing inputs, recalculating formulas, verifying readback, and persisting WorkPaper JSON.
 - **[baize-oma](https://github.com/timywel/baize-oma)**: HTTP adapter exposing OMA `runAgent()` and `runTeam()` as Baize slot capabilities.
 
-Using `open-multi-agent` in production or a side project? [Open a discussion](https://github.com/open-multi-agent/open-multi-agent/discussions) and we will list it here. Built an integration? The [integration guide](packages/core/examples/integrations/README.md) covers how to get listed. For a deep integration, see the [Featured partner program](docs/featured-partner.md).
+Using `open-multi-agent` in production or a side project? [Open a discussion](https://github.com/open-multi-agent/open-multi-agent/discussions) and we will list it here. Built an integration? The [integration guide](examples/integrations/README.md) covers how to get listed. For a deep integration, see the [Featured partner program](docs/featured-partner.md).
 
 ## When OMA fits
 
@@ -151,7 +160,7 @@ Need to embed agent capabilities in an existing product or business system? We h
 
 | Goal | Start here |
 |---|---|
-| Install and run | [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) |
+| Install and run | [Core package guide](packages/core/README.md) · [Examples](examples/README.md) · [CLI](docs/cli.md) |
 | Configure models and tools | [Providers](docs/providers.md) · [LLM egress policy](docs/egress-policy.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
 | Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Durable approvals](docs/durable-approvals.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
 | Control orchestration | [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) |

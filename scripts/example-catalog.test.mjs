@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
+import { readdirSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { join } from 'node:path'
+import { extname, join, relative } from 'node:path'
 import {
   EXAMPLE_CAPABILITIES,
   EXAMPLE_FORMATS,
@@ -17,9 +18,46 @@ import {
 } from './example-catalog-lib.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const examplesRoot = join(root, 'packages', 'core', 'examples')
+const examplesRoot = join(root, 'examples')
 const catalog = readCatalog(join(examplesRoot, 'catalog.json'))
 const schema = readCatalog(join(examplesRoot, 'catalog.schema.json'))
+
+const ignoredDirectories = new Set([
+  '.agent-workspace',
+  '.git',
+  '.next',
+  'coverage',
+  'dist',
+  'node_modules',
+])
+const textExtensions = new Set([
+  '.json',
+  '.md',
+  '.mjs',
+  '.mts',
+  '.ts',
+  '.tsx',
+  '.yaml',
+  '.yml',
+])
+
+function findFilesContaining(directory, needle) {
+  const matches = []
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue
+    const absolutePath = join(directory, entry.name)
+    if (entry.isDirectory()) {
+      if (!ignoredDirectories.has(entry.name)) {
+        matches.push(...findFilesContaining(absolutePath, needle))
+      }
+      continue
+    }
+    if (textExtensions.has(extname(entry.name)) && readFileSync(absolutePath, 'utf8').includes(needle)) {
+      matches.push(relative(root, absolutePath))
+    }
+  }
+  return matches
+}
 
 function copyCatalog() {
   return JSON.parse(JSON.stringify(catalog))
@@ -28,6 +66,11 @@ function copyCatalog() {
 test('the checked-in catalog covers every discovered example unit', () => {
   assert.equal(catalog.examples.length, 62)
   assert.deepEqual(validateExampleCatalog(catalog, examplesRoot), [])
+})
+
+test('repository references use the root examples directory', () => {
+  const packageLocalExamples = ['packages', 'core', 'examples'].join('/')
+  assert.deepEqual(findFilesContaining(root, packageLocalExamples), [])
 })
 
 test('the public schema and runtime validator use the same controlled vocabulary', () => {

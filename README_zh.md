@@ -33,6 +33,7 @@
 <p align="center">
   <a href="https://open-multi-agent.com/zh/">官网</a> ·
   <a href="https://open-multi-agent.com/zh/getting-started/introduction/">文档</a> ·
+  <a href="./examples/">示例</a> ·
   <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a> ·
   <a href="https://github.com/open-multi-agent/open-multi-agent/discussions">讨论区</a>
 </p>
@@ -56,6 +57,14 @@ npm create oma-app@latest my-oma
 ```
 
 在交互式终端中，这一条命令会完成 starter 与 runtime 选择、依赖安装，并运行确定性的本地 Demo。Demo 不需要 API Key，也不会发起模型请求：预置模型响应负责模拟生成边界，OMA 的调度、结果聚合与离线 Dashboard 均真实运行。命令行参数与 runtime 选项见[核心包使用指南](packages/core/README_zh.md#快速开始)。
+
+想先直接读一个文件？安装一次仓库依赖后，可以运行下面三个无需 API Key 的示例：
+
+- [`event-driven-dag`](examples/patterns/event-driven-dag.ts) — 按依赖完成情况派发任务。
+- [`durable-approval`](examples/patterns/durable-approval.ts) — 挂起、审批并恢复一次运行。
+- [`eval-offline-regression`](examples/patterns/eval-offline-regression.ts) — 确定性离线评测与 gate。
+
+统一运行方式是 `npx tsx examples/<category>/<name>.ts`；完整清单见[示例索引](examples/README.md)。
 
 也可以把 OMA 直接加入现有后端：
 
@@ -93,7 +102,7 @@ console.log(result.totalTokenUsage)
 
 运行这段示例需要设置 `OPENAI_API_KEY`。其他云端模型、本地服务、OpenAI 兼容端点与 AI SDK provider 的配置见 [Provider 文档](docs/providers.md)。
 
-`runTeam()` 从目标自动规划，`runAgent()` 运行单个 Agent，`runTasks()` 执行显式流水线。三种模式、Provider 与凭证配置、生产检查清单见[核心包使用指南](packages/core/README_zh.md)。[示例索引](packages/core/examples/README.md)收录 50+ 个可运行示例，覆盖基础、cookbook 流程、模式、Provider 与集成。
+`runTeam()` 从目标自动规划，`runAgent()` 运行单个 Agent，`runTasks()` 执行显式流水线。三种模式、Provider 与凭证配置、生产检查清单见[核心包使用指南](packages/core/README_zh.md)。[示例索引](examples/README.md)收录 60+ 个可运行示例，覆盖基础、cookbook 流程、模式、Provider 与集成。
 
 ## 为什么选择 OMA
 
@@ -124,7 +133,7 @@ OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来�
 - **[Bilig WorkPaper](https://github.com/proompteng/bilig)**：公式工作簿 MCP 服务，提供双向收录的 OMA 集成，可编辑输入、重新计算公式、校验回读结果并持久化 WorkPaper JSON。
 - **[baize-oma](https://github.com/timywel/baize-oma)**：HTTP 适配层，把 OMA 的 `runAgent()` 和 `runTeam()` 暴露为 Baize slot 能力。
 
-在生产或 side project 中使用了 `open-multi-agent`？[请开个 Discussion](https://github.com/open-multi-agent/open-multi-agent/discussions)，我们会将其列在这里。做了集成？收录方式见[集成指南](packages/core/examples/integrations/README.md)。深度集成的产品见 [Featured partner 计划](docs/featured-partner.md)。
+在生产或 side project 中使用了 `open-multi-agent`？[请开个 Discussion](https://github.com/open-multi-agent/open-multi-agent/discussions)，我们会将其列在这里。做了集成？收录方式见[集成指南](examples/integrations/README.md)。深度集成的产品见 [Featured partner 计划](docs/featured-partner.md)。
 
 ## OMA 适合什么场景
 
@@ -154,7 +163,7 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 
 | 目标 | 从这里开始 |
 |---|---|
-| 安装与运行 | [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) |
+| 安装与运行 | [核心包使用指南](packages/core/README_zh.md) · [示例](examples/README.md) · [CLI](docs/cli.md) |
 | 配置模型与工具 | [Provider](docs/providers.md) · [工具与沙箱](docs/tool-configuration.md) · [外部 Agent](docs/external-agents.md) |
 | 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) |
 | 控制编排 | [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) |

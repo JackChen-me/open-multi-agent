@@ -108,6 +108,6 @@ Redacted reasoning (Anthropic safety-filtered) emits the placeholder `<thinking>
 **Notes:**
 - Disabled by default to avoid silently inflating prompt tokens.
 - Default-on truncation (`compressReasoningText`) is mandatory for safety on long chain-of-thought; disable only when debugging.
-- Some local OpenAI-compatible models may echo `<thinking>` text back into their assistant response, which can trip the loop detector. See [`examples/patterns/cross-provider-reasoning.ts`](../packages/core/examples/patterns/cross-provider-reasoning.ts) for the failure mode and mitigations.
+- Some local OpenAI-compatible models may echo `<thinking>` text back into their assistant response, which can trip the loop detector. See [`examples/patterns/cross-provider-reasoning.ts`](../examples/patterns/cross-provider-reasoning.ts) for the failure mode and mitigations.
 - Bedrock has `capabilities.echoesReasoning === 'own-issued'`: signed reasoning blocks (`reasoningContent.reasoningText.signature`) and redacted blocks (`reasoningContent.redactedContent`) round-trip natively on both `chat()` and `stream()`, in both inbound extraction and outbound serialization (see #223).
 - `'tool-use-only'` (DeepSeek V4) is the only capability where same-provider echo works **without** the user opting into `preserveReasoningAsText` — it's forced on internally because the DeepSeek API requires it.

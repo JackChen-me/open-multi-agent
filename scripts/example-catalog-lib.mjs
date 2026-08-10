@@ -122,7 +122,7 @@ export function discoverDocumentedEntrypoints(entry, examplesRoot) {
       const source = readFileSync(join(directory, relative), 'utf8')
       const docblock = source.match(/^\s*\/\*\*([\s\S]*?)\*\//)?.[0]
       if (!docblock || !/\n\s*\*\s*Run(?:\s+[^:\n]+)?\s*:/.test(docblock)) return false
-      return docblock.includes(`packages/core/examples/${entry.path}/${relative}`)
+      return docblock.includes(`examples/${entry.path}/${relative}`)
     })
     .sort()
 }

@@ -9,8 +9,6 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const example = join(
   root,
-  'packages',
-  'core',
   'examples',
   'patterns',
   'eval-offline-regression.ts',

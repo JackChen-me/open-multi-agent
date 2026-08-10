@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/examples/catalog.schema.json",
+  "title": "Open Multi-Agent example catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "examples"],
+  "properties": {
+    "$schema": {
+      "const": "./catalog.schema.json"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/example"
+      }
+    }
+  },
+  "$defs": {
+    "capability": {
+      "enum": [
+        "acp",
+        "agent-pool",
+        "ai-sdk",
+        "conflict-detection",
+        "consensus",
+        "cost-control",
+        "custom-tools",
+        "delegation",
+        "evaluation",
+        "external-agents",
+        "http-server",
+        "local-models",
+        "long-term-memory",
+        "mcp",
+        "multi-model",
+        "multi-turn",
+        "observability",
+        "open-telemetry",
+        "openai-compatible",
+        "parallel-execution",
+        "plan-replay",
+        "process-backend",
+        "provider-adapter",
+        "reasoning-transfer",
+        "retry",
+        "run-agent",
+        "run-team",
+        "run-tasks",
+        "run-viewer",
+        "safety-arbitration",
+        "server-lifecycle",
+        "shared-memory",
+        "streaming",
+        "structured-output",
+        "task-dependencies",
+        "tool-gating",
+        "tool-use",
+        "trace-store"
+      ]
+    },
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "title",
+        "description",
+        "section",
+        "capabilities",
+        "format",
+        "level"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "section": {
+          "enum": ["goal", "models-providers"]
+        },
+        "goal": {
+          "enum": [
+            "start-here",
+            "use-case-recipes",
+            "orchestration",
+            "production-controls",
+            "connect-your-stack"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        },
+        "format": {
+          "enum": ["script", "multi-file", "app"]
+        },
+        "level": {
+          "enum": ["beginner", "intermediate", "advanced"]
+        },
+        "featuredOrder": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entrypoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "section": {
+                "const": "goal"
+              }
+            }
+          },
+          "then": {
+            "required": ["goal"]
+          },
+          "else": {
+            "properties": {
+              "path": {
+                "pattern": "^providers/[a-z0-9-]+\\.ts$"
+              },
+              "capabilities": {
+                "contains": {
+                  "const": "provider-adapter"
+                }
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["goal"]
+                },
+                {
+                  "required": ["featuredOrder"]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "script"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "pattern": "\\.ts$"
+              }
+            },
+            "not": {
+              "required": ["entrypoints"]
+            }
+          },
+          "else": {
+            "required": ["entrypoints"]
+          }
+        }
+      ]
+    }
+  }
+}

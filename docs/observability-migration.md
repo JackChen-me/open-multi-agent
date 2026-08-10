@@ -5,7 +5,7 @@ running while transport, storage, and OpenTelemetry are migrated one layer at a
 time. There is no stop-the-world rewrite.
 
 The copyable snippets on this page are mirrored by the compile-only
-[`public-snippets.ts`](../packages/core/examples/integrations/observability-v2/public-snippets.ts)
+[`public-snippets.ts`](../examples/integrations/observability-v2/public-snippets.ts)
 fixture and typechecked in the Node 20/22/24 test matrix.
 
 ## Compatibility contract
@@ -94,7 +94,7 @@ short `retryable` retries only the remaining suffix. Rejection, timeout, queue
 overflow, and permanent failure are visible in `getStats()`, diagnostics, and
 flush results but never alter business results.
 
-Runnable version: [`batching-exporter.ts`](../packages/core/examples/integrations/observability-v2/batching-exporter.ts).
+Runnable version: [`batching-exporter.ts`](../examples/integrations/observability-v2/batching-exporter.ts).
 
 ### Stage 3A: choose a TraceStore
 
@@ -114,8 +114,8 @@ Use `InMemoryTraceStore` for tests and local inspection. Use the Node-only
 single-process services. It is not a shared database and must not have two
 processes writing the same path.
 
-Runnable versions: [`in-memory-store.ts`](../packages/core/examples/integrations/observability-v2/in-memory-store.ts)
-and [`file-trace-store.ts`](../packages/core/examples/integrations/observability-v2/file-trace-store.ts).
+Runnable versions: [`in-memory-store.ts`](../examples/integrations/observability-v2/in-memory-store.ts)
+and [`file-trace-store.ts`](../examples/integrations/observability-v2/file-trace-store.ts).
 
 ### Stage 3B: choose the OpenTelemetry adapter
 
@@ -137,7 +137,7 @@ exporter. The adapter does not use the global provider. Provider shutdown is
 off by default; after draining the OMA sink, the application shuts down the
 provider it owns.
 
-Runnable in-memory-provider version: [`otel-provider.ts`](../packages/core/examples/integrations/observability-v2/otel-provider.ts).
+Runnable in-memory-provider version: [`otel-provider.ts`](../examples/integrations/observability-v2/otel-provider.ts).
 
 ### Stage 4: own lifecycle explicitly
 
@@ -149,9 +149,9 @@ Runnable in-memory-provider version: [`otel-provider.ts`](../packages/core/examp
 
 OMA does not install signal handlers, call `process.exit()`, close a supplied
 store, or shut down an application-owned provider. See the runnable
-[`CLI`](../packages/core/examples/integrations/observability-v2/cli-lifecycle.ts),
-[`SIGTERM server`](../packages/core/examples/integrations/observability-v2/server-lifecycle.ts),
-and [`FaaS`](../packages/core/examples/integrations/observability-v2/serverless-lifecycle.ts)
+[`CLI`](../examples/integrations/observability-v2/cli-lifecycle.ts),
+[`SIGTERM server`](../examples/integrations/observability-v2/server-lifecycle.ts),
+and [`FaaS`](../examples/integrations/observability-v2/serverless-lifecycle.ts)
 examples.
 
 ## Privacy difference to account for

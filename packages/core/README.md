@@ -104,9 +104,9 @@ Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Pr
 
 | Mode | Method | When to use | Example |
 |------|--------|-------------|---------|
-| Single agent | `runAgent()` | One agent, one prompt | [`basics/single-agent`](examples/basics/single-agent.ts) |
-| Auto-orchestrated team | `runTeam()` | Give a goal, let the coordinator plan and execute | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
-| Explicit pipeline | `runTasks()` | You define the task graph and assignments | [`basics/task-pipeline`](examples/basics/task-pipeline.ts) |
+| Single agent | `runAgent()` | One agent, one prompt | [`basics/single-agent`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/single-agent.ts) |
+| Auto-orchestrated team | `runTeam()` | Give a goal, let the coordinator plan and execute | [`basics/team-collaboration`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/team-collaboration.ts) |
+| Explicit pipeline | `runTasks()` | You define the task graph and assignments | [`basics/task-pipeline`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/task-pipeline.ts) |
 
 Use `planOnly` to inspect a generated task graph before execution, then `createPlanArtifact()` and `runFromPlan()` to replay it. `runConsensus()` adds a proposer→judge verification loop when one answer needs extra scrutiny.
 
@@ -144,7 +144,7 @@ Process and ACP backends remain string-only and reject structured arguments
 instead of discarding history or images. See [Structured Agent
 Input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md) for copy, hook, progress/evaluation, and
 external-backend semantics, or run
-[`basics/structured-input`](examples/basics/structured-input.ts).
+[`basics/structured-input`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/structured-input.ts).
 
 Automatic `runTeam()` uses the deterministic router by default: no extra model
 call is made. Opt into Hybrid Semantic Routing with
@@ -257,18 +257,18 @@ Start with one example that matches the behavior you need:
 
 | Goal | Example |
 |---|---|
-| Send image blocks and caller-owned history | [`basics/structured-input`](examples/basics/structured-input.ts) |
-| See coordinator planning | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
-| Build an explicit DAG | [`cookbook/contract-review-dag`](examples/cookbook/contract-review-dag.ts) |
-| Observe event-driven DAG dispatch | [`patterns/event-driven-dag`](examples/patterns/event-driven-dag.ts) |
-| Validate structured output | [`patterns/structured-output`](examples/patterns/structured-output.ts) |
-| Delegate between agents | [`patterns/agent-handoff`](examples/patterns/agent-handoff.ts) |
-| Replay a frozen plan | [`patterns/plan-replay`](examples/patterns/plan-replay.ts) |
-| Suspend and resume an approval | [`patterns/durable-approval`](examples/patterns/durable-approval.ts) |
-| Embed OMA in a backend | [`integrations/express-customer-support`](examples/integrations/express-customer-support/) |
-| Export an offline trace viewer | [`integrations/observability-v2/run-viewer`](examples/integrations/observability-v2/run-viewer.ts) |
+| Send image blocks and caller-owned history | [`basics/structured-input`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/structured-input.ts) |
+| See coordinator planning | [`basics/team-collaboration`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/team-collaboration.ts) |
+| Build an explicit DAG | [`cookbook/contract-review-dag`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/cookbook/contract-review-dag.ts) |
+| Observe event-driven DAG dispatch | [`patterns/event-driven-dag`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/event-driven-dag.ts) |
+| Validate structured output | [`patterns/structured-output`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/structured-output.ts) |
+| Delegate between agents | [`patterns/agent-handoff`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/agent-handoff.ts) |
+| Replay a frozen plan | [`patterns/plan-replay`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/plan-replay.ts) |
+| Suspend and resume an approval | [`patterns/durable-approval`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/durable-approval.ts) |
+| Embed OMA in a backend | [`integrations/express-customer-support`](https://github.com/open-multi-agent/open-multi-agent/tree/main/examples/integrations/express-customer-support) |
+| Export an offline trace viewer | [`integrations/observability-v2/run-viewer`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/integrations/observability-v2/run-viewer.ts) |
 
-The [example index](examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
+The [example index](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/README.md) lists 60+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Providers
 
@@ -325,11 +325,11 @@ See the [observability guide](https://github.com/open-multi-agent/open-multi-age
 | Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [structured input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
 | Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [durable approvals](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | Control workflows | [Plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
-| Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](examples/production/README.md) |
+| Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/production/README.md) |
 
 ## Contributing
 
-Issues and PRs are welcome. For production examples, follow the [acceptance criteria](examples/production/README.md); for code changes, see the [contribution guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/.github/CONTRIBUTING.md).
+Issues and PRs are welcome. For production examples, follow the [acceptance criteria](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/production/README.md); for code changes, see the [contribution guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/.github/CONTRIBUTING.md).
 
 ## Contributors
 

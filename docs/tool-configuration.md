@@ -386,7 +386,7 @@ const orchestrator = new OpenMultiAgent({
 
 Compound commands are segmented on shell separators (`&&`, `||`, `;`, `|`, substitutions) and the **highest** risk found wins, so a safe prefix cannot smuggle a destructive suffix (`ls && rm -rf /` becomes `high`). Quoted spans are stripped first, so `echo "rm -rf /"` stays `safe`.
 
-The classifier is a **shallow heuristic, not a parser**; it can be fooled by obfuscation (variable indirection, base64-decode-then-exec, exotic quoting). It is convenience only: extend the tables, wrap it, or replace it entirely. See [`examples/patterns/risk-gated-bash.ts`](../packages/core/examples/patterns/risk-gated-bash.ts) for an end-to-end demo.
+The classifier is a **shallow heuristic, not a parser**; it can be fooled by obfuscation (variable indirection, base64-decode-then-exec, exotic quoting). It is convenience only: extend the tables, wrap it, or replace it entirely. See [`examples/patterns/risk-gated-bash.ts`](../examples/patterns/risk-gated-bash.ts) for an end-to-end demo.
 
 ## Shell Executors
 
@@ -621,9 +621,9 @@ validation and context controls compose with the rich-result contract.
 > `ToolDefinition` (shown below) validates a single **tool's** `ToolResult.data`
 > — string tools use `ZodSchema<string>`, while tools with application-owned
 > object data can use the corresponding object schema. The `outputSchema` on
-> [`AgentConfig`](../packages/core/examples/patterns/structured-output.ts)
+> [`AgentConfig`](../examples/patterns/structured-output.ts)
 > is different: it validates the **agent's final answer** as parsed JSON
-> against an arbitrary Zod schema (see _Structured output_ in `packages/core/examples/`).
+> against an arbitrary Zod schema (see _Structured output_ in `examples/`).
 > Different scopes — pick the one that matches the layer you're working at.
 
 ```typescript
@@ -751,7 +751,7 @@ the runner's tool loop. Adapter tests validate local wire conversion without
 contacting provider APIs; verify the exact provider/model combination you plan
 to operate before relying on media support in production.
 
-See the runnable [`rich-tool-results` example](../packages/core/examples/patterns/rich-tool-results.ts).
+See the runnable [`rich-tool-results` example](../examples/patterns/rich-tool-results.ts).
 
 **Truncation.** Cap an individual tool result to a head + tail excerpt with a marker in between:
 
@@ -812,4 +812,4 @@ Notes:
 - Prefer locally installed or pinned MCP server binaries and pass only the environment variables that server needs. Avoid spreading `process.env` into MCP subprocesses.
 - `egressPolicy` does not constrain connections opened inside the MCP child, by `bash`, or by custom tools. See the [egress enforcement matrix](egress-policy.md#enforcement-matrix).
 
-See [`integrations/mcp-github`](../packages/core/examples/integrations/mcp-github.ts) for a full runnable setup.
+See [`integrations/mcp-github`](../examples/integrations/mcp-github.ts) for a full runnable setup.

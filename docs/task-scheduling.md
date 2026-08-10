@@ -212,7 +212,7 @@ If a UI must retain round grouping during migration, configure `onApproval` and
 return `true`.
 
 See
-[`examples/patterns/event-driven-dag.ts`](../packages/core/examples/patterns/event-driven-dag.ts)
+[`examples/patterns/event-driven-dag.ts`](../examples/patterns/event-driven-dag.ts)
 for a no-key deferred-promise demonstration. It shows only the supported claim:
 the downstream task starts when its dependency is satisfied, without waiting
 for an unrelated task from the same ready set.

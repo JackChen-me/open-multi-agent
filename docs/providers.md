@@ -37,14 +37,14 @@ The framework ships a wired-in provider name for each of these. Set `provider` a
 | GitHub Copilot | `provider: 'copilot'` | `GITHUB_COPILOT_TOKEN` (falls back to `GITHUB_TOKEN`) | `gpt-4o` | Custom token-exchange flow on top of OpenAI protocol. |
 | Grok (xAI) | `provider: 'grok'` | `XAI_API_KEY` | `grok-4` | OpenAI-compatible; endpoint is `api.x.ai/v1`. |
 | DeepSeek | `provider: 'deepseek'` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | OpenAI-compatible Chat Completions. `deepseek-v4-flash` currently resolves to DeepSeek-V4-Flash-0731 (public beta); `deepseek-v4-pro` remains the Preview API. Both support 1M context and 384K max output. The Flash endpoint also supports DeepSeek's native Responses API, while OMA's built-in adapter uses Chat Completions. Legacy `deepseek-chat` / `deepseek-reasoner` were retired on 2026-07-24. |
-| Doubao (Volcengine) | `provider: 'doubao'` | `ARK_API_KEY` | `doubao-seed-1-8-251228` | OpenAI-compatible. ByteDance Volcengine Ark endpoint `https://ark.cn-beijing.volces.com/api/v3`. See [`providers/doubao`](../packages/core/examples/providers/doubao.ts). |
-| Hunyuan (Tencent MaaS / TokenHub) | `provider: 'hunyuan'` | `HUNYUAN_API_KEY` | `hy3-preview` | OpenAI-compatible. Default endpoint `https://tokenhub.tencentmaas.com/v1` (Tencent's current platform; `sk-...` keys, Hunyuan 3 models). Tool calling verified on `hy3-preview`. See [`providers/hunyuan`](../packages/core/examples/providers/hunyuan.ts). |
+| Doubao (Volcengine) | `provider: 'doubao'` | `ARK_API_KEY` | `doubao-seed-1-8-251228` | OpenAI-compatible. ByteDance Volcengine Ark endpoint `https://ark.cn-beijing.volces.com/api/v3`. See [`providers/doubao`](../examples/providers/doubao.ts). |
+| Hunyuan (Tencent MaaS / TokenHub) | `provider: 'hunyuan'` | `HUNYUAN_API_KEY` | `hy3-preview` | OpenAI-compatible. Default endpoint `https://tokenhub.tencentmaas.com/v1` (Tencent's current platform; `sk-...` keys, Hunyuan 3 models). Tool calling verified on `hy3-preview`. See [`providers/hunyuan`](../examples/providers/hunyuan.ts). |
 | Hunyuan (legacy Tencent Cloud) | `provider: 'hunyuan'` + `HUNYUAN_BASE_URL` | `HUNYUAN_API_KEY` | `hunyuan-turbos-latest` | Legacy endpoint `https://api.hunyuan.cloud.tencent.com/v1` (console.cloud.tencent.com/hunyuan key; separate key namespace). Tencent has announced this platform is being retired (sales stop 2026-06-30, full shutdown 2026-09-30). Set `HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1` to target it until then. Tool calling verified on `hunyuan-turbos` and `hunyuan-functioncall`. |
 | MiniMax (global) | `provider: 'minimax'` | `MINIMAX_API_KEY` | `MiniMax-M3` | OpenAI-compatible. |
 | MiniMax (China) | `provider: 'minimax'` + `MINIMAX_BASE_URL` | `MINIMAX_API_KEY` | `MiniMax-M3` | Set `MINIMAX_BASE_URL=https://api.minimaxi.com/v1`. |
-| MiMo | `provider: 'mimo'` | `MIMO_API_KEY` (+ optional `MIMO_BASE_URL`) | `mimo-v2.5-pro` | OpenAI-compatible. Defaults to pay-as-you-go endpoint `https://api.xiaomimimo.com/v1`; Token Plan keys (`tp-...`) require the cluster base URL from your subscription page, such as `https://token-plan-cn.xiaomimimo.com/v1`. Supports reasoning/tool-call loops through the built-in MiMo adapter. See [`providers/mimo`](../packages/core/examples/providers/mimo.ts). |
+| MiMo | `provider: 'mimo'` | `MIMO_API_KEY` (+ optional `MIMO_BASE_URL`) | `mimo-v2.5-pro` | OpenAI-compatible. Defaults to pay-as-you-go endpoint `https://api.xiaomimimo.com/v1`; Token Plan keys (`tp-...`) require the cluster base URL from your subscription page, such as `https://token-plan-cn.xiaomimimo.com/v1`. Supports reasoning/tool-call loops through the built-in MiMo adapter. See [`providers/mimo`](../examples/providers/mimo.ts). |
 | Qiniu | `provider: 'qiniu'` | `QINIU_API_KEY` | `deepseek-v3` | OpenAI-compatible. Endpoint `https://api.qnaigc.com/v1`; multiple model families, see [Qiniu AI docs](https://developer.qiniu.com/aitokenapi/12882/ai-inference-api). |
-| AWS Bedrock | `provider: 'bedrock'` | none (AWS SDK credential chain) | `anthropic.claude-3-5-haiku-20241022-v1:0` | No API key. Set `AWS_REGION` or pass `region` as the 4th arg to `createAdapter`. Credentials come from env vars, shared config, or IAM role. Newer Claude models can require a cross-region inference profile prefix such as `us.`. Also supports Llama, Mistral, and Cohere. See [`providers/bedrock`](../packages/core/examples/providers/bedrock.ts). Requires `npm install @aws-sdk/client-bedrock-runtime`. |
+| AWS Bedrock | `provider: 'bedrock'` | none (AWS SDK credential chain) | `anthropic.claude-3-5-haiku-20241022-v1:0` | No API key. Set `AWS_REGION` or pass `region` as the 4th arg to `createAdapter`. Credentials come from env vars, shared config, or IAM role. Newer Claude models can require a cross-region inference profile prefix such as `us.`. Also supports Llama, Mistral, and Cohere. See [`providers/bedrock`](../examples/providers/bedrock.ts). Requires `npm install @aws-sdk/client-bedrock-runtime`. |
 
 ## OpenAI-Compatible Providers
 
@@ -58,11 +58,11 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 | llama.cpp server (local) | `provider: 'openai'` + `baseURL` | none | server-loaded | |
 | OpenRouter | `provider: 'openai'` + `baseURL: 'https://openrouter.ai/api/v1'` + `apiKey` | `OPENROUTER_API_KEY` | `openai/gpt-4o-mini` | |
 | Groq | `provider: 'openai'` + `baseURL: 'https://api.groq.com/openai/v1'` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
-| Mistral | `provider: 'openai'` + `baseURL: 'https://api.mistral.ai/v1'` | `MISTRAL_API_KEY` | `mistral-large-latest` | See [`providers/mistral`](../packages/core/examples/providers/mistral.ts). |
+| Mistral | `provider: 'openai'` + `baseURL: 'https://api.mistral.ai/v1'` | `MISTRAL_API_KEY` | `mistral-large-latest` | See [`providers/mistral`](../examples/providers/mistral.ts). |
 | MiMo | `provider: 'openai'` + `baseURL: 'https://api.xiaomimimo.com/v1'` | `MIMO_API_KEY` | `mimo-v2.5-pro` | Prefer the built-in `mimo` provider when using tool-calling agent loops. Token Plan users should set their `token-plan-*.xiaomimimo.com/v1` base URL. |
-| Zhipu GLM | `provider: 'openai'` + `baseURL: 'https://open.bigmodel.cn/api/paas/v4'` | `ZHIPU_API_KEY` | `glm-4-plus` | See [`providers/zhipu`](../packages/core/examples/providers/zhipu.ts). |
-| Qwen (DashScope) | `provider: 'openai'` + `baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1'` | `DASHSCOPE_API_KEY` | `qwen-plus` | See [`providers/qwen`](../packages/core/examples/providers/qwen.ts). |
-| Moonshot AI (Kimi) | `provider: 'openai'` + `baseURL: 'https://api.moonshot.ai/v1'` | `MOONSHOT_API_KEY` | `kimi-k2.5` | See [`providers/moonshot`](../packages/core/examples/providers/moonshot.ts). |
+| Zhipu GLM | `provider: 'openai'` + `baseURL: 'https://open.bigmodel.cn/api/paas/v4'` | `ZHIPU_API_KEY` | `glm-4-plus` | See [`providers/zhipu`](../examples/providers/zhipu.ts). |
+| Qwen (DashScope) | `provider: 'openai'` + `baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1'` | `DASHSCOPE_API_KEY` | `qwen-plus` | See [`providers/qwen`](../examples/providers/qwen.ts). |
+| Moonshot AI (Kimi) | `provider: 'openai'` + `baseURL: 'https://api.moonshot.ai/v1'` | `MOONSHOT_API_KEY` | `kimi-k2.5` | See [`providers/moonshot`](../examples/providers/moonshot.ts). |
 | LiteLLM (proxy) | `provider: 'openai'` + `baseURL: 'http://localhost:4000/v1'` + `apiKey` | `LITELLM_API_KEY` (if proxy auth enabled) | any model on your proxy | [LiteLLM](https://github.com/BerriAI/litellm) unifies 100+ providers (OpenAI, Anthropic, Azure, Bedrock, Vertex, etc.) behind one OpenAI-compatible endpoint. Run `litellm --config config.yaml` and point `baseURL` at the proxy. |
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
@@ -142,7 +142,7 @@ await oma.runAgent(
 )
 ```
 
-The coordinator accepts the same hook via `runTeam(team, goal, { coordinator: { adapter: new AISdkAdapter(...) } })`. For a full application, see [`integrations/with-vercel-ai-sdk`](../packages/core/examples/integrations/with-vercel-ai-sdk/).
+The coordinator accepts the same hook via `runTeam(team, goal, { coordinator: { adapter: new AISdkAdapter(...) } })`. For a full application, see [`integrations/with-vercel-ai-sdk`](../examples/integrations/with-vercel-ai-sdk/).
 
 ## Extended Thinking / Reasoning
 
@@ -163,7 +163,7 @@ const agent = {
 - DeepSeek additionally maps `enabled` to `thinking: { type: 'enabled' | 'disabled' }` and accepts `effort: 'max'`. Other built-in OpenAI-family adapters ignore the DeepSeek-only `max` value. Explicit `extraBody` values take precedence.
 - Adapters ignore fields they don't recognise, so one config is safe across a mixed-provider team.
 
-Reasoning is streamed as `reasoning` events. Preserving reasoning across a provider switch is opt-in via `preserveReasoningAsText`; see [context management](context-management.md) and [`patterns/cross-provider-reasoning`](../packages/core/examples/patterns/cross-provider-reasoning.ts).
+Reasoning is streamed as `reasoning` events. Preserving reasoning across a provider switch is opt-in via `preserveReasoningAsText`; see [context management](context-management.md) and [`patterns/cross-provider-reasoning`](../examples/patterns/cross-provider-reasoning.ts).
 
 ## Local Model Tool-Calling
 
@@ -187,7 +187,7 @@ const localAgent = {
 }
 ```
 
-Highly quantized MoE models on consumer hardware can fall into repetition loops or hallucinate tool-call schemas under default sampling. `AgentConfig` exposes `topK`, `minP`, `frequencyPenalty`, `presencePenalty`, `parallelToolCalls`, and `extraBody` for server-specific knobs such as vLLM's `repetition_penalty`. See [`providers/local-quantized`](../packages/core/examples/providers/local-quantized.ts) for a complete setup.
+Highly quantized MoE models on consumer hardware can fall into repetition loops or hallucinate tool-call schemas under default sampling. `AgentConfig` exposes `topK`, `minP`, `frequencyPenalty`, `presencePenalty`, `parallelToolCalls`, and `extraBody` for server-specific knobs such as vLLM's `repetition_penalty`. See [`providers/local-quantized`](../examples/providers/local-quantized.ts) for a complete setup.
 
 ## Troubleshooting
 

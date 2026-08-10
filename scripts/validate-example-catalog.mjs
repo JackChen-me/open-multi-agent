@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { readCatalog, validateExampleCatalog } from './example-catalog-lib.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const examplesRoot = join(root, 'packages', 'core', 'examples')
+const examplesRoot = join(root, 'examples')
 const catalogPath = join(examplesRoot, 'catalog.json')
 
 try {

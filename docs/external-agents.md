@@ -52,9 +52,9 @@ The coordinator routes the coding work to `coder` based on its roster descriptio
 subprocess does the file edits; `reviewer` then reads the result from shared memory.
 
 A runnable `process` version is at
-[`examples/integrations/external-agent-process.ts`](../packages/core/examples/integrations/external-agent-process.ts).
+[`examples/integrations/external-agent-process.ts`](../examples/integrations/external-agent-process.ts).
 A runnable ACP version is at
-[`examples/integrations/external-agent-acp.ts`](../packages/core/examples/integrations/external-agent-acp.ts).
+[`examples/integrations/external-agent-acp.ts`](../examples/integrations/external-agent-acp.ts).
 
 ## Installation
 

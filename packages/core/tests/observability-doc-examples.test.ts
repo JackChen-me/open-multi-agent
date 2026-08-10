@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 describe('public Observability v2 examples', () => {
   it('typechecks every snippet through public package and subpath imports', () => {
     const configPath = fileURLToPath(new URL(
-      '../examples/integrations/observability-v2/tsconfig.json',
+      '../../../examples/integrations/observability-v2/tsconfig.json',
       import.meta.url,
     ))
     const loaded = ts.readConfigFile(configPath, ts.sys.readFile)
@@ -13,7 +13,7 @@ describe('public Observability v2 examples', () => {
     const parsed = ts.parseJsonConfigFileContent(
       loaded.config,
       ts.sys,
-      fileURLToPath(new URL('../examples/integrations/observability-v2', import.meta.url)),
+      fileURLToPath(new URL('../../../examples/integrations/observability-v2', import.meta.url)),
       undefined,
       configPath,
     )

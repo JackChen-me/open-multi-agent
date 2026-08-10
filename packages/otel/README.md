@@ -65,7 +65,7 @@ Use a `BatchingTraceSink` directly via `createOtelTraceExporter()` when the
 application owns batching configuration itself.
 
 For a complete no-network example with the official `InMemorySpanExporter`, see
-[`otel-provider.ts`](../core/examples/integrations/observability-v2/otel-provider.ts).
+[`otel-provider.ts`](../../examples/integrations/observability-v2/otel-provider.ts).
 
 ### Process lifecycle
 

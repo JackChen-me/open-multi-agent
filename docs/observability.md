@@ -631,7 +631,7 @@ const orchestrator = new OpenMultiAgent({
 })
 ```
 
-Forward trace spans to OpenTelemetry, Datadog, Honeycomb, Langfuse, or your own run database only after deciding what data is safe for that sink. See [`integrations/trace-observability`](../packages/core/examples/integrations/trace-observability.ts) for a runnable example.
+Forward trace spans to OpenTelemetry, Datadog, Honeycomb, Langfuse, or your own run database only after deciding what data is safe for that sink. See [`integrations/trace-observability`](../examples/integrations/trace-observability.ts) for a runnable example.
 
 Every `runTeam()` topology choice emits a `routing_decision` legacy event and
 a v2 span with kind `routing` named `decide_execution_route`. The
@@ -737,7 +737,7 @@ run-state store.
 Generate a representative no-network artifact after building the package:
 
 ```bash
-npx tsx packages/core/examples/integrations/observability-v2/run-viewer.ts
+npx tsx examples/integrations/observability-v2/run-viewer.ts
 ```
 
 The example writes `oma-dashboards/run-viewer-demo.html` through a real

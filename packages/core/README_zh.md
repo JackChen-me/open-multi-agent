@@ -104,9 +104,9 @@ console.log(result.agentResults.get('coordinator')?.output)
 
 | 模式 | 方法 | 适用场景 | 示例 |
 |------|------|----------|------|
-| 单智能体 | `runAgent()` | 一个智能体，一个提示词，最简入口 | [`basics/single-agent`](examples/basics/single-agent.ts) |
-| 自动编排团队 | `runTeam()` | 给一个目标，框架自动规划和执行 | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
-| 显式任务管线 | `runTasks()` | 你自己定义任务图和分配 | [`basics/task-pipeline`](examples/basics/task-pipeline.ts) |
+| 单智能体 | `runAgent()` | 一个智能体，一个提示词，最简入口 | [`basics/single-agent`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/single-agent.ts) |
+| 自动编排团队 | `runTeam()` | 给一个目标，框架自动规划和执行 | [`basics/team-collaboration`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/team-collaboration.ts) |
+| 显式任务管线 | `runTasks()` | 你自己定义任务图和分配 | [`basics/task-pipeline`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/task-pipeline.ts) |
 
 用 `planOnly` 在执行前审查生成的任务图，再通过 `createPlanArtifact()` 和 `runFromPlan()` 回放。当一个答案需要额外把关时，`runConsensus()` 提供 proposer→judge 校验循环。
 
@@ -134,7 +134,7 @@ const result = await new OpenMultiAgent().runAgent(
 )
 ```
 
-持久化对话的 `Agent.prompt()` 接受字符串或单个 `ContentBlock[]` 用户轮次；更早的轮次通过 `AgentConfig.history` 恢复。结构化输入会经过校验和防御性复制。`beforeRun` 同时收到完整的 `messages` 与向后兼容的最新用户文本 `prompt`。Process 和 ACP backend 仍只接受字符串，遇到结构化参数会明确拒绝，不会静默丢弃历史或图片。复制、hook、progress/评测与外部 backend 的完整语义见[结构化 Agent 输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)，可运行示例见 [`basics/structured-input`](examples/basics/structured-input.ts)。
+持久化对话的 `Agent.prompt()` 接受字符串或单个 `ContentBlock[]` 用户轮次；更早的轮次通过 `AgentConfig.history` 恢复。结构化输入会经过校验和防御性复制。`beforeRun` 同时收到完整的 `messages` 与向后兼容的最新用户文本 `prompt`。Process 和 ACP backend 仍只接受字符串，遇到结构化参数会明确拒绝，不会静默丢弃历史或图片。复制、hook、progress/评测与外部 backend 的完整语义见[结构化 Agent 输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)，可运行示例见 [`basics/structured-input`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/structured-input.ts)。
 
 自动 `runTeam()` 默认使用确定性路由，不会产生额外模型调用。显式设置 `executionRouting: { strategy: 'hybrid' }` 才会启用混合语义路由：`DeterministicRouter` 直接保留 Team 决策，只把 Single 候选交给一次无工具调用的 `TaskProfiler`；随后由确定性 Policy 决定保持 Single、升级为 Team，或要求调用方显式声明治理约束。有效的自定义 `executionRouter` 决策、显式 `mode` 和治理声明仍具有更高优先级。自动路由结果通过 `routingDecision` 暴露实际决定；运行过 Profiler 时，还会提供 `semanticRoutingAssessment`。详见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)。Execution Routing 选择 Single 或 Team，[Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)选择该拓扑内使用的模型。
 
@@ -224,18 +224,18 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 | 目标 | 示例 |
 |---|---|
-| 发送图片内容块与应用自有历史 | [`basics/structured-input`](examples/basics/structured-input.ts) |
-| 查看 Coordinator 规划 | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
-| 构建显式 DAG | [`cookbook/contract-review-dag`](examples/cookbook/contract-review-dag.ts) |
-| 观察事件驱动 DAG 派发 | [`patterns/event-driven-dag`](examples/patterns/event-driven-dag.ts) |
-| 校验结构化输出 | [`patterns/structured-output`](examples/patterns/structured-output.ts) |
-| Agent 之间委派 | [`patterns/agent-handoff`](examples/patterns/agent-handoff.ts) |
-| 回放固定计划 | [`patterns/plan-replay`](examples/patterns/plan-replay.ts) |
-| 挂起并恢复审批 | [`patterns/durable-approval`](examples/patterns/durable-approval.ts) |
-| 嵌入真实后端 | [`integrations/express-customer-support`](examples/integrations/express-customer-support/) |
-| 导出离线 trace Viewer | [`integrations/observability-v2/run-viewer`](examples/integrations/observability-v2/run-viewer.ts) |
+| 发送图片内容块与应用自有历史 | [`basics/structured-input`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/structured-input.ts) |
+| 查看 Coordinator 规划 | [`basics/team-collaboration`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/basics/team-collaboration.ts) |
+| 构建显式 DAG | [`cookbook/contract-review-dag`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/cookbook/contract-review-dag.ts) |
+| 观察事件驱动 DAG 派发 | [`patterns/event-driven-dag`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/event-driven-dag.ts) |
+| 校验结构化输出 | [`patterns/structured-output`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/structured-output.ts) |
+| Agent 之间委派 | [`patterns/agent-handoff`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/agent-handoff.ts) |
+| 回放固定计划 | [`patterns/plan-replay`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/plan-replay.ts) |
+| 挂起并恢复审批 | [`patterns/durable-approval`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/patterns/durable-approval.ts) |
+| 嵌入真实后端 | [`integrations/express-customer-support`](https://github.com/open-multi-agent/open-multi-agent/tree/main/examples/integrations/express-customer-support) |
+| 导出离线 trace Viewer | [`integrations/observability-v2/run-viewer`](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/integrations/observability-v2/run-viewer.ts) |
 
-[示例索引](examples/README.md)收录 50+ 个可运行示例，覆盖 basics、cookbook 流程、patterns、Provider 和 integrations。
+[示例索引](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/README.md)收录 60+ 个可运行示例，覆盖 basics、cookbook 流程、patterns、Provider 和 integrations。
 
 ## Provider
 
@@ -282,11 +282,11 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 | 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[结构化输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
 | 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[持久化审批](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | 控制流程 | [计划预览与回放](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md)、[共享记忆](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md)、[外部 agent](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
-| 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产示例](examples/production/README.md) |
+| 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产示例](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/production/README.md) |
 
 ## 参与贡献
 
-欢迎 Issue 和 PR。生产示例请遵循[收录标准](examples/production/README.md)；代码改动请阅读[贡献指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/.github/CONTRIBUTING.md)。
+欢迎 Issue 和 PR。生产示例请遵循[收录标准](https://github.com/open-multi-agent/open-multi-agent/blob/main/examples/production/README.md)；代码改动请阅读[贡献指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/.github/CONTRIBUTING.md)。
 
 ## 贡献者
 

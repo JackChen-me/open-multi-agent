@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 // Resolved rather than joined onto `root`: a git worktree has no local
 // `node_modules` and resolves upwards to the main checkout.
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
-const directory = join(root, 'packages', 'core', 'examples', 'integrations', 'observability-v2')
+const directory = join(root, 'examples', 'integrations', 'observability-v2')
 const examples = [
   'batching-exporter.ts',
   'in-memory-store.ts',
