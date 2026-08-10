@@ -165,6 +165,12 @@ export type { TaskQueueEvent } from './task/queue.js'
 export { defineTool, ToolRegistry, zodToJsonSchema } from './tool/framework.js'
 export { ToolExecutor, truncateToolOutput } from './tool/executor.js'
 export type { ToolExecutorExecutionOptions, ToolExecutorOptions, BatchToolCall } from './tool/executor.js'
+export { LocalShellExecutor } from './tool/shell/local.js'
+export type {
+  ShellExecOptions,
+  ShellExecResult,
+  ShellExecutor,
+} from './tool/shell/types.js'
 export {
   registerBuiltInTools,
   BUILT_IN_TOOLS,
@@ -197,6 +203,7 @@ export {
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
   RoutingTimeoutError,
+  EgressPolicyError,
   isRetryableError,
 } from './errors.js'
 export { createRunIdentity, createRestoreIdentity, validateRunId } from './observability/identity.js'
@@ -325,6 +332,7 @@ export type {
   LLMToolDef,
   TokenUsage,
   StreamEvent,
+  EgressPolicy,
 
   // Tools
   ToolDefinition,

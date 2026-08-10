@@ -176,6 +176,37 @@ export class UnsupportedToolCallError extends Error {
   }
 }
 
+export type EgressPolicyErrorReason =
+  | 'invalid-policy'
+  | 'denied'
+  | 'unsupported'
+  | 'unresolved-target'
+
+/**
+ * Raised before a framework-owned LLM transport opens a disallowed or
+ * unenforceable network request.
+ */
+export class EgressPolicyError extends Error {
+  readonly code: string
+
+  constructor(
+    readonly reason: EgressPolicyErrorReason,
+    message: string,
+    readonly provider?: string,
+    readonly origin?: string,
+  ) {
+    super(message)
+    this.name = 'EgressPolicyError'
+    this.code = reason === 'invalid-policy'
+      ? 'INVALID_EGRESS_POLICY'
+      : reason === 'denied'
+        ? 'EGRESS_POLICY_DENIED'
+        : reason === 'unresolved-target'
+          ? 'EGRESS_POLICY_TARGET_UNRESOLVED'
+          : 'EGRESS_POLICY_UNSUPPORTED'
+  }
+}
+
 /**
  * Raised before an SDK request when a built-in adapter cannot faithfully map a
  * model-visible tool-result part. This is terminal: retrying the same adapter
@@ -243,6 +274,7 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof InvalidMessageError) return false
   if (error instanceof StructuredOutputValidationError) return false
   if (error instanceof UnsupportedToolCallError) return false
+  if (error instanceof EgressPolicyError) return false
   if (error instanceof UnsupportedToolResultContentError) return false
   if (error instanceof LLMCallTimeoutError) return true
   if (error instanceof RoutingTimeoutError) return true

@@ -5,6 +5,7 @@
  * OpenAI-compatible endpoint and QINIU_API_KEY environment variable fallback.
  */
 
+import type { EgressPolicy } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -19,11 +20,13 @@ import { OpenAIAdapter } from './openai.js'
 export class QiniuAdapter extends OpenAIAdapter {
   readonly name = 'qiniu'
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     // Allow override of baseURL (for proxies or future changes) but default to official Qiniu endpoint.
     super(
       apiKey ?? process.env['QINIU_API_KEY'],
-      baseURL ?? 'https://api.qnaigc.com/v1'
+      baseURL ?? 'https://api.qnaigc.com/v1',
+      egressPolicy,
+      'qiniu',
     )
   }
 }

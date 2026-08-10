@@ -283,7 +283,7 @@ Change `provider`, `model`, and credentials; the agent shape stays the same.
 
 Optional integrations load only when used: core directly installs only `@anthropic-ai/sdk`, `openai`, and `zod`; other SDKs are lazy-loading opt-in peers, and OpenTelemetry lives entirely in `@open-multi-agent/otel`. Dependency changes are weighed on demonstrated value plus security, size, maintenance, and compatibility cost, not a fixed count.
 
-See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md) and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, and local endpoints.
+See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [framework-owned LLM egress policy](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md), and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, local endpoints, and the exact network-enforcement boundary.
 
 ## Production
 
@@ -303,9 +303,12 @@ your model provider, so grant read and exec access deliberately. Tools may keep
 application-owned data separate while returning text, image, or file content
 through `modelOutput`; see the [tool configuration guide](../../docs/tool-configuration.md#rich-image-and-file-results).
 Filesystem tools stay within the configured `cwd`; granted `bash` is not
-sandboxed. Secrets are redacted from traces, shell output, and Viewer payloads
-by default, but result messages and checkpoints have their own persistence
-boundary.
+sandboxed. Its execution target can be replaced through a
+[`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors),
+while the default `LocalShellExecutor` preserves host execution and is not a
+security boundary. Secrets are redacted from traces, shell output, and Viewer
+payloads by default, but result messages and checkpoints have their own
+persistence boundary.
 
 ### Observability
 

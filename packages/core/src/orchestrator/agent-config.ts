@@ -18,13 +18,16 @@ import { ToolRegistry } from '../tool/framework.js'
 import { ToolExecutor } from '../tool/executor.js'
 import { registerBuiltInTools } from '../tool/built-in/index.js'
 import { resolveGrantedToolDefinitions } from '../tool/grants.js'
+import { intersectEgressPolicies } from '../llm/egress.js'
 
 export interface AgentDefaultsSource {
   readonly defaultModel?: OrchestratorConfig['defaultModel']
   readonly defaultProvider?: OrchestratorConfig['defaultProvider']
   readonly defaultBaseURL?: OrchestratorConfig['defaultBaseURL']
   readonly defaultApiKey?: OrchestratorConfig['defaultApiKey']
+  readonly egressPolicy?: OrchestratorConfig['egressPolicy']
   readonly defaultCwd?: OrchestratorConfig['defaultCwd']
+  readonly defaultShellExecutor?: OrchestratorConfig['defaultShellExecutor']
   readonly onToolCall?: OrchestratorConfig['onToolCall']
 }
 
@@ -36,7 +39,9 @@ export function applyAgentDefaults(config: AgentConfig, src: AgentDefaultsSource
     provider: config.provider ?? src.defaultProvider,
     baseURL: config.baseURL ?? src.defaultBaseURL,
     apiKey: config.apiKey ?? src.defaultApiKey,
+    egressPolicy: intersectEgressPolicies(src.egressPolicy, config.egressPolicy),
     cwd: config.cwd === undefined ? src.defaultCwd : config.cwd,
+    shellExecutor: config.shellExecutor ?? src.defaultShellExecutor,
     onToolCall: config.onToolCall ?? src.onToolCall,
   }
 }

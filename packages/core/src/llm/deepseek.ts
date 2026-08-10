@@ -5,7 +5,7 @@
  * OpenAI-compatible endpoint and DEEPSEEK_API_KEY environment variable fallback.
  */
 
-import type { LLMChatOptions, ThinkingConfig } from '../types.js'
+import type { EgressPolicy, LLMChatOptions, ThinkingConfig } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -63,11 +63,13 @@ export class DeepSeekAdapter extends OpenAIAdapter {
     return options.thinking?.effort
   }
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     // Allow override of baseURL (for proxies or future changes) but default to official DeepSeek endpoint.
     super(
       apiKey ?? process.env['DEEPSEEK_API_KEY'],
-      baseURL ?? 'https://api.deepseek.com/v1'
+      baseURL ?? 'https://api.deepseek.com/v1',
+      egressPolicy,
+      'deepseek',
     )
   }
 }

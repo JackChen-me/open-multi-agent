@@ -1,6 +1,6 @@
 {
   "name": "@open-multi-agent/core",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "description": "TypeScript multi-agent framework: one runTeam() call from goal to result. Auto task decomposition and parallel execution for multi-step LLM jobs. Deploys anywhere Node.js runs.",
   "files": [
     "dist",
@@ -48,6 +48,10 @@
     "./classifiers": {
       "types": "./dist/classifiers.d.ts",
       "import": "./dist/classifiers.js"
+    },
+    "./shell": {
+      "types": "./dist/shell.d.ts",
+      "import": "./dist/shell.js"
     },
     "./eval": {
       "types": "./dist/eval/index.d.ts",

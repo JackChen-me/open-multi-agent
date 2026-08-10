@@ -10,7 +10,7 @@ cd open-multi-agent
 npm install
 ```
 
-Requires Node.js >= 22.
+Requires Node.js >= 20.0.0.
 
 ## Development Commands
 

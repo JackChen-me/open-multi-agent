@@ -142,6 +142,9 @@ The callback receives a minimal, SDK-agnostic `{ title, kind, optionKinds }` and
 > to a project you trust the backend with. ACP backends can use `permission` to
 > gate protocol permission prompts; process backends do not have protocol-level
 > permission prompts, so constrain the configured command, args, env, and cwd.
+> `egressPolicy` governs enforceable framework-owned LLM requests only; it does
+> not constrain network calls made by process or ACP children. See the
+> [egress enforcement matrix](egress-policy.md#enforcement-matrix).
 
 ## How it works
 

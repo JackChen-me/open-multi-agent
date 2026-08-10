@@ -9,16 +9,16 @@ import { UnsupportedToolResultContentError } from '../src/errors.js'
 
 const mockCreate = vi.hoisted(() => vi.fn())
 const mockStream = vi.hoisted(() => vi.fn())
-
-vi.mock('@anthropic-ai/sdk', () => {
-  const AnthropicMock = vi.fn(() => ({
+const AnthropicMock = vi.hoisted(() =>
+  vi.fn(() => ({
     messages: {
       create: mockCreate,
       stream: mockStream,
     },
-  }))
-  return { default: AnthropicMock, Anthropic: AnthropicMock }
-})
+  })),
+)
+
+vi.mock('@anthropic-ai/sdk', () => ({ default: AnthropicMock, Anthropic: AnthropicMock }))
 
 import { AnthropicAdapter } from '../src/llm/anthropic.js'
 
@@ -56,6 +56,20 @@ describe('AnthropicAdapter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     adapter = new AnthropicAdapter('test-key')
+  })
+
+  it('injects a guarded fetch when an egress policy is configured', async () => {
+    new AnthropicAdapter('test-key', 'https://api.anthropic.com', {
+      mode: 'allowlist',
+      allowedOrigins: ['https://api.anthropic.com'],
+    })
+    const init = AnthropicMock.mock.calls.at(-1)?.[0] as { fetch?: typeof globalThis.fetch }
+
+    expect(init.fetch).toEqual(expect.any(Function))
+    await expect(init.fetch!('https://other.example/v1')).rejects.toMatchObject({
+      code: 'EGRESS_POLICY_DENIED',
+      origin: 'https://other.example',
+    })
   })
 
   // =========================================================================

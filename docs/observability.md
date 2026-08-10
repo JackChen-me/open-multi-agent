@@ -482,6 +482,10 @@ when available: set `shutdownOnShutdown: true` only when the adapter owns that
 provider's lifecycle. Rejection/timeout maps to the OBS-2 exporter result and
 diagnostics, never to an Agent/Task/Run failure.
 
+`egressPolicy` does not wrap the application-owned provider or its exporters.
+Use the provider/exporter transport configuration or infrastructure controls
+for telemetry egress; see the [egress enforcement matrix](egress-policy.md#enforcement-matrix).
+
 OMA run/agent/task/LLM/tool/consensus/checkpoint records become spans;
 retry, verdict, first-chunk, and stream records become `oma.*` events. DAG,
 delegation, consumed-synthesis, and restore-continuation relations become OTel

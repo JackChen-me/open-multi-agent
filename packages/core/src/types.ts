@@ -11,6 +11,7 @@ import type {
   SchedulingStrategy,
   SchedulingWeights,
 } from './orchestrator/scheduler.js'
+import type { ShellExecutor } from './tool/shell/types.js'
 
 // ---------------------------------------------------------------------------
 // Content blocks
@@ -224,6 +225,28 @@ export interface TokenUsage {
   readonly output_tokens: number
 }
 
+/**
+ * Declarative policy for network requests opened by framework-owned LLM
+ * transports.
+ *
+ * - `'offline'` permits only loopback HTTP(S) origins (`localhost`,
+ *   `*.localhost`, `127.0.0.0/8`, and `[::1]`).
+ * - `'allowlist'` permits only the listed exact HTTP(S) origins. Entries must
+ *   be origins such as `https://api.openai.com` or
+ *   `http://127.0.0.1:11434`, without credentials, paths, query strings, or
+ *   fragments.
+ *
+ * This is deliberately narrower than a process firewall. It does not govern
+ * application callbacks, tools, subprocesses, MCP-server internals, or
+ * application-owned telemetry exporters.
+ */
+export type EgressPolicy =
+  | { readonly mode: 'offline' }
+  | {
+      readonly mode: 'allowlist'
+      readonly allowedOrigins: readonly string[]
+    }
+
 // ---------------------------------------------------------------------------
 // Run identity and outcome
 // ---------------------------------------------------------------------------
@@ -272,6 +295,12 @@ export interface RunIdentityOptions {
    * and echoed on the run result.
    */
   readonly metadata?: Readonly<Record<string, TraceAttributeValue>>
+  /**
+   * Per-run framework-owned LLM egress restriction. When agent- or
+   * orchestrator-level policies are also configured, all scopes are
+   * intersected: a more specific scope may narrow but never widen another.
+   */
+  readonly egressPolicy?: EgressPolicy
 }
 
 /** Per-call options for {@link OpenMultiAgent.runAgent}. */
@@ -544,6 +573,13 @@ export interface ToolUseContext {
    * Tools should prefer `abortSignal` for simple cancellation checks.
    */
   readonly abortController?: AbortController
+  /**
+   * Effective executor for the built-in `bash` tool. Framework callers inject
+   * this from {@link AgentConfig.shellExecutor}; low-level tool callers may
+   * omit it to use `LocalShellExecutor`. A caller that invokes
+   * `bashTool.execute()` directly owns the executor lifecycle.
+   */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Working directory for filesystem-tool sandboxing.
    *
@@ -957,6 +993,13 @@ export interface AgentConfig {
    * non-empty placeholder (e.g. `'ollama'`) because the OpenAI SDK validates it.
    */
   readonly baseURL?: string
+  /**
+   * Agent-level restriction for framework-owned LLM requests. It intersects
+   * with run- and orchestrator-level policies, so it can narrow inherited
+   * access but cannot widen it. External backends and tool code are outside
+   * this policy's scope.
+   */
+  readonly egressPolicy?: EgressPolicy
   /** API key override; falls back to the provider's standard env var. */
   readonly apiKey?: string
   /** AWS region override for the `bedrock` provider; falls back to `AWS_REGION` env var, then `'us-east-1'`. Ignored by all other providers. */
@@ -997,6 +1040,17 @@ export interface AgentConfig {
    * key is auto-redacted from traces and dashboards.
    */
   readonly credentials?: Readonly<Record<string, string>>
+  /**
+   * Where a granted `bash` tool executes. Overrides
+   * {@link OrchestratorConfig.defaultShellExecutor} for this agent. The
+   * executor does not grant `bash`; `tools` / `toolPreset` still control
+   * availability.
+   *
+   * One instance is reused across bash calls within a run. If the same
+   * instance is shared by multiple agents, its `exec()` may be called
+   * concurrently and its lifecycle is reference-counted across those runs.
+   */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory used by built-in filesystem tools (`file_read`,
    * `file_write`, `file_edit`, `grep`, `glob`). Paths must be absolute and
@@ -2223,6 +2277,12 @@ export interface OrchestratorConfig {
   readonly defaultBaseURL?: string
   readonly defaultApiKey?: string
   /**
+   * Default restriction for framework-owned LLM network requests. Per-run and
+   * per-agent policies intersect with this default; omission preserves legacy
+   * unrestricted behavior.
+   */
+  readonly egressPolicy?: EgressPolicy
+  /**
    * Default checkpoint configuration for `runTeam`, `runTasks`, `runFromPlan`,
    * and `restore`. Per-call options override this value. Defaults to off.
    */
@@ -2250,6 +2310,14 @@ export interface OrchestratorConfig {
    * then accept arbitrary absolute or relative paths).
    */
   readonly defaultCwd?: string | null
+  /**
+   * Default executor inherited by agents that do not set
+   * {@link AgentConfig.shellExecutor}. This changes where a granted `bash`
+   * command runs; it does not grant the tool. One shared instance may serve
+   * concurrent agents, so non-concurrent implementations must serialize
+   * `exec()` internally or be supplied as distinct per-agent instances.
+   */
+  readonly defaultShellExecutor?: ShellExecutor
   readonly onProgress?: (event: OrchestratorEvent) => void
   /** Best-effort online scoring of settled top-level runs. Disabled unless configured. */
   readonly evaluation?: import('./eval/online.js').OnlineEvaluationConfig
@@ -2652,6 +2720,8 @@ export interface CoordinatorConfig {
   readonly disallowedTools?: readonly string[]
   /** See {@link AgentConfig.onToolCall}. */
   readonly onToolCall?: ToolCallGate
+  /** See {@link AgentConfig.shellExecutor}. */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory used by the coordinator's filesystem tools.
    * Defaults to {@link OrchestratorConfig.defaultCwd}. Pass `null` to

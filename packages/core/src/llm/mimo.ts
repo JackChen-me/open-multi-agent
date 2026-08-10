@@ -5,6 +5,7 @@
  * OpenAI-compatible endpoint and MIMO_API_KEY environment variable fallback.
  */
 
+import type { EgressPolicy } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -25,12 +26,14 @@ export class MiMoAdapter extends OpenAIAdapter {
     echoesReasoning: 'tool-use-only' as const,
   }
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     // Allow override of baseURL (Token Plan clusters, proxies, or future changes)
     // but default to the official pay-as-you-go MiMo endpoint.
     super(
       apiKey ?? process.env['MIMO_API_KEY'],
-      baseURL ?? process.env['MIMO_BASE_URL'] ?? 'https://api.xiaomimimo.com/v1'
+      baseURL ?? process.env['MIMO_BASE_URL'] ?? 'https://api.xiaomimimo.com/v1',
+      egressPolicy,
+      'mimo',
     )
   }
 }

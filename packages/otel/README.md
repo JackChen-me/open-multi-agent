@@ -37,6 +37,11 @@ Pass exactly one of `tracer` or `tracerProvider`. Passing neither is a clear
 configuration error: this package does not fall back to `trace.getTracer()` or
 any global provider.
 
+Core `egressPolicy` does not wrap this application-owned provider or any
+exporter attached to it. Configure telemetry egress in the provider/exporter or
+at the infrastructure boundary; see the core
+[egress enforcement matrix](../../docs/egress-policy.md#enforcement-matrix).
+
 ## Lifecycle and ownership
 
 The caller owns the tracer/provider in every mode.

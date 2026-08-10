@@ -5,6 +5,7 @@
  * OpenAI-compatible endpoint and MINIMAX_API_KEY environment variable fallback.
  */
 
+import type { EgressPolicy } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -19,11 +20,13 @@ import { OpenAIAdapter } from './openai.js'
 export class MiniMaxAdapter extends OpenAIAdapter {
   readonly name = 'minimax'
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     // Allow override of baseURL (for proxies or future changes) but default to official MiniMax endpoint.
     super(
       apiKey ?? process.env['MINIMAX_API_KEY'],
-      baseURL ?? process.env['MINIMAX_BASE_URL'] ?? 'https://api.minimax.io/v1'
+      baseURL ?? process.env['MINIMAX_BASE_URL'] ?? 'https://api.minimax.io/v1',
+      egressPolicy,
+      'minimax',
     )
   }
 }

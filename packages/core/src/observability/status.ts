@@ -1,5 +1,6 @@
 import {
   CostBudgetExceededError,
+  EgressPolicyError,
   LLMCallTimeoutError,
   RoutingTimeoutError,
   TokenBudgetExceededError,
@@ -56,6 +57,9 @@ export function classifyRunFailure(
   } else if (error instanceof LLMCallTimeoutError || error instanceof RoutingTimeoutError) {
     statusCode = 'timeout'
     kind = 'timeout'
+  } else if (error instanceof EgressPolicyError) {
+    statusCode = 'rejected'
+    kind = 'validation'
   } else if (isCancellationError(error)) {
     statusCode = 'cancelled'
     kind = 'cancellation'
