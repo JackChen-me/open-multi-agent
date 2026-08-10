@@ -33,8 +33,8 @@
 <p align="center">
   <a href="https://open-multi-agent.com">Website</a> ·
   <a href="https://open-multi-agent.com/getting-started/introduction/">Docs</a> ·
-  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a> ·
-  <a href="https://github.com/open-multi-agent/open-multi-agent/discussions">Discussions</a>
+  <a href="./packages/core/examples/">Examples</a> ·
+  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a>
 </p>
 
 <p align="center">

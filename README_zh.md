@@ -33,8 +33,8 @@
 <p align="center">
   <a href="https://open-multi-agent.com/zh/">官网</a> ·
   <a href="https://open-multi-agent.com/zh/getting-started/introduction/">文档</a> ·
-  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a> ·
-  <a href="https://github.com/open-multi-agent/open-multi-agent/discussions">讨论区</a>
+  <a href="./packages/core/examples/">示例</a> ·
+  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a>
 </p>
 
 <p align="center">
