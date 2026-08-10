@@ -24,6 +24,22 @@ Task failure and skip propagation still belong to `TaskQueue`. A failed or
 skipped task cascades to its dependents immediately, while unrelated branches
 continue.
 
+## Task retry boundaries
+
+Task retry is opt-in through `maxRetries`. The executor prefers the stable
+`AgentRunResult.errorInfo.retryable` classification and falls back to the
+in-process `error` object when needed. Validation, caller cancellation, and
+budget exhaustion are terminal; provider rate limits, server failures, network
+errors, and call timeouts remain retryable. This classification survives hooks
+or serialization seams that do not retain the original Error instance.
+
+An agent configured with `outputSchema` has a separate, single in-run
+correction: if its first response is invalid, the same agent receives schema
+feedback once. If that correction also fails, OMA returns
+`StructuredOutputValidationError`; task-level retry does not restart the whole
+prompt. Whole-run timeout, caller cancellation, and the cumulative token budget
+remain authoritative across both structured-output attempts.
+
 ## Task results and dependency payloads
 
 `TeamRunResult.agentResults` remains keyed by agent name and preserves its

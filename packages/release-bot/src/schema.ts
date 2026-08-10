@@ -181,13 +181,25 @@ export type ReleaseDecision =
   | { readonly status: 'rejected'; readonly proposal: ReleaseProposal; readonly review: ReleaseReview }
   | { readonly status: 'release'; readonly plan: ReleasePlan; readonly proposal: ReleaseProposal; readonly review: ReleaseReview }
 
+/** Apply repository-owned bump policy before a proposal reaches review. */
+export function normalizeReleaseProposal(
+  evidence: ReleaseEvidence,
+  proposalInput: unknown,
+): ReleaseProposal {
+  const proposal = releaseProposalSchema.parse(proposalInput)
+  if (proposal.decision !== 'release' || evidence.workspaceChanges.createOmaApp) {
+    return proposal
+  }
+  return { ...proposal, createOmaAppBump: 'patch' }
+}
+
 export function buildReleaseDecision(
   evidence: ReleaseEvidence,
   proposalInput: unknown,
   reviewInput: unknown,
   releaseDate = new Date().toISOString().slice(0, 10),
 ): ReleaseDecision {
-  const proposal = releaseProposalSchema.parse(proposalInput)
+  const proposal = normalizeReleaseProposal(evidence, proposalInput)
   const review = releaseReviewSchema.parse(reviewInput)
 
   if (review.verdict === 'reject') return { status: 'rejected', proposal, review }
@@ -204,7 +216,13 @@ export function buildReleaseDecision(
   }
 
   const coreBump = requireBump(proposal.coreBump, 'core')
-  const createOmaAppBump = requireBump(proposal.createOmaAppBump, 'create-oma-app')
+  const proposedCreateOmaAppBump = requireBump(proposal.createOmaAppBump, 'create-oma-app')
+  // A core release always changes create-oma-app's template pins. When the
+  // scaffolder workspace had no merged changes of its own, that mechanical pin
+  // is a patch release regardless of the model's proposed bump class.
+  const createOmaAppBump = evidence.workspaceChanges.createOmaApp
+    ? proposedCreateOmaAppBump
+    : 'patch'
   const otelBump = proposal.otelBump === 'none' ? null : proposal.otelBump
 
   return {

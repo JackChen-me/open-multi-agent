@@ -141,6 +141,24 @@ export class InvalidMessageError extends Error {
 }
 
 /**
+ * Raised when an agent cannot satisfy its configured structured-output schema
+ * after the built-in corrective retry. Re-running the whole task with the same
+ * prompt is not a transport recovery strategy, so this failure is terminal for
+ * orchestrator-level retries.
+ */
+export class StructuredOutputValidationError extends Error {
+  readonly code = 'STRUCTURED_OUTPUT_VALIDATION_FAILED'
+
+  constructor(readonly cause?: unknown) {
+    super(
+      'Structured output validation failed after retry.',
+      cause !== undefined ? { cause } : undefined,
+    )
+    this.name = 'StructuredOutputValidationError'
+  }
+}
+
+/**
  * Raised when a provider returns a tool-call type that OMA cannot execute.
  *
  * OMA exposes JSON-schema function tools. Failing loudly keeps an upstream
@@ -223,6 +241,7 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof TokenBudgetExceededError) return false
   if (error instanceof CostBudgetExceededError) return false
   if (error instanceof InvalidMessageError) return false
+  if (error instanceof StructuredOutputValidationError) return false
   if (error instanceof UnsupportedToolCallError) return false
   if (error instanceof UnsupportedToolResultContentError) return false
   if (error instanceof LLMCallTimeoutError) return true

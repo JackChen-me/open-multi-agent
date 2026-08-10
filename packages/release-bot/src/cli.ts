@@ -11,6 +11,8 @@ import { publishRelease } from './publisher.js'
 import { NpmRegistryClient } from './registry.js'
 
 const command = process.argv[2] ?? 'help'
+const taskStartTimes = new Map<string, number>()
+const taskTitles = new Map<string, string>()
 
 try {
   switch (command) {
@@ -139,10 +141,76 @@ function requireEnvEither(primary: string, fallback: string): string {
 }
 
 function logProgress(event: OrchestratorEvent): void {
-  if (event.type === 'task_start') console.log(`[OMA] start: ${event.task ?? event.agent ?? 'task'}`)
-  if (event.type === 'task_complete') console.log(`[OMA] complete: ${event.task ?? event.agent ?? 'task'}`)
-  if (event.type === 'warning') console.warn(`[OMA] warning: ${String(event.data ?? '')}`)
-  if (event.type === 'error') console.error(`[OMA] error: ${event.task ?? event.agent ?? String(event.data ?? '')}`)
+  const taskId = event.task ?? 'task'
+  const title = readStringField(event.data, 'title')
+  const effectiveTitle = title ?? taskTitles.get(taskId)
+  const label = [event.agent, effectiveTitle ?? taskId].filter(Boolean).join(' · ')
+
+  if (event.type === 'task_start') {
+    taskStartTimes.set(taskId, Date.now())
+    if (title !== undefined) taskTitles.set(taskId, title)
+    console.log(`[OMA] start: ${label}`)
+  }
+  if (event.type === 'task_retry') {
+    const attempt = readNumberField(event.data, 'attempt')
+    const maxAttempts = readNumberField(event.data, 'maxAttempts')
+    const delay = readNumberField(event.data, 'nextDelayMs')
+    console.warn(
+      `[OMA] retry: ${label}`
+      + (attempt !== undefined && maxAttempts !== undefined ? ` (${attempt}/${maxAttempts})` : '')
+      + (delay !== undefined ? ` after ${delay}ms` : ''),
+    )
+  }
+  if (event.type === 'task_complete') {
+    const startedAt = taskStartTimes.get(taskId)
+    taskStartTimes.delete(taskId)
+    taskTitles.delete(taskId)
+    const duration = startedAt === undefined ? '' : ` in ${Date.now() - startedAt}ms`
+    const tokenUsage = readObjectField(event.data, 'tokenUsage')
+    const inputTokens = readNumberField(tokenUsage, 'input_tokens')
+    const outputTokens = readNumberField(tokenUsage, 'output_tokens')
+    const tokens = inputTokens === undefined || outputTokens === undefined
+      ? ''
+      : ` (${inputTokens} input / ${outputTokens} output tokens)`
+    console.log(`[OMA] complete: ${label}${duration}${tokens}`)
+  }
+  if (event.type === 'task_skipped') {
+    taskStartTimes.delete(taskId)
+    taskTitles.delete(taskId)
+    console.warn(`[OMA] skipped: ${label}`)
+  }
+  if (event.type === 'budget_exceeded') console.error(`[OMA] budget exceeded: ${label}`)
+  if (event.type === 'warning') console.warn(`[OMA] warning: ${renderProgressData(event.data)}`)
+  if (event.type === 'error') {
+    taskStartTimes.delete(taskId)
+    taskTitles.delete(taskId)
+    console.error(`[OMA] error: ${label}${event.data === undefined ? '' : ` · ${renderProgressData(event.data)}`}`)
+  }
+}
+
+function readObjectField(value: unknown, key: string): unknown {
+  if (typeof value !== 'object' || value === null) return undefined
+  return (value as Record<string, unknown>)[key]
+}
+
+function readStringField(value: unknown, key: string): string | undefined {
+  const field = readObjectField(value, key)
+  return typeof field === 'string' ? field : undefined
+}
+
+function readNumberField(value: unknown, key: string): number | undefined {
+  const field = readObjectField(value, key)
+  return typeof field === 'number' && Number.isFinite(field) ? field : undefined
+}
+
+function renderProgressData(value: unknown): string {
+  if (value instanceof Error) return value.message
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }
 
 async function writeOutput(name: string, value: string): Promise<void> {

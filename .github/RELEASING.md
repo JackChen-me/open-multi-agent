@@ -23,11 +23,22 @@ needed at publish time.
 [`packages/release-bot`](../packages/release-bot/README.md) uses OMA itself to
 prepare a release. Its fixed `runTasks()` graph runs change analysis and
 compatibility review in parallel, then a planner and an independent reviewer.
-All four agents use DeepSeek V4 Flash and receive only narrow, read-only
-evidence tools. Model output is restricted to version bump classes and
-changelog prose; deterministic code owns concrete versions, the allowed file
-set, template pins, validation, Git/GitHub mutations, package order, registry
-checks, tags, and GitHub Releases.
+All four agents use DeepSeek V4 Flash. Only the two evidence roles receive
+narrow, read-only tools: immutable evidence, the release contract, and one
+deterministic risk-ranked, size-bounded diff bundle whose paths are selected by
+code rather than the model. The planner and reviewer consume the immutable
+summary and structured dependency reports. Model output is restricted to
+version bump classes and changelog prose; deterministic code owns concrete
+versions, the allowed file set, template pins, validation, Git/GitHub
+mutations, package order, registry checks, tags, and GitHub Releases.
+
+Each DAG task has one task-level attempt; malformed structured output may use
+OMA's single in-run correction, but the whole role is not restarted. Per-role
+turn and output budgets bound model work, and the complete planning DAG aborts
+after ten minutes. When core changes but `packages/create-oma-app` does not,
+deterministic policy forces a create-oma-app patch bump for the template pin.
+The planner's scaffolder bump class is authoritative only when that workspace
+has merged changes of its own; normalization occurs before independent review.
 
 The weekly workflow creates a **ready** release PR automatically. A maintainer
 reviews and merges it manually. Merge is the release approval, but it is not a

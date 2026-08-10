@@ -107,9 +107,11 @@ export async function executeWithRetry(
       if (result.error instanceof DurableApprovalError) throw result.error
       lastError = result.output
 
-      // Non-streaming path carries the structured error on the result; a
-      // provably-terminal one (e.g. a 401) is not worth retrying.
-      const terminal = result.error !== undefined && !isRetryableError(result.error)
+      // Prefer the stable classification already attached to the outcome.
+      // This also covers framework failures (validation, cancellation, budget)
+      // whose raw Error may have been removed by a hook or serialization seam.
+      const terminal = result.errorInfo?.retryable === false
+        || (result.error !== undefined && !isRetryableError(result.error))
       if (!terminal && attempt < maxAttempts && !abortSignal?.aborted) {
         await backoffSleep(attempt)
         continue

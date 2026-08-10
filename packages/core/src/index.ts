@@ -189,6 +189,7 @@ export {
   TokenBudgetExceededError,
   CostBudgetExceededError,
   InvalidMessageError,
+  StructuredOutputValidationError,
   InvalidTaskRequirementsError,
   LLMCallTimeoutError,
   UnsupportedToolCallError,

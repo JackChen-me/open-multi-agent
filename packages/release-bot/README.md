@@ -19,10 +19,26 @@ The bot deliberately separates judgment from authority:
 5. A maintainer reviews and merges the PR. Only then can the deterministic
    publish workflow run after `CI` succeeds on the exact merged release commit.
 
-Repository diffs are untrusted evidence. Agents receive only three custom
-read-only tools: immutable release evidence, a changed-path-only diff reader,
-and the release contract. They never receive `bash`, filesystem write tools,
+The two evidence roles have five turns and 4,500 output tokens each; the
+planner and reviewer have three turns and 3,500 output tokens each. Every DAG
+task has `maxRetries: 0`, so a failed role is not silently rerun as a whole new
+analysis (OMA's one in-run structured-output correction still applies). The
+complete planning DAG has a ten-minute wall-clock deadline.
+
+Repository diffs are untrusted evidence. The analyst and compatibility auditor
+receive only three custom read-only tools: immutable release evidence, a
+deterministic risk-ranked and size-bounded review bundle, and the release
+contract. The model cannot supply repository paths to the bundle. The planner
+and reviewer consume the immutable summary and structured dependency reports
+without repository tools. No agent receives `bash`, filesystem write tools,
 GitHub credentials, npm credentials, or publication tools.
+
+Concrete package versions remain deterministic. In particular, every core
+release increments `create-oma-app`; when no scaffolder files changed since the
+last core tag, the bot forces a patch bump because the only release change is
+the exact core template pin. A model-proposed larger scaffolder bump is used
+only when the scaffolder workspace itself changed. This normalization happens
+before the independent reviewer receives the proposal.
 
 ## Commands
 

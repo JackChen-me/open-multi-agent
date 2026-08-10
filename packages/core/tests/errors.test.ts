@@ -3,6 +3,7 @@ import {
   TokenBudgetExceededError,
   InvalidMessageError,
   LLMCallTimeoutError,
+  StructuredOutputValidationError,
   UnsupportedToolCallError,
   UnsupportedToolResultContentError,
 } from '../src/errors.js'
@@ -64,6 +65,18 @@ describe('InvalidMessageError', () => {
 
   it('is an instance of Error (extends built-in Error)', () => {
     const err = new InvalidMessageError('test')
+    expect(err).toBeInstanceOf(Error)
+  })
+})
+
+describe('StructuredOutputValidationError', () => {
+  it('exposes a stable code, message, and validation cause', () => {
+    const cause = new Error('schema mismatch')
+    const err = new StructuredOutputValidationError(cause)
+    expect(err.name).toBe('StructuredOutputValidationError')
+    expect(err.code).toBe('STRUCTURED_OUTPUT_VALIDATION_FAILED')
+    expect(err.message).toBe('Structured output validation failed after retry.')
+    expect(err.cause).toBe(cause)
     expect(err).toBeInstanceOf(Error)
   })
 })

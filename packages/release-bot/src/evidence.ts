@@ -12,6 +12,163 @@ interface PackageManifest {
   readonly version?: unknown
 }
 
+export type ReleaseReviewRisk = 'critical' | 'high' | 'medium' | 'low'
+
+export interface ReleaseReviewTarget extends ChangedFile {
+  readonly risk: ReleaseReviewRisk
+  readonly reasons: readonly string[]
+}
+
+export const DEFAULT_RELEASE_REVIEW_TARGET_LIMIT = 16
+
+interface RankedReviewTarget extends ReleaseReviewTarget {
+  readonly score: number
+  readonly surface: ReviewSurface
+}
+
+type ReviewSurface =
+  | 'public-contract'
+  | 'release-automation'
+  | 'workflow'
+  | 'persistence'
+  | 'provider'
+  | 'core-runtime'
+  | 'scaffolder'
+  | 'otel'
+  | 'documentation'
+  | 'tests'
+  | 'other'
+
+const REVIEW_SURFACE_ORDER: readonly ReviewSurface[] = [
+  'public-contract',
+  'release-automation',
+  'workflow',
+  'persistence',
+  'provider',
+  'core-runtime',
+  'scaffolder',
+  'otel',
+]
+
+/**
+ * Select a deterministic, risk-ranked subset of changed files for model review.
+ * The fixed surface seed prevents a large refactor in one subsystem from
+ * crowding every other release-critical surface out of the bounded bundle.
+ */
+export function selectReleaseReviewTargets(
+  evidence: ReleaseEvidence,
+  limit = DEFAULT_RELEASE_REVIEW_TARGET_LIMIT,
+): readonly ReleaseReviewTarget[] {
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error('Release review target limit must be a non-negative integer.')
+  }
+  if (limit === 0) return []
+
+  const ranked = evidence.changedFiles
+    .map(rankReviewTarget)
+    .sort(compareReviewTargets)
+  const selected: RankedReviewTarget[] = []
+  const selectedPaths = new Set<string>()
+
+  const select = (target: RankedReviewTarget | undefined) => {
+    if (!target || selected.length >= limit || selectedPaths.has(target.path)) return
+    selected.push(target)
+    selectedPaths.add(target.path)
+  }
+
+  for (const surface of REVIEW_SURFACE_ORDER) {
+    select(ranked.find(target => target.surface === surface && target.risk !== 'low'))
+  }
+  for (const target of ranked) select(target)
+
+  return selected
+    .sort(compareReviewTargets)
+    .map(({ score: _score, surface: _surface, ...target }) => target)
+}
+
+function rankReviewTarget(file: ChangedFile): RankedReviewTarget {
+  const path = file.path
+  const reasons: string[] = []
+  let score = 10
+  let surface: ReviewSurface = 'other'
+
+  const setRank = (nextScore: number, nextSurface: ReviewSurface, reason: string) => {
+    if (nextScore > score) {
+      score = nextScore
+      surface = nextSurface
+    }
+    if (!reasons.includes(reason)) reasons.push(reason)
+  }
+
+  if (
+    path === 'packages/core/src/index.ts'
+    || path === 'packages/core/src/types.ts'
+    || path === 'packages/core/src/errors.ts'
+    || /^packages\/core\/src\/(?:acp|process|mcp|ai-sdk|classifiers)\.ts$/.test(path)
+    || /^packages\/core\/src\/(?:observability|eval)\/(?:index|file)\.ts$/.test(path)
+  ) {
+    setRank(180, 'public-contract', 'published API or type contract')
+  }
+  if (/^packages\/(?:core|otel|create-oma-app)\/package\.json$/.test(path)) {
+    setRank(175, 'public-contract', 'published package manifest')
+  }
+  if (/^\.github\/workflows\/(?:publish|release-bot|ci|release-smoke)\.yml$/.test(path)) {
+    setRank(170, 'workflow', 'release or CI authority boundary')
+  }
+  if (path === '.github/RELEASING.md') {
+    setRank(165, 'workflow', 'release contract')
+  }
+  if (/^packages\/release-bot\/src\/(?:apply-plan|prepare|publisher|registry|github|schema|orchestrator|tools|evidence)\.ts$/.test(path)) {
+    setRank(160, 'release-automation', 'release decision or mutation boundary')
+  }
+  if (/^packages\/core\/src\/(?:memory|approval|observability)\//.test(path)) {
+    setRank(150, 'persistence', 'durability, approval, or trace contract')
+  }
+  if (/^packages\/core\/src\/llm\//.test(path)) {
+    setRank(145, 'provider', 'provider wire behavior')
+  }
+  if (/^packages\/core\/src\//.test(path)) {
+    setRank(130, 'core-runtime', 'published core runtime')
+  }
+  if (/^packages\/create-oma-app\/(?:src|template|templates)\//.test(path)) {
+    setRank(125, 'scaffolder', 'generated-project behavior')
+  }
+  if (/^packages\/otel\/src\//.test(path)) {
+    setRank(125, 'otel', 'published OpenTelemetry adapter')
+  }
+  if (path === 'package-lock.json') {
+    setRank(100, 'public-contract', 'resolved dependency graph')
+  }
+  if (path === 'CHANGELOG.md' || path === 'README.md' || path === 'README_zh.md' || path.startsWith('docs/')) {
+    setRank(70, 'documentation', 'user-facing documentation')
+  }
+  if (/\/(?:tests?|examples)\//.test(path) || /\.test\.[cm]?[jt]s$/.test(path)) {
+    setRank(35, 'tests', 'test or example coverage')
+  }
+
+  const additions = file.additions ?? 0
+  const deletions = file.deletions ?? 0
+  if (deletions > 0) {
+    score += Math.min(12, 2 + Math.floor(Math.log2(deletions + 1)))
+    reasons.push('deletions can narrow existing behavior')
+  }
+  score += Math.min(8, Math.floor(Math.log2(additions + deletions + 1)))
+
+  const risk: ReleaseReviewRisk = score >= 160
+    ? 'critical'
+    : score >= 120
+      ? 'high'
+      : score >= 60
+        ? 'medium'
+        : 'low'
+
+  return { ...file, risk, reasons, score, surface }
+}
+
+function compareReviewTargets(a: RankedReviewTarget, b: RankedReviewTarget): number {
+  return b.score - a.score || a.path.localeCompare(b.path)
+}
+
 export async function collectReleaseEvidence(
   repoRoot: string,
   runner: CommandRunner,

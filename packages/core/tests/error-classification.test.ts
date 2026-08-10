@@ -6,6 +6,7 @@ import {
   TokenBudgetExceededError,
   InvalidMessageError,
   LLMCallTimeoutError,
+  StructuredOutputValidationError,
   UnsupportedToolCallError,
   UnsupportedToolResultContentError,
 } from '../src/errors.js'
@@ -45,6 +46,7 @@ describe('isRetryableError', () => {
   it('classifies budget, invalid-message, and task-requirement errors as terminal', () => {
     expect(isRetryableError(new TokenBudgetExceededError('a', 100, 50))).toBe(false)
     expect(isRetryableError(new InvalidMessageError('bad'))).toBe(false)
+    expect(isRetryableError(new StructuredOutputValidationError())).toBe(false)
     expect(isRetryableError(new UnsupportedToolCallError('openai', 'custom'))).toBe(false)
     expect(isRetryableError(
       new UnsupportedToolResultContentError('openai', 'file-url'),

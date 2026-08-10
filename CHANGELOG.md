@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Added
+
+- `StructuredOutputValidationError` identifies schema failures that remain
+  after the agent's built-in corrective attempt and marks them as terminal for
+  task-level retry.
+
+### Changed
+
+- The private OMA release bot now feeds its evidence roles one deterministic,
+  risk-ranked diff bundle, applies smaller per-role turn and output budgets,
+  disables whole-task retries, and aborts the complete planning DAG after ten
+  minutes. Planner and reviewer roles consume structured dependency reports
+  without rereading repository tools.
+- A core-only release now forces a patch increment for `create-oma-app` when
+  the scaffolder workspace itself did not change; larger model-proposed bumps
+  apply only to merged scaffolder changes.
+
+### Fixed
+
+- Structured-output agents no longer report a late valid response as success
+  after their whole-run timeout fired.
+- Task retry now respects a result's stable `errorInfo.retryable: false`
+  classification, preventing validation, cancellation, and budget failures
+  from being rerun when the raw in-process error is unavailable.
+
 ## 1.14.0 - 2026-08-01
 
 ### Breaking changes

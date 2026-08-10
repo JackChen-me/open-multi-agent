@@ -1,3 +1,5 @@
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type {
   LLMAdapter,
@@ -28,6 +30,16 @@ const neverRunner: CommandRunner = {
   run: async () => { throw new Error('read-only tools were not expected in this scripted test') },
 }
 
+const diffRunner: CommandRunner = {
+  run: async () => ({
+    stdout: 'diff --git a/packages/core/src/recovery.ts b/packages/core/src/recovery.ts\n+export const recovery = true\n',
+    stderr: '',
+    exitCode: 0,
+  }),
+}
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+
 describe('OMA release orchestration', () => {
   it('runs independent analysis before bounded planning and review', async () => {
     const adapter = new ReleaseScriptAdapter()
@@ -45,21 +57,31 @@ describe('OMA release orchestration', () => {
     expect(run.decision.plan.nextVersions).toEqual({
       core: '1.15.0',
       otel: '0.1.1',
-      createOmaApp: '0.8.0',
+      createOmaApp: '0.7.1',
     })
+    expect(run.decision.plan.bumps.createOmaApp).toBe('patch')
+    expect(run.proposal.createOmaAppBump).toBe('patch')
     expect(adapter.roles.slice(0, 2).sort()).toEqual(['change-analyst', 'compatibility-auditor'])
     expect(adapter.roles[2]).toBe('release-planner')
     expect(adapter.roles[3]).toBe('release-reviewer')
     expect(adapter.plannerMessages).toContain('Durable recovery is additive.')
     expect(adapter.reviewerMessages).toContain('Release durable recovery.')
+    expect(adapter.reviewerMessages).toContain('\\"createOmaAppBump\\":\\"patch\\"')
     expect(adapter.toolSets).toHaveLength(4)
-    for (const tools of adapter.toolSets) {
+    for (const tools of adapter.toolSets.slice(0, 2)) {
       expect(tools).toEqual([
         'get_release_evidence',
-        'read_changed_diff',
+        'read_release_review_bundle',
         'read_release_contract',
       ])
     }
+    expect(adapter.toolSets.slice(2)).toEqual([[], []])
+    expect(adapter.maxTokensByRole).toEqual(new Map([
+      ['change-analyst', 4_500],
+      ['compatibility-auditor', 4_500],
+      ['release-planner', 3_500],
+      ['release-reviewer', 3_500],
+    ]))
     expect(run.tokenUsage).toEqual({ input_tokens: 40, output_tokens: 20 })
   })
 
@@ -72,12 +94,38 @@ describe('OMA release orchestration', () => {
       releaseDate: '2026-08-10',
     })).rejects.toThrow(/did not call required evidence tool/)
   })
+
+  it('accepts analysis only after each evidence role calls all three tools once', async () => {
+    const run = await generateReleaseDecision({
+      repoRoot,
+      runner: diffRunner,
+      evidence,
+      adapter: new EvidenceToolScriptAdapter(),
+      releaseDate: '2026-08-10',
+    })
+
+    expect(run.decision.status).toBe('release')
+    expect(run.proposal.createOmaAppBump).toBe('patch')
+  })
+
+  it('aborts the complete DAG at the configured global deadline', async () => {
+    await expect(generateReleaseDecision({
+      repoRoot: '/tmp/unused-release-bot-test',
+      runner: neverRunner,
+      evidence,
+      adapter: new DeadlineAdapter(),
+      releaseDate: '2026-08-10',
+      requireEvidenceToolCalls: false,
+      runTimeoutMs: 20,
+    })).rejects.toThrow(/global deadline of 20ms/)
+  })
 })
 
 class ReleaseScriptAdapter implements LLMAdapter {
   readonly name = 'scripted-release-test'
   readonly roles: string[] = []
   readonly toolSets: string[][] = []
+  readonly maxTokensByRole = new Map<string, number | undefined>()
   plannerMessages = ''
   reviewerMessages = ''
   private sequence = 0
@@ -86,6 +134,7 @@ class ReleaseScriptAdapter implements LLMAdapter {
     const role = identifyRole(options.systemPrompt ?? '')
     this.roles.push(role)
     this.toolSets.push((options.tools ?? []).map(tool => tool.name))
+    this.maxTokensByRole.set(role, options.maxTokens)
     const messageText = JSON.stringify(messages)
     if (role === 'release-planner') this.plannerMessages = messageText
     if (role === 'release-reviewer') this.reviewerMessages = messageText
@@ -97,6 +146,77 @@ class ReleaseScriptAdapter implements LLMAdapter {
       model: options.model,
       stop_reason: 'end_turn',
       usage: { input_tokens: 10, output_tokens: 5 },
+    }
+  }
+
+  async *stream(messages: LLMMessage[], options: LLMStreamOptions): AsyncIterable<StreamEvent> {
+    const response = await this.chat(messages, options)
+    yield { type: 'done', data: response }
+  }
+}
+
+class DeadlineAdapter implements LLMAdapter {
+  readonly name = 'deadline-release-test'
+
+  async chat(_messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
+    await new Promise<void>((resolve) => {
+      if (options.abortSignal?.aborted) resolve()
+      else options.abortSignal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    const role = identifyRole(options.systemPrompt ?? '')
+    return {
+      id: `deadline-${role}`,
+      content: [{ type: 'text', text: JSON.stringify(responseFor(role)) }],
+      model: options.model,
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }
+  }
+
+  async *stream(messages: LLMMessage[], options: LLMStreamOptions): AsyncIterable<StreamEvent> {
+    const response = await this.chat(messages, options)
+    yield { type: 'done', data: response }
+  }
+}
+
+class EvidenceToolScriptAdapter implements LLMAdapter {
+  readonly name = 'evidence-tool-release-test'
+  private readonly toolIndex = new Map<string, number>()
+  private sequence = 0
+
+  async chat(_messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
+    const role = identifyRole(options.systemPrompt ?? '')
+    const toolNames = [
+      'get_release_evidence',
+      'read_release_review_bundle',
+      'read_release_contract',
+    ] as const
+    const index = this.toolIndex.get(role) ?? 0
+    this.sequence += 1
+
+    if ((role === 'change-analyst' || role === 'compatibility-auditor') && index < toolNames.length) {
+      const toolName = toolNames[index]!
+      this.toolIndex.set(role, index + 1)
+      return {
+        id: `tool-${this.sequence}`,
+        content: [{
+          type: 'tool_use',
+          id: `call-${role}-${index}`,
+          name: toolName,
+          input: {},
+        }],
+        model: options.model,
+        stop_reason: 'tool_use',
+        usage: { input_tokens: 2, output_tokens: 1 },
+      }
+    }
+
+    return {
+      id: `final-${this.sequence}`,
+      content: [{ type: 'text', text: JSON.stringify(responseFor(role)) }],
+      model: options.model,
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 2, output_tokens: 1 },
     }
   }
 

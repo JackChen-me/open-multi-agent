@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildReleaseDecision,
+  normalizeReleaseProposal,
   releaseProposalSchema,
   type ReleaseEvidence,
 } from '../src/schema.js'
@@ -43,6 +44,10 @@ const review = {
 }
 
 describe('release decision', () => {
+  it('normalizes a core-only scaffolder bump before independent review', () => {
+    expect(normalizeReleaseProposal(evidence, proposal).createOmaAppBump).toBe('patch')
+  })
+
   it('calculates concrete versions only after independent approval', () => {
     const decision = buildReleaseDecision(evidence, proposal, review, '2026-08-10')
     expect(decision.status).toBe('release')
@@ -50,9 +55,21 @@ describe('release decision', () => {
     expect(decision.plan.nextVersions).toEqual({
       core: '1.15.0',
       otel: '0.1.1',
-      createOmaApp: '0.8.0',
+      createOmaApp: '0.7.1',
     })
     expect(decision.plan.bumps.otel).toBeNull()
+    expect(decision.plan.bumps.createOmaApp).toBe('patch')
+  })
+
+  it('uses the proposed scaffolder bump only when its workspace changed', () => {
+    const decision = buildReleaseDecision({
+      ...evidence,
+      workspaceChanges: { ...evidence.workspaceChanges, createOmaApp: true },
+    }, proposal, review, '2026-08-10')
+    expect(decision.status).toBe('release')
+    if (decision.status !== 'release') throw new Error('expected release')
+    expect(decision.plan.nextVersions.createOmaApp).toBe('0.8.0')
+    expect(decision.plan.bumps.createOmaApp).toBe('minor')
   })
 
   it('keeps reviewer rejection fail-closed', () => {

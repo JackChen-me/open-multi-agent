@@ -9,6 +9,7 @@ import { Agent } from '../src/agent/agent.js'
 import { AgentRunner } from '../src/agent/runner.js'
 import { ToolRegistry } from '../src/tool/framework.js'
 import { ToolExecutor } from '../src/tool/executor.js'
+import { StructuredOutputValidationError } from '../src/errors.js'
 import type { AgentConfig, ContentBlock, LLMAdapter, LLMResponse } from '../src/types.js'
 
 // ---------------------------------------------------------------------------
@@ -276,6 +277,103 @@ describe('Agent structured output (end-to-end)', () => {
     const result = await agent.run('Analyze this review')
 
     expect(result.success).toBe(false)
+    expect(result.structured).toBeUndefined()
+    expect(result.error).toBeInstanceOf(StructuredOutputValidationError)
+    expect(result.errorInfo).toMatchObject({
+      kind: 'validation',
+      retryable: false,
+    })
+  })
+
+  it('does not report structured success after the whole-run deadline fires', async () => {
+    const validJSON = JSON.stringify({
+      summary: 'Late result',
+      sentiment: 'neutral',
+      confidence: 0.5,
+    })
+    const lateAdapter: LLMAdapter = {
+      name: 'mock',
+      async chat(_messages, options) {
+        await new Promise<void>((resolve) => {
+          if (options.abortSignal?.aborted) resolve()
+          else options.abortSignal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return {
+          id: 'late-response',
+          content: [{ type: 'text', text: validJSON }],
+          model: 'mock-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }
+      },
+      async *stream() {
+        /* unused in these tests */
+      },
+    }
+
+    const agent = buildMockAgentWithAdapter(
+      { ...baseConfig, timeoutMs: 5 },
+      lateAdapter,
+    )
+    const result = await agent.run('Analyze this review')
+
+    expect(result.success).toBe(false)
+    expect(result.status?.code).toBe('timeout')
+    expect(result.errorInfo).toMatchObject({ kind: 'timeout', retryable: true })
+    expect(result.structured).toBeUndefined()
+    expect(result.error).toBeInstanceOf(Error)
+  })
+
+  it('does not report structured success when caller cancellation fires during correction', async () => {
+    const controller = new AbortController()
+    let call = 0
+    const adapter: LLMAdapter = {
+      name: 'mock',
+      async chat() {
+        call += 1
+        if (call === 2) controller.abort()
+        return {
+          id: `cancel-${call}`,
+          content: [{
+            type: 'text',
+            text: call === 1
+              ? '{"summary":"invalid"}'
+              : '{"summary":"ok","sentiment":"neutral","confidence":0.5}',
+          }],
+          model: 'mock-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }
+      },
+      async *stream() {
+        /* unused in these tests */
+      },
+    }
+    const agent = buildMockAgentWithAdapter(baseConfig, adapter)
+
+    const result = await agent.run('Analyze', { abortSignal: controller.signal })
+
+    expect(result.success).toBe(false)
+    expect(result.status?.code).toBe('cancelled')
+    expect(result.errorInfo).toMatchObject({ kind: 'cancellation', retryable: false })
+    expect(result.structured).toBeUndefined()
+  })
+
+  it('applies the token budget across both structured-output attempts', async () => {
+    const agent = buildMockAgent(
+      { ...baseConfig, maxTokenBudget: 40 },
+      [
+        '{"summary":"invalid"}',
+        '{"summary":"ok","sentiment":"neutral","confidence":0.5}',
+      ],
+    )
+
+    const result = await agent.run('Analyze')
+
+    expect(result.success).toBe(false)
+    expect(result.status?.code).toBe('budget_exhausted')
+    expect(result.errorInfo).toMatchObject({ kind: 'budget', retryable: false })
+    expect(result.budgetExceeded).toBe(true)
     expect(result.structured).toBeUndefined()
   })
 

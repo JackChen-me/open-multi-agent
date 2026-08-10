@@ -62,7 +62,11 @@ import { createRunIdentity } from '../observability/identity.js'
 import { classifyRunFailure, statusOnly } from '../observability/status.js'
 import { DurableApprovalError } from '../approval/durable.js'
 import { createTraceRuntime } from '../observability/runtime.js'
-import { InvalidMessageError, TokenBudgetExceededError } from '../errors.js'
+import {
+  InvalidMessageError,
+  StructuredOutputValidationError,
+  TokenBudgetExceededError,
+} from '../errors.js'
 import { assertValidMessages } from '../llm/validate.js'
 import type { ToolDefinition as FrameworkToolDefinition, ToolRegistry } from '../tool/framework.js'
 import type { ToolExecutor } from '../tool/executor.js'
@@ -504,26 +508,6 @@ export class Agent {
         return budgetResult
       }
 
-      // --- Structured output validation ---
-      if (this.config.outputSchema) {
-        let validated = await this.validateStructuredOutput(
-          messages,
-          result,
-          backend,
-          runOptions,
-          identity,
-        )
-        // --- afterRun hook ---
-        if (this.config.afterRun) {
-          failureKind = 'callback'
-          validated = await this.config.afterRun(validated)
-          failureKind = undefined
-        }
-        validated = this.ensureAgentOutcome(validated, identity)
-        this.emitAgentTrace(runOptions, agentStartMs, validated)
-        return validated
-      }
-
       let agentResult: AgentRunResult
       if (timeoutSignal?.aborted) {
         const timeoutError = new Error(
@@ -537,6 +521,7 @@ export class Agent {
         agentResult = this.toAgentRunResult(
           result, false, undefined, identity, classified.status, classified.errorInfo,
         )
+        agentResult = { ...agentResult, error: timeoutError }
       } else if (callerAbort?.aborted && result.aborted) {
         const abortError = new Error('Run cancelled by caller.')
         abortError.name = 'AbortError'
@@ -544,6 +529,49 @@ export class Agent {
         agentResult = this.toAgentRunResult(
           result, false, undefined, identity, classified.status, classified.errorInfo,
         )
+        agentResult = { ...agentResult, error: abortError }
+      } else if (this.config.outputSchema) {
+        agentResult = await this.validateStructuredOutput(
+          messages,
+          result,
+          backend,
+          runOptions,
+          identity,
+        )
+
+        // The schema retry uses the same whole-run signal. A backend may
+        // return a late, valid response after that signal fires, so re-check
+        // the deadline before reporting structured success.
+        if (timeoutSignal?.aborted) {
+          const timeoutError = new Error(
+            `Agent "${this.name}" exceeded whole-run timeout of ${this.config.timeoutMs}ms`,
+          )
+          timeoutError.name = 'TimeoutError'
+          const classified = classifyRunFailure(timeoutError, {
+            kind: 'timeout',
+            statusCode: 'timeout',
+          })
+          agentResult = {
+            ...agentResult,
+            success: false,
+            status: classified.status,
+            errorInfo: classified.errorInfo,
+            structured: undefined,
+            error: timeoutError,
+          }
+        } else if (callerAbort?.aborted) {
+          const abortError = new Error('Run cancelled by caller.')
+          abortError.name = 'AbortError'
+          const classified = classifyRunFailure(abortError)
+          agentResult = {
+            ...agentResult,
+            success: false,
+            status: classified.status,
+            errorInfo: classified.errorInfo,
+            structured: undefined,
+            error: abortError,
+          }
+        }
       } else {
         agentResult = this.toAgentRunResult(
           result, true, undefined, identity, statusOnly('ok'),
@@ -698,6 +726,32 @@ export class Agent {
     // which is required by Anthropic's API for subsequent prompt() calls.
     const mergedMessages = [...result.messages, errorFeedbackMessage, ...retryResult.messages]
     const mergedToolCalls = [...result.toolCalls, ...retryResult.toolCalls]
+    const mergedTokens = mergedTokenUsage.input_tokens + mergedTokenUsage.output_tokens
+    const budgetExceeded = retryResult.budgetExceeded
+      || (this.config.maxTokenBudget !== undefined && mergedTokens > this.config.maxTokenBudget)
+
+    if (budgetExceeded) {
+      this.transitionTo('completed')
+      const budgetError = new TokenBudgetExceededError(
+        this.name,
+        mergedTokens,
+        this.config.maxTokenBudget ?? 0,
+      )
+      const classified = classifyRunFailure(budgetError)
+      return {
+        success: false,
+        identity,
+        status: classified.status,
+        errorInfo: classified.errorInfo,
+        output: retryResult.output,
+        messages: mergedMessages,
+        tokenUsage: mergedTokenUsage,
+        toolCalls: mergedToolCalls,
+        structured: undefined,
+        budgetExceeded: true,
+        error: budgetError,
+      }
+    }
 
     try {
       const parsed = extractJSON(retryResult.output)
@@ -712,12 +766,11 @@ export class Agent {
         tokenUsage: mergedTokenUsage,
         toolCalls: mergedToolCalls,
         structured: validated,
-        ...(retryResult.budgetExceeded ? { budgetExceeded: true } : {}),
       }
-    } catch {
+    } catch (cause) {
       // Retry also failed
       this.transitionTo('completed')
-      const validationError = new Error('Structured output validation failed after retry.')
+      const validationError = new StructuredOutputValidationError(cause)
       const classified = classifyRunFailure(validationError, { kind: 'validation' })
       return {
         success: false,
@@ -729,7 +782,7 @@ export class Agent {
         tokenUsage: mergedTokenUsage,
         toolCalls: mergedToolCalls,
         structured: undefined,
-        ...(retryResult.budgetExceeded ? { budgetExceeded: true } : {}),
+        error: validationError,
       }
     }
   }
