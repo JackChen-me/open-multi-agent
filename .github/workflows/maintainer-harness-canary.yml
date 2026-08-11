@@ -90,11 +90,18 @@ jobs:
           cache-dependency-path: canary-repo/package-lock.json
 
       - name: Install Claude Code sandbox runtime dependencies
+        working-directory: canary-repo
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap socat
+          sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
+          sudo install --owner=root --group=root --mode=0644 \
+            packages/maintainer-harness-canary/config/bwrap.apparmor \
+            /etc/apparmor.d/bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/bwrap
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
 
       - name: Install repository dependencies and pinned Claude Code
         working-directory: canary-repo

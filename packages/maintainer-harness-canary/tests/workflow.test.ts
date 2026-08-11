@@ -8,6 +8,7 @@ describe('GitHub-hosted harness canary workflow', () => {
     const cli = await readFile(resolve(process.cwd(), 'src/cli.ts'), 'utf8')
     const validationSandbox = await readFile(resolve(process.cwd(), 'src/validation-sandbox.ts'), 'utf8')
     const boundedProcess = await readFile(resolve(process.cwd(), 'src/bounded-process.ts'), 'utf8')
+    const appArmorProfile = await readFile(resolve(process.cwd(), 'config/bwrap.apparmor'), 'utf8')
     expect(workflow).toContain('workflow_dispatch:')
     expect(workflow).toContain('runs-on: ubuntu-24.04')
     const triggers = workflow.slice(workflow.indexOf('on:'), workflow.indexOf('permissions:'))
@@ -19,7 +20,22 @@ describe('GitHub-hosted harness canary workflow', () => {
     expect(workflow).not.toContain('pull-requests: write')
     expect(workflow).toContain('persist-credentials: false')
     expect(workflow).toContain('@anthropic-ai/claude-code@2.1.220')
-    expect(workflow).toContain('sudo apt-get install --yes --no-install-recommends bubblewrap socat')
+    expect(workflow).toContain('sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat')
+    expect(workflow).toContain("test \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)\" = '1'")
+    expect(workflow.match(/apparmor_restrict_unprivileged_userns/g)).toHaveLength(2)
+    expect(workflow).toContain('sudo apparmor_parser --replace /etc/apparmor.d/bwrap')
+    expect(workflow.indexOf('apparmor_parser --replace')).toBeLessThan(workflow.indexOf('dist/cli.js sandbox-preflight'))
+    expect(workflow).not.toContain('systemctl reload apparmor')
+    expect(workflow).not.toMatch(/sysctl\s+(?:-[\w-]+\s+)*kernel\.apparmor_restrict_unprivileged_userns\s*=/)
+    expect(workflow).not.toContain('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+    expect(appArmorProfile).toBe(`abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+`)
     expect(workflow.indexOf('sandbox-preflight')).toBeLessThan(workflow.indexOf('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}'))
     expect(workflow).toContain('dist/cli.js sandbox-preflight')
     expect(validationSandbox).toContain("export const BUBBLEWRAP_PATH = '/usr/bin/bwrap'")
@@ -45,6 +61,7 @@ describe('GitHub-hosted harness canary workflow', () => {
     expect(workflow).toMatch(/exec 3<<<"\$\{DEEPSEEK_API_KEY:[^\n]+\}"[\s\S]*unset DEEPSEEK_API_KEY[\s\S]*exec env -i[\s\S]*--provider-key-fd 3/)
     expect(cli).toContain('readProviderKeyFromFd')
     expect(cli).toContain('preflightValidationSandbox')
+    expect(cli).toContain('JSON.stringify(error.diagnostic)')
     expect(cli).not.toContain('validationSandboxProcessRunner')
     expect(cli).not.toContain("process.env['DEEPSEEK_API_KEY']")
     expect(workflow).toContain('materialEvidence: comments.map')

@@ -7,7 +7,11 @@ const CONVERGENCE_GRACE_MS = 2_000
 export type BoundedProcessFailureReason = 'OUTPUT_LIMIT' | 'TIMEOUT' | 'SPAWN_ERROR'
 
 export class BoundedProcessError extends Error {
-  constructor(readonly reason: BoundedProcessFailureReason, message: string) {
+  constructor(
+    readonly reason: BoundedProcessFailureReason,
+    message: string,
+    readonly osErrorCode?: string,
+  ) {
     super(message)
     this.name = 'BoundedProcessError'
   }
@@ -104,7 +108,11 @@ export class BoundedProcessRunner implements SandboxProcessRunner {
 
       child.stdout?.on('data', chunk => collect('stdout', chunk))
       child.stderr?.on('data', chunk => collect('stderr', chunk))
-      child.on('error', () => finishError(new BoundedProcessError('SPAWN_ERROR', 'Validation sandbox process could not start.')))
+      child.on('error', error => finishError(new BoundedProcessError(
+        'SPAWN_ERROR',
+        'Validation sandbox process could not start.',
+        safeProcessErrorCode(error),
+      )))
       child.on('close', code => {
         if (settled) return
         if (terminationReason !== undefined) {
@@ -126,6 +134,11 @@ export class BoundedProcessRunner implements SandboxProcessRunner {
       })
     })
   }
+}
+
+function safeProcessErrorCode(error: Error): string {
+  const code = (error as NodeJS.ErrnoException).code
+  return typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'
 }
 
 function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {

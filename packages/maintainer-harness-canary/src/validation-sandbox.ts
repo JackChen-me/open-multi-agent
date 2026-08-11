@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises'
 import {
   type CommandResult,
   type ValidationCommand,
+  redactSensitiveText,
 } from '@open-multi-agent/maintainer-bot'
 import {
   BoundedProcessError,
@@ -28,6 +29,29 @@ export class ValidationSandboxError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'ValidationSandboxError'
+  }
+}
+
+export type ValidationSandboxPreflightReason =
+  | 'BWRAP_EXIT_NONZERO'
+  | 'BWRAP_OUTPUT_LIMIT'
+  | 'BWRAP_TIMEOUT'
+  | 'BWRAP_SPAWN_ERROR'
+  | 'BWRAP_INVOCATION_ERROR'
+
+export interface ValidationSandboxPreflightDiagnostic {
+  readonly status: 'SANDBOX_UNAVAILABLE'
+  readonly reasonCode: ValidationSandboxPreflightReason
+  readonly exitCode: number | null
+  readonly osErrorCode: string | null
+  readonly stdout: string
+  readonly stderr: string
+}
+
+export class ValidationSandboxPreflightError extends Error {
+  constructor(readonly diagnostic: ValidationSandboxPreflightDiagnostic) {
+    super('Bubblewrap validation sandbox preflight failed.')
+    this.name = 'ValidationSandboxPreflightError'
   }
 }
 
@@ -140,13 +164,68 @@ export async function preflightValidationSandbox(options: {
     env: {},
     unsetEnv: [],
   }
-  const result = await runValidationInSandbox({
-    repoRoot: options.repoRoot,
-    command,
-    maxOutputBytes: 10_000,
-    runner: options.runner,
-  })
-  if (result.exitCode !== 0) throw new ValidationSandboxError('Bubblewrap validation sandbox preflight failed.')
+  let result: CommandResult
+  try {
+    result = await runValidationInSandbox({
+      repoRoot: options.repoRoot,
+      command,
+      maxOutputBytes: 10_000,
+      runner: options.runner,
+    })
+  } catch (error) {
+    if (error instanceof BoundedProcessError) {
+      throw new ValidationSandboxPreflightError({
+        status: 'SANDBOX_UNAVAILABLE',
+        reasonCode: error.reason === 'OUTPUT_LIMIT'
+          ? 'BWRAP_OUTPUT_LIMIT'
+          : error.reason === 'TIMEOUT'
+            ? 'BWRAP_TIMEOUT'
+            : 'BWRAP_SPAWN_ERROR',
+        exitCode: null,
+        osErrorCode: error.osErrorCode ?? null,
+        stdout: '<empty>',
+        stderr: '<empty>',
+      })
+    }
+    throw new ValidationSandboxPreflightError({
+      status: 'SANDBOX_UNAVAILABLE',
+      reasonCode: 'BWRAP_INVOCATION_ERROR',
+      exitCode: null,
+      osErrorCode: null,
+      stdout: '<empty>',
+      stderr: '<empty>',
+    })
+  }
+  if (result.exitCode !== 0) {
+    throw new ValidationSandboxPreflightError({
+      status: 'SANDBOX_UNAVAILABLE',
+      reasonCode: 'BWRAP_EXIT_NONZERO',
+      exitCode: result.exitCode,
+      osErrorCode: null,
+      stdout: sanitizePreflightEvidence(result.stdout, options.repoRoot),
+      stderr: sanitizePreflightEvidence(result.stderr, options.repoRoot),
+    })
+  }
+}
+
+function sanitizePreflightEvidence(value: string, repoRoot: string): string {
+  const redacted = redactSensitiveText(value)
+    .split(repoRoot).join('<repo>')
+    .replace(/\/(?:Users|home|private\/tmp|tmp)\/[^\s:'"`]+/g, '<path>')
+    .replace(/(^|[\s(])\/[^\s:'"`)]*/g, '$1<path>')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+  if (redacted.length === 0) return '<empty>'
+  if (Buffer.byteLength(redacted) <= 2_000) return redacted
+  let bounded = ''
+  let bytes = 0
+  for (const character of redacted) {
+    const characterBytes = Buffer.byteLength(character)
+    if (bytes + characterBytes > 2_000) break
+    bounded += character
+    bytes += characterBytes
+  }
+  return `${bounded}<truncated>`
 }
 
 function assertPolicyEnvironment(command: ValidationCommand): void {

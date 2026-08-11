@@ -18,6 +18,7 @@ import {
   canaryArtifactSchema,
   computeCanarySnapshotRevision,
   prepareCanaryRequest,
+  preflightValidationSandbox,
   readProviderKeyFromFd,
   runHarnessCanary,
   verifyArtifactHash,
@@ -26,6 +27,7 @@ import {
   type FailedCanaryArtifact,
   type RawIssueSnapshot,
   type SandboxProcessRunner,
+  ValidationSandboxPreflightError,
 } from '../src/index.js'
 
 const exec = promisify(execFile)
@@ -320,6 +322,16 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(Date.now() - startedAt).toBeLessThan(4_000)
   }, 10_000)
 
+  it('reports a stable OS error code when Bubblewrap cannot be spawned', async () => {
+    const runner = new BoundedProcessRunner()
+    await expect(runner.run('/definitely-not-an-oma-command', [], {
+      cwd: process.cwd(),
+      env: {},
+      timeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+    })).rejects.toMatchObject({ reason: 'SPAWN_ERROR', osErrorCode: 'ENOENT' })
+  })
+
   it('constructs a PID/proc/network-isolated read-only Bubblewrap invocation with a cleared environment', async () => {
     const fixture = await repoFixture('success')
     const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
@@ -358,6 +370,39 @@ describe('fail-closed deterministic validation sandbox', () => {
     })).rejects.toThrow('VALIDATION_SANDBOX_UNAVAILABLE')
     const artifact = await expectFailedArtifact(fixture, 'VALIDATION_SANDBOX_UNAVAILABLE')
     expect(artifact.validationResults).toEqual([])
+  })
+
+  it('emits bounded, redacted, machine-readable preflight evidence for the hosted failure path', async () => {
+    const fixture = await repoFixture('success')
+    const runner: SandboxProcessRunner = {
+      async run() {
+        return {
+          stdout: `checkout=${fixture.root}\n`,
+          stderr: `bwrap: setting up uid map: Permission denied\ntoken=unsafe-value\n/home/runner/private\n${'界'.repeat(1_000)}`,
+          exitCode: 1,
+        }
+      },
+    }
+    const error = await preflightValidationSandbox({ repoRoot: fixture.root, runner })
+      .catch(value => value as unknown)
+    expect(error).toBeInstanceOf(ValidationSandboxPreflightError)
+    expect(error).toMatchObject({
+      diagnostic: {
+        status: 'SANDBOX_UNAVAILABLE',
+        reasonCode: 'BWRAP_EXIT_NONZERO',
+        exitCode: 1,
+        osErrorCode: null,
+        stdout: 'checkout=<repo>',
+      },
+    })
+    const diagnostic = (error as ValidationSandboxPreflightError).diagnostic
+    expect(diagnostic.stderr).toContain('Permission denied')
+    expect(diagnostic.stderr).toContain('[REDACTED]')
+    expect(diagnostic.stderr).not.toContain('unsafe-value')
+    expect(diagnostic.stderr).not.toContain('/home/runner')
+    expect(diagnostic.stderr.endsWith('<truncated>')).toBe(true)
+    expect(Buffer.byteLength(diagnostic.stderr)).toBeLessThanOrEqual(2_013)
+    expect(JSON.parse(JSON.stringify(diagnostic))).toEqual(diagnostic)
   })
 
   it('fails closed when Bubblewrap starts but its sandbox setup exits nonzero', async () => {

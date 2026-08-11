@@ -4,7 +4,10 @@ import { resolve } from 'node:path'
 import { prepareCanaryRequestFile, loadCanaryPolicy } from './request.js'
 import { runHarnessCanary } from './runner.js'
 import { readProviderKeyFromFd } from './provider-key.js'
-import { preflightValidationSandbox } from './validation-sandbox.js'
+import {
+  preflightValidationSandbox,
+  ValidationSandboxPreflightError,
+} from './validation-sandbox.js'
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2)
@@ -64,6 +67,9 @@ function parseArgs(args: readonly string[], required: readonly string[]): Record
 }
 
 main().catch(error => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  const evidence = error instanceof ValidationSandboxPreflightError
+    ? JSON.stringify(error.diagnostic)
+    : error instanceof Error ? error.message : String(error)
+  process.stderr.write(`${evidence}\n`)
   process.exitCode = 1
 })
