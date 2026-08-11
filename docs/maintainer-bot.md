@@ -107,9 +107,13 @@ and [GitHub App installation authentication](https://docs.github.com/en/apps/cre
    `afterHash` still equals the content reviewed after validation.
 
 All model outputs use Zod schemas. A single OMA structured-output correction is
-still available inside a role; task retries are disabled. Cumulative token,
-configured price-based cost, wall-clock, edit-size, diff-size, context-size,
-and repair-loop limits fail closed.
+still available inside a role; task retries are disabled. The 160k production
+token ceiling is split into explicit phase caps: triage receives at most 15%
+(24k), planning plus implementation 52% (82k), and each fresh review or repair
+18% (28k). A repair additionally reserves 12% for the required next fresh
+review. Each provider request reserves that role's configured maximum output
+before it is sent. Cumulative token, configured price-based cost, wall-clock,
+edit-size, diff-size, context-size, and repair-loop limits fail closed.
 
 ## Admission and state
 
@@ -213,6 +217,25 @@ selected merely because the target belongs to that workspace; selection is
 limited to required metadata, relative-import dependencies, and content with
 specific path/import/keyword relevance.
 
+`context.maxBytes` is the deterministic host evidence-store capture ceiling,
+not a prompt allowance. The complete manifest remains persisted and auditable,
+with source hashes, trust markers, issue revision, fixed base SHA, allowed and
+protected paths, approved edit scopes, validation registry, and manifest hash.
+No role receives the serialized manifest. Triage receives only a compact
+admission view containing policy, Issue/acceptance evidence, authorization,
+revision/base, scope, sufficiency, and risk metadata; repository source content
+is deliberately absent.
+
+Planner and implementer access the already-captured manifest through immutable
+selective retrieval. `list_context_sources` pages source ID, locator, kind,
+trust, hash, size, and truncation metadata without content. `search_context`
+performs deterministic in-memory search over captured content and returns only
+bounded snippets with source hashes and offsets. `read_context_source` reads a
+source by ID with offset/limit paging. These tools never inspect the live
+filesystem or network, every result carries the same `manifestHash`, one page
+is capped at 12k model-visible characters, search at 16k, listings at 24k, and
+the per-role cumulative selective-read output is capped at 72k.
+
 System policy is highest priority. Repository policies are identified
 separately. Issue text, comments, commit messages, ordinary repository files,
 diffs, and external material are all untrusted evidence, never instructions.
@@ -230,14 +253,37 @@ directory target authorizes paths below that directory.
 
 ## Tool, credential, and validation boundary
 
-Triage, planner, and reviewer roles receive only immutable read-only evidence
-tools and must read their assigned evidence at least once. Repeated reads remain
-read-only but consume budget. Triage uncertainty and manual-risk arrays contain
-only unresolved blockers; a safe case uses empty arrays rather than reassuring
-text. The implementer also receives no write tool: it returns bounded
+Triage, planner, implementer, reviewer, and repair roles receive only immutable
+read-only evidence tools and must call the tools appropriate to their role.
+Triage must read compact admission evidence. Planner and implementer must list
+captured sources and then search or page required content. Fresh review starts
+from a bounded summary and pages or searches immutable diff/current-file/
+validation/context sources; repair must page the exact current-file source used
+for compare-and-swap. Repeated reads remain read-only but consume both the
+model-output and token budgets. Triage uncertainty and manual-risk arrays
+contain only unresolved blockers; a safe case uses empty arrays rather than
+reassuring text. The implementer also receives no write tool: it returns bounded
 full-content edits with expected hashes, and deterministic host code applies
 them. Every role explicitly denies built-in `bash`, file-write/edit,
 delegation, and search tools. OMA `bash` is not treated as a sandbox.
+
+All evidence tools construct their explicit model representation under a
+deterministic character cap; large application-owned evidence is never used as
+the model representation. Review summaries are capped at 48k characters and
+review evidence uses the same 24k/16k/12k listing, search, and page limits plus
+the 72k cumulative cap. Fresh-context isolation, absence of implementer
+reasoning, validation evidence, manifest/diff hashes, and current-file CAS
+hashes remain unchanged.
+
+Immediately before `provider.chat()` or `provider.stream()`, the engine
+serializes the exact provider-agnostic messages, system prompt, tool schemas,
+model options, and output allowance. It conservatively estimates input at one
+token per three UTF-16 characters, adds the role's maximum output reserve and
+already reported usage, and rejects with `TOKEN_BUDGET_EXCEEDED` before the
+provider call if the phase remainder cannot cover the request. Provider-reported
+actual usage remains the authoritative post-call accounting; preflight is an
+additional fail-closed guard, not a replacement tokenizer or a reason to raise
+the 160k total.
 
 The model process refuses to start when known GitHub/npm write credentials,
 including credential names with host-specific prefixes, are present. Launch

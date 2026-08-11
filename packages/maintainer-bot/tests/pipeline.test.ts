@@ -13,6 +13,7 @@ import type {
 import { computeIssueRevision } from '../src/admission.js'
 import { sha256 } from '../src/hash.js'
 import { runMaintainerBot } from '../src/pipeline.js'
+import { serializeModelRequest } from '../src/model-budget.js'
 import { controlPlaneRequestSchema } from '../src/schema.js'
 import { FileRunStateStore } from '../src/state.js'
 import { authorizedRequest, BASE_SHA, ScriptedCommandRunner, testConfig } from './helpers.js'
@@ -270,14 +271,14 @@ describe('maintainer-bot vertical pipeline', () => {
     expect(secondAdapter.roles).toEqual([])
   })
 
-  it('repairs with the currentHash read from the fresh review bundle', async () => {
+  it('measures a full triage-to-repair-to-fresh-review flow within the 160k production budget', async () => {
     const repoRoot = await fixtureRepo()
     const adapter = new ToolReadingRepairAdapter()
     const result = await runMaintainerBot({
       repoRoot,
       artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
       request: authorizedRequest(),
-      config: testConfig(),
+      config: testConfig({ limits: { ...testConfig().limits, maxTokenBudget: 160_000 } }),
       runner: repositoryRunner(repoRoot),
       stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
       runId: 'run-repair-current-hash',
@@ -286,6 +287,9 @@ describe('maintainer-bot vertical pipeline', () => {
     })
     expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
     expect(adapter.repairExpectedHash).toBe(sha256(FIXED))
+    expect(result.tokenUsage.input_tokens + result.tokenUsage.output_tokens).toBeLessThan(160_000)
+    expect(adapter.serializedRequestChars.length).toBeGreaterThanOrEqual(10)
+    expect(adapter.serializedRequestChars.every(size => size > 0)).toBe(true)
     expect(await readFile(join(repoRoot, 'packages/demo/src/greeting.ts'), 'utf8'))
       .toBe(`// reviewer-requested repair\n${FIXED}`)
   })
@@ -374,22 +378,26 @@ function roleFor(prompt: string): string {
 class ToolReadingRepairAdapter implements LLMAdapter {
   readonly name = 'tool-reading-repair-adapter'
   repairExpectedHash: string | undefined
+  readonly serializedRequestChars: number[] = []
   private sequence = 0
   private reviewRound = 0
 
   async chat(messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
     const role = roleFor(options.systemPrompt ?? '')
     this.sequence += 1
-    const toolName = role === 'reviewer' || role === 'repair'
-      ? 'read_final_review_bundle'
-      : 'read_context_manifest'
-    if (!JSON.stringify(messages).includes('tool_result')) {
+    const requestChars = serializeModelRequest(messages, options).length
+    this.serializedRequestChars.push(requestChars)
+    const toolResultCount = JSON.stringify(messages).match(/tool_result/g)?.length ?? 0
+    const toolPlan = pipelineEvidencePlan(role)
+    if (toolResultCount < toolPlan.length) {
+      const toolName = toolPlan[toolResultCount]!
+      const input = toolInput(role, toolName)
       return {
         id: `tool-${this.sequence}`,
-        content: [{ type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input: {} }],
+        content: [{ type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input }],
         model: options.model,
         stop_reason: 'tool_use',
-        usage: { input_tokens: 2, output_tokens: 1 },
+        usage: { input_tokens: Math.ceil(requestChars / 4), output_tokens: 12 },
       }
     }
 
@@ -418,16 +426,13 @@ class ToolReadingRepairAdapter implements LLMAdapter {
         }],
       }
     } else if (role === 'repair') {
-      const snapshot = findReviewBundle(messages).currentFiles.find(
-        file => file.path === 'packages/demo/src/greeting.ts',
-      )
-      if (snapshot === undefined) throw new Error('repair adapter did not receive current file snapshot')
-      this.repairExpectedHash = snapshot.contentHash
+      const snapshot = findReviewSourcePage(messages, 'review:file:packages/demo/src/greeting.ts')
+      this.repairExpectedHash = snapshot.source.contentHash
       output = {
         summary: 'Apply the bounded reviewer-requested repair.', risks: [], assumptions: [],
         edits: [{
-          path: snapshot.path,
-          expectedHash: snapshot.contentHash,
+          path: snapshot.source.locator,
+          expectedHash: snapshot.source.contentHash,
           content: `// reviewer-requested repair\n${snapshot.content}`,
           reason: 'Address the concrete fresh-review issue.',
         }],
@@ -451,12 +456,13 @@ class ToolReadingRepairAdapter implements LLMAdapter {
             rationale: ['The repaired diff is bounded and fully validated.'],
           }
     }
+    const text = JSON.stringify(output)
     return {
       id: `final-${this.sequence}`,
-      content: [{ type: 'text', text: JSON.stringify(output) }],
+      content: [{ type: 'text', text }],
       model: options.model,
       stop_reason: 'end_turn',
-      usage: { input_tokens: 4, output_tokens: 2 },
+      usage: { input_tokens: Math.ceil(requestChars / 4), output_tokens: Math.ceil(text.length / 4) },
     }
   }
 
@@ -465,12 +471,42 @@ class ToolReadingRepairAdapter implements LLMAdapter {
   }
 }
 
-function findReviewBundle(messages: LLMMessage[]): {
-  currentFiles: Array<{ path: string; contentHash: string; content: string }>
+function pipelineEvidencePlan(role: string): string[] {
+  if (role === 'triage') return ['read_admission_evidence']
+  if (role === 'planner' || role === 'implementer') return ['list_context_sources', 'read_context_source']
+  return ['read_final_review_summary', 'read_review_source']
+}
+
+function toolInput(role: string, toolName: string): Record<string, unknown> {
+  if (toolName === 'list_context_sources') return { offset: 0, limit: 30 }
+  if (toolName === 'read_context_source') {
+    return { sourceId: 'file:packages/demo/src/greeting.ts', offset: 0, limit: 8_000 }
+  }
+  if (toolName === 'read_review_source') {
+    return {
+      sourceId: role === 'repair' ? 'review:file:packages/demo/src/greeting.ts' : 'review:diff',
+      offset: 0,
+      limit: 8_000,
+    }
+  }
+  return {}
+}
+
+function findReviewSourcePage(messages: LLMMessage[], sourceId: string): {
+  source: { id: string; locator: string; contentHash: string }
+  content: string
 } {
-  const found = findObject(messages, value => Array.isArray(value['currentFiles']))
-  if (found === undefined) throw new Error('review bundle was not present in tool result messages')
-  return found as { currentFiles: Array<{ path: string; contentHash: string; content: string }> }
+  const found = findObject(messages, value => {
+    const source = value['source']
+    return source !== null && typeof source === 'object'
+      && (source as Record<string, unknown>)['id'] === sourceId
+      && typeof value['content'] === 'string'
+  })
+  if (found === undefined) throw new Error(`review source page ${sourceId} was not present in tool results`)
+  return found as {
+    source: { id: string; locator: string; contentHash: string }
+    content: string
+  }
 }
 
 function findObject(

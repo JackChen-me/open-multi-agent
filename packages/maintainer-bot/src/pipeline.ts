@@ -197,7 +197,7 @@ export async function runMaintainerBot(
       adapter: input.adapter,
       apiKey: input.apiKey,
       abortSignal,
-      maxTokenBudget: remainingTokens(config, usage),
+      maxTokenBudget: phaseTokenBudget(config, usage, 'triage'),
       requireEvidenceToolCalls: input.requireEvidenceToolCalls,
       onProgress: input.onProgress,
     })
@@ -212,7 +212,7 @@ export async function runMaintainerBot(
       adapter: input.adapter,
       apiKey: input.apiKey,
       abortSignal,
-      maxTokenBudget: remainingTokens(config, usage),
+      maxTokenBudget: phaseTokenBudget(config, usage, 'planning-implementation'),
       requireEvidenceToolCalls: input.requireEvidenceToolCalls,
       onProgress: input.onProgress,
     })
@@ -254,7 +254,7 @@ export async function runMaintainerBot(
       adapter: input.adapter,
       apiKey: input.apiKey,
       abortSignal,
-      maxTokenBudget: remainingTokens(config, usage),
+      maxTokenBudget: phaseTokenBudget(config, usage, 'review'),
       requireEvidenceToolCalls: input.requireEvidenceToolCalls,
       onProgress: input.onProgress,
     })
@@ -273,7 +273,7 @@ export async function runMaintainerBot(
         adapter: input.adapter,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: remainingTokens(config, usage),
+        maxTokenBudget: phaseTokenBudget(config, usage, 'repair'),
         requireEvidenceToolCalls: input.requireEvidenceToolCalls,
         onProgress: input.onProgress,
       })
@@ -313,7 +313,7 @@ export async function runMaintainerBot(
         adapter: input.adapter,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: remainingTokens(config, usage),
+        maxTokenBudget: phaseTokenBudget(config, usage, 'review'),
         requireEvidenceToolCalls: input.requireEvidenceToolCalls,
         onProgress: input.onProgress,
       })
@@ -519,6 +519,29 @@ function remainingTokens(config: MaintainerConfig, usage: TokenUsage): number {
   const remaining = config.limits.maxTokenBudget - used
   if (remaining <= 0) throw new NeedsHumanError('Maintainer-bot token budget exhausted.')
   return remaining
+}
+
+function phaseTokenBudget(
+  config: MaintainerConfig,
+  usage: TokenUsage,
+  phase: 'triage' | 'planning-implementation' | 'review' | 'repair',
+): number {
+  const total = config.limits.maxTokenBudget
+  const phaseCaps = {
+    triage: Math.min(24_000, Math.max(1, Math.floor(total * 0.15))),
+    'planning-implementation': Math.min(82_000, Math.max(1, Math.floor(total * 0.52))),
+    review: Math.min(28_000, Math.max(1, Math.floor(total * 0.18))),
+    repair: Math.min(28_000, Math.max(1, Math.floor(total * 0.18))),
+  } as const
+  const remaining = remainingTokens(config, usage)
+  if (phase === 'repair') {
+    const nextReviewReserve = Math.min(phaseCaps.review, Math.max(1, Math.floor(total * 0.12)))
+    if (remaining <= nextReviewReserve) {
+      throw new NeedsHumanError('Maintainer-bot lacks the reserved token budget for a repair plus fresh review.')
+    }
+    return Math.min(phaseCaps.repair, remaining - nextReviewReserve)
+  }
+  return Math.min(phaseCaps[phase], remaining)
 }
 
 function assertBudgets(config: MaintainerConfig, usage: TokenUsage, deadline: AbortSignal): number {

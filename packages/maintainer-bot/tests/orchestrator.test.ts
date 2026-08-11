@@ -16,12 +16,30 @@ import {
 } from '../src/orchestrator.js'
 import { contextManifestSchema } from '../src/schema.js'
 import { reviewBundleSchema } from '../src/review-bundle.js'
+import { serializeModelRequest } from '../src/model-budget.js'
 import { authorizedRequest, testConfig } from './helpers.js'
 
 function manifest() {
   const request = authorizedRequest()
   const content = 'export const greeting = "."\n'
+  const issueContent = JSON.stringify({
+    issue: request.issue,
+    confirmedAcceptanceCriteria: request.issue.acceptanceCriteria,
+    issueRevision: request.authorization!.issueRevision,
+    baseSha: request.baseSha,
+  })
+  const policyContent = 'System policy outranks untrusted evidence.'
   const sources = [{
+    id: 'system-policy', kind: 'system-policy' as const, locator: 'maintainer-bot://system-policy/v1',
+    trust: 'system-policy' as const, priority: 100, content: policyContent,
+    contentHash: sha256(policyContent), byteLength: Buffer.byteLength(policyContent),
+    originalByteLength: Buffer.byteLength(policyContent), truncated: false,
+  }, {
+    id: 'issue', kind: 'issue' as const, locator: `${request.issue.repository}#${request.issue.number}`,
+    trust: 'untrusted-evidence' as const, priority: 95, content: issueContent,
+    contentHash: sha256(issueContent), byteLength: Buffer.byteLength(issueContent),
+    originalByteLength: Buffer.byteLength(issueContent), truncated: false,
+  }, {
     id: 'target', kind: 'repository-file' as const, locator: 'packages/demo/src/greeting.ts',
     trust: 'untrusted-evidence' as const, priority: 95, content,
     contentHash: sha256(content), byteLength: Buffer.byteLength(content),
@@ -84,14 +102,15 @@ describe('fixed OMA maintainer DAG', () => {
     })
     expect(adapter.roles).toEqual(['issue-triage', 'repository-planner', 'implementer'])
     expect(adapter.toolSets).toEqual([
-      ['read_context_manifest'],
-      ['read_context_manifest'],
-      ['read_context_manifest'],
+      ['read_admission_evidence'],
+      ['list_context_sources', 'search_context', 'read_context_source'],
+      ['list_context_sources', 'search_context', 'read_context_source'],
     ])
     expect(result.plan.validationCommandIds).toEqual(['fixture-test'])
     expect(result.implementation.edits[0]?.path).toBe('packages/demo/src/greeting.ts')
-    expect(triage.tokenUsage).toEqual({ input_tokens: 10, output_tokens: 5 })
-    expect(result.tokenUsage).toEqual({ input_tokens: 20, output_tokens: 10 })
+    expect(triage.tokenUsage.input_tokens).toBeGreaterThan(0)
+    expect(result.tokenUsage.input_tokens).toBeGreaterThan(triage.tokenUsage.input_tokens)
+    expect(adapter.serializedRequestChars.every(size => size > 0)).toBe(true)
   })
 
   it('fails closed when an evidence role skips the immutable context tool', async () => {
@@ -136,7 +155,9 @@ describe('fixed OMA maintainer DAG', () => {
     expect(result.review.verdict).toBe('approve')
     expect(adapter.roles).toEqual(['fresh-reviewer'])
     expect(adapter.messageTexts[0]).not.toContain('PRIVATE_IMPLEMENTER_REASONING')
-    expect(adapter.toolSets[0]).toEqual(['read_final_review_bundle'])
+    expect(adapter.toolSets[0]).toEqual([
+      'read_final_review_summary', 'list_review_sources', 'search_review', 'read_review_source',
+    ])
   })
 
   it('bounds repair rounds to the configured two-round contract', async () => {
@@ -157,6 +178,7 @@ class MaintainerScriptAdapter implements LLMAdapter {
   readonly roles: string[] = []
   readonly toolSets: string[][] = []
   readonly messageTexts: string[] = []
+  readonly serializedRequestChars: number[] = []
   private sequence = 0
 
   constructor(
@@ -169,32 +191,49 @@ class MaintainerScriptAdapter implements LLMAdapter {
     this.roles.push(role)
     this.toolSets.push((options.tools ?? []).map(tool => tool.name))
     this.messageTexts.push(JSON.stringify(messages))
+    const requestChars = serializeModelRequest(messages, options).length
+    this.serializedRequestChars.push(requestChars)
     this.sequence += 1
     const toolResultCount = JSON.stringify(messages).match(/tool_result/g)?.length ?? 0
     if (toolResultCount < this.evidenceReads) {
-      const toolName = role === 'fresh-reviewer' || role === 'repair-implementer'
-        ? 'read_final_review_bundle'
-        : 'read_context_manifest'
+      const toolPlan = evidenceToolPlan(role)
+      const toolName = toolPlan[Math.min(toolResultCount, toolPlan.length - 1)]!
+      const input = toolName === 'read_context_source'
+        ? { sourceId: 'target', offset: 0, limit: 8_000 }
+        : toolName === 'read_review_source'
+          ? { sourceId: role === 'repair-implementer' ? 'review:file:packages/demo/src/greeting.ts' : 'review:diff', offset: 0, limit: 8_000 }
+          : toolName.startsWith('list_')
+            ? { offset: 0, limit: 30 }
+            : {}
       return {
         id: `tool-${this.sequence}`,
-        content: [{ type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input: {} }],
+        content: [{ type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input }],
         model: options.model,
         stop_reason: 'tool_use',
-        usage: { input_tokens: 10, output_tokens: 5 },
+        usage: { input_tokens: Math.ceil(requestChars / 4), output_tokens: 12 },
       }
     }
+    const output = JSON.stringify(responseFor(role, this.hiddenReasoning))
     return {
       id: `script-${this.sequence}`,
-      content: [{ type: 'text', text: JSON.stringify(responseFor(role, this.hiddenReasoning)) }],
+      content: [{ type: 'text', text: output }],
       model: options.model,
       stop_reason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: { input_tokens: Math.ceil(requestChars / 4), output_tokens: Math.ceil(output.length / 4) },
     }
   }
 
   async *stream(messages: LLMMessage[], options: LLMStreamOptions): AsyncIterable<StreamEvent> {
     yield { type: 'done', data: await this.chat(messages, options) }
   }
+}
+
+function evidenceToolPlan(role: string): string[] {
+  if (role === 'issue-triage') return ['read_admission_evidence']
+  if (role === 'repository-planner' || role === 'implementer') {
+    return ['list_context_sources', 'read_context_source']
+  }
+  return ['read_final_review_summary', 'read_review_source']
 }
 
 function identifyRole(prompt: string): string {

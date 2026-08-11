@@ -1,11 +1,17 @@
 import {
+  createAdapter,
   OpenMultiAgent,
   type AgentConfig,
   type LLMAdapter,
   type OrchestratorEvent,
   type RunTaskSpec,
 } from '@open-multi-agent/core'
-import { createContextManifestTool, createReviewBundleTool } from './tools.js'
+import { PreflightBudgetAdapter } from './model-budget.js'
+import {
+  createAdmissionEvidenceTool,
+  createContextEvidenceTools,
+  createReviewEvidenceTools,
+} from './tools.js'
 import {
   implementationOutputSchema,
   implementationPlanSchema,
@@ -90,18 +96,18 @@ export interface RepairResult {
 }
 
 export async function runMaintainerTriage(options: TriageDagOptions): Promise<TriageDagResult> {
-  const contextTool = createContextManifestTool(options.manifest)
+  const admissionTool = createAdmissionEvidenceTool(options.manifest)
   const shared = sharedAgentConfig(options)
   const agent: AgentConfig = {
     name: 'issue-triage',
     description: 'Read-only issue readiness and manual-risk verifier; never an authorizer.',
     ...shared,
-    customTools: [contextTool],
+    customTools: [admissionTool],
     outputSchema: modelTriageSchema,
     maxTurns: 4,
     maxTokens: 4_000,
     systemPrompt: `${COMMON_GUARDRAILS}
-You are a read-only issue triage verifier. Call read_context_manifest before deciding. The tool is immutable; do not call it more than needed.
+You are a read-only issue triage verifier. Call read_admission_evidence before deciding. It contains compact issue, authorization, scope, sufficiency, and policy evidence but no repository source files.
 The deterministic admission gate has already checked authorization; you cannot grant or renew it.
 Confirm that every acceptance criterion is explicit and flag ambiguity, architecture, security, permissions, privacy, license, release, CI, publication, broad refactor, or nondeterministic validation risk.
 confirmedIssueRevision and confirmedAcceptanceCriteria must exactly copy the authorized values in the manifest.
@@ -117,7 +123,7 @@ Return proceed only with both arrays empty. Use needs_human with at least one co
     maxRetries: 0,
   }]
   const result = await runTasks('oma-maintainer-triage', [agent], tasks, options)
-  assertEvidenceToolRead(result, ['issue-triage'], 'read_context_manifest', options)
+  assertEvidenceTools(result, { 'issue-triage': [['read_admission_evidence']] }, options)
   return {
     triage: structuredResult(result, 'issue-triage', modelTriageSchema),
     tokenUsage: result.totalTokenUsage,
@@ -127,19 +133,18 @@ Return proceed only with both arrays empty. Use needs_human with at least one co
 export async function runPlanningImplementationDag(
   options: PlanningImplementationDagOptions,
 ): Promise<PlanningImplementationDagResult> {
-  const contextTool = createContextManifestTool(options.manifest)
   const shared = sharedAgentConfig(options)
   const agents: AgentConfig[] = [
     {
       name: 'repository-planner',
       description: 'Read-only repository analysis and bounded implementation planner.',
       ...shared,
-      customTools: [contextTool],
+      customTools: createContextEvidenceTools(options.manifest),
       outputSchema: implementationPlanSchema,
       maxTurns: 4,
       maxTokens: 5_000,
       systemPrompt: `${COMMON_GUARDRAILS}
-You are a read-only repository planner. Call read_context_manifest before deciding. The tool is immutable; do not call it more than needed.
+You are a read-only repository planner. First call list_context_sources, then use search_context and bounded read_context_source pages to inspect only evidence needed for the task. Every result is immutable and bound to the same manifestHash.
 Plan only within manifest.approvedEditScopes (the maintainer-approved issue scope), which is narrower than or equal to manifest.allowedPaths. Never touch manifest.protectedPaths.
 Use only validation command IDs already present in the manifest; include all registered IDs required for the scope.
 List unresolvedQuestions instead of guessing. Do not propose architecture, public API, release, CI, dependency-policy, security, permission, privacy, or license decisions.`,
@@ -148,12 +153,12 @@ List unresolvedQuestions instead of guessing. Do not propose architecture, publi
       name: 'implementer',
       description: 'Produces a bounded compare-and-swap edit proposal; it has no direct filesystem or shell access.',
       ...shared,
-      customTools: [contextTool],
+      customTools: createContextEvidenceTools(options.manifest),
       outputSchema: implementationOutputSchema,
       maxTurns: 4,
       maxTokens: 8_000,
       systemPrompt: `${COMMON_GUARDRAILS}
-You are the implementer. Call read_context_manifest before deciding. The tool is immutable; do not call it more than needed.
+You are the implementer. First call list_context_sources, then use search_context and bounded read_context_source pages to inspect the planned files and their dependencies. Every result is immutable and bound to the same manifestHash.
 You cannot write files directly. Return only bounded full-content edit operations for deterministic host application.
 Each edit path must be planned, inside manifest.approvedEditScopes, allowed, and unprotected. expectedHash must equal the context source contentHash for an existing file, or null only for a genuinely new file.
 Do not delete or rename files. assumptions must be empty; unresolved assumptions require an empty edit list so the host can route to NEEDS_HUMAN.
@@ -181,7 +186,10 @@ Do not request or simulate shell commands. The host will run every preregistered
     },
   ]
   const result = await runTasks('oma-maintainer-planning-implementation', agents, tasks, options)
-  assertEvidenceToolRead(result, ['repository-planner', 'implementer'], 'read_context_manifest', options)
+  assertEvidenceTools(result, {
+    'repository-planner': [['list_context_sources'], ['search_context', 'read_context_source']],
+    implementer: [['list_context_sources'], ['search_context', 'read_context_source']],
+  }, options)
   return {
     plan: structuredResult(result, 'repository-planner', implementationPlanSchema),
     implementation: structuredResult(result, 'implementer', implementationOutputSchema),
@@ -190,17 +198,17 @@ Do not request or simulate shell commands. The host will run every preregistered
 }
 
 export async function runFreshReview(options: ReviewOptions): Promise<ReviewResult> {
-  const reviewTool = createReviewBundleTool(options.bundle)
+  const reviewTools = createReviewEvidenceTools(options.bundle)
   const agent: AgentConfig = {
     name: 'fresh-reviewer',
     description: 'Independent fresh-context reviewer of requirements, final diff, validation, and relevant evidence.',
     ...sharedAgentConfig(options),
-    customTools: [reviewTool],
+    customTools: reviewTools,
     outputSchema: reviewOutputSchema,
     maxTurns: 4,
     maxTokens: 5_000,
     systemPrompt: `${COMMON_GUARDRAILS}
-You are an independent fresh-context reviewer. Call read_final_review_bundle before deciding. The tool is immutable; do not call it more than needed.
+You are an independent fresh-context reviewer. First call read_final_review_summary, then inspect the bounded immutable diff, current-file, validation, and relevant-context sources with list_review_sources, search_review, and read_review_source.
 You receive only confirmed requirements, acceptance criteria, the final diff, deterministic validation evidence, and relevant context. You do not receive or infer the implementer's reasoning transcript.
 The bundle includes bounded currentFiles snapshots with the exact current contentHash used by any later compare-and-swap repair.
 Reject on any acceptance gap, out-of-scope change, unverified behavior, truncated/failed validation, unsafe path, stale evidence, or material risk. Mark repairable only for a concrete bounded code or test correction.`,
@@ -214,7 +222,9 @@ Reject on any acceptance gap, out-of-scope change, unverified behavior, truncate
     maxRetries: 0,
   }]
   const result = await runTasks('oma-maintainer-review', [agent], tasks, options)
-  assertEvidenceToolRead(result, ['fresh-reviewer'], 'read_final_review_bundle', options)
+  assertEvidenceTools(result, {
+    'fresh-reviewer': [['read_final_review_summary'], ['read_review_source', 'search_review']],
+  }, options)
   return {
     review: structuredResult(result, 'fresh-reviewer', reviewOutputSchema),
     tokenUsage: result.totalTokenUsage,
@@ -225,17 +235,17 @@ export async function runRepair(options: RepairOptions): Promise<RepairResult> {
   if (!Number.isInteger(options.repairRound) || options.repairRound < 1 || options.repairRound > 2) {
     throw new Error('repairRound must be 1 or 2.')
   }
-  const reviewTool = createReviewBundleTool(options.bundle)
+  const reviewTools = createReviewEvidenceTools(options.bundle)
   const agent: AgentConfig = {
     name: `repair-implementer-${options.repairRound}`,
     description: 'Produces one bounded compare-and-swap repair proposal from fresh review evidence.',
     ...sharedAgentConfig(options),
-    customTools: [reviewTool],
+    customTools: reviewTools,
     outputSchema: implementationOutputSchema,
     maxTurns: 4,
     maxTokens: 7_000,
     systemPrompt: `${COMMON_GUARDRAILS}
-You are repair implementer round ${options.repairRound} of at most two. Call read_final_review_bundle before deciding. The tool is immutable; do not call it more than needed.
+You are repair implementer round ${options.repairRound} of at most two. Call read_final_review_summary, then read the exact bounded current-file source needed for compare-and-swap through read_review_source.
 Address only the explicit rejected-review issues supplied in the task and bundle, without leaving the original maintainer-approved edit scope.
 Return bounded full-content compare-and-swap edits; no deletion, rename, shell, GitHub action, scope widening, or assumption is allowed.
 For every existing file, set expectedHash to the matching bundle.currentFiles[].contentHash. Do not calculate or guess a hash from the diff.
@@ -255,7 +265,9 @@ If the review cannot be repaired safely within scope, return an empty edit list 
     maxRetries: 0,
   }]
   const result = await runTasks(`oma-maintainer-repair-${options.repairRound}`, [agent], tasks, options)
-  assertEvidenceToolRead(result, [agent.name], 'read_final_review_bundle', options)
+  assertEvidenceTools(result, {
+    [agent.name]: [['read_final_review_summary'], ['read_review_source']],
+  }, options)
   return {
     implementation: structuredResult(result, agent.name, implementationOutputSchema),
     tokenUsage: result.totalTokenUsage,
@@ -271,15 +283,21 @@ async function runTasks(
   options: CommonModelOptions,
 ): Promise<TeamResult> {
   const maxTokenBudget = options.maxTokenBudget ?? options.config.limits.maxTokenBudget
+  const baseAdapter = options.adapter ?? await createAdapter('deepseek', options.apiKey)
+  const adapter = new PreflightBudgetAdapter(baseAdapter, maxTokenBudget)
+  const guardedAgents = agents.map(agent => ({
+    ...agent,
+    adapter,
+    provider: undefined,
+    apiKey: undefined,
+  }))
   const orchestrator = new OpenMultiAgent({
     defaultModel: options.config.model,
-    defaultProvider: options.adapter ? undefined : 'deepseek',
-    defaultApiKey: options.adapter ? undefined : options.apiKey,
     maxConcurrency: 1,
     maxTokenBudget,
     onProgress: options.onProgress,
   })
-  const team = orchestrator.createTeam(teamName, { name: teamName, agents: [...agents], maxConcurrency: 1 })
+  const team = orchestrator.createTeam(teamName, { name: teamName, agents: guardedAgents, maxConcurrency: 1 })
   const result = await orchestrator.runTasks(team, [...tasks], {
     abortSignal: options.abortSignal,
     maxTokenBudget,
@@ -322,8 +340,8 @@ function sharedAgentConfig(options: CommonModelOptions): Pick<AgentConfig,
     parallelToolCalls: false,
     tools: [],
     disallowedTools: DISALLOWED_TOOLS,
-    maxToolOutputChars: 1_200_000,
-    compressToolResults: { minChars: 20_000 },
+    maxToolOutputChars: 48_000,
+    compressToolResults: { minChars: 12_000 },
     callTimeoutMs: 90_000,
     timeoutMs: 240_000,
     permissionBoundary: 'maintainer-bot-model-no-host-credentials',
@@ -356,18 +374,18 @@ function structuredResult<T>(
   return schema.parse(agentResult.structured)
 }
 
-function assertEvidenceToolRead(
+function assertEvidenceTools(
   result: TeamResult,
-  agentNames: readonly string[],
-  toolName: string,
+  requirements: Readonly<Record<string, readonly (readonly string[])[]>>,
   options: CommonModelOptions,
 ): void {
   if (options.requireEvidenceToolCalls === false) return
-  for (const name of agentNames) {
+  for (const [name, requiredGroups] of Object.entries(requirements)) {
     const calls = result.agentResults.get(name)?.toolCalls ?? []
-    const count = calls.filter(call => call.toolName === toolName).length
-    if (count < 1) {
-      throw new Error(`${name} did not read required immutable evidence through ${toolName}.`)
+    for (const alternatives of requiredGroups) {
+      if (!alternatives.some(toolName => calls.some(call => call.toolName === toolName))) {
+        throw new Error(`${name} did not read required immutable evidence through ${alternatives.join(' or ')}.`)
+      }
     }
   }
 }
