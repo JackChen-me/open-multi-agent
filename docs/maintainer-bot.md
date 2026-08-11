@@ -194,6 +194,25 @@ TypeScript/JavaScript relative-import relationships, bounded relevant Git
 history and linked evidence, validation commands, and source-level SHA-256
 provenance.
 
+Context allocation is required-first. The system policy, Issue evidence,
+root-to-target policy chain, exact target files, applicable package and
+TypeScript configuration, and synthetic workspace map are captured before any
+optional source may spend the byte budget. If any required source exceeds the
+per-source limit or the required set cannot fit inside the total file/byte
+limits intact, context remains insufficient and the run fails closed.
+
+Optional imports, related tests/docs/source, history, and linked evidence then
+fill the remaining budget in deterministic priority/path order. An optional
+source is truncated only by the per-source limit; when its bounded content
+does not fit the remaining total budget it is omitted so smaller later sources
+can still fit. Truncation and omission produce deterministic warnings, and
+`omittedCandidateCount` includes optional repository candidates omitted by
+either the file or byte limit. Optional pressure alone does not make context
+insufficient. For exact single-file scopes, workspace-wide examples are not
+selected merely because the target belongs to that workspace; selection is
+limited to required metadata, relative-import dependencies, and content with
+specific path/import/keyword relevance.
+
 System policy is highest priority. Repository policies are identified
 separately. Issue text, comments, commit messages, ordinary repository files,
 diffs, and external material are all untrusted evidence, never instructions.

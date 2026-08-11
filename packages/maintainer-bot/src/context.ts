@@ -37,6 +37,11 @@ interface Candidate {
   readonly trust: ContextSource['trust']
 }
 
+interface SourceDraft {
+  readonly source: Omit<ContextSource, 'contentHash' | 'byteLength' | 'truncated'>
+  readonly candidatePath?: string
+}
+
 export async function buildContextManifest(options: BuildContextOptions): Promise<ContextManifest> {
   if (!options.admission.mayDevelop || options.admission.status !== 'AGENT_READY') {
     throw new Error('Context for code development can be built only after deterministic AGENT_READY admission.')
@@ -121,7 +126,7 @@ export async function buildContextManifest(options: BuildContextOptions): Promis
       addCandidate({
         path,
         priority: path === '.github/CONTRIBUTING.md' ? 90 : 85,
-        required: path !== 'tsconfig.json',
+        required: true,
         kind: 'repository-file',
         trust: 'untrusted-evidence',
       })
@@ -133,18 +138,39 @@ export async function buildContextManifest(options: BuildContextOptions): Promis
     options.request.issue.targetWorkspaces,
     targets,
   )
-  for (const path of workspaceFiles) {
+  for (const path of workspaceFiles.required) {
     addCandidate({
       path,
-      priority: /(?:package|tsconfig)\.json$/.test(path) ? 90 : 75,
-      required: /(?:package|tsconfig)\.json$/.test(path),
+      priority: 90,
+      required: true,
+      kind: 'repository-file',
+      trust: 'untrusted-evidence',
+    })
+  }
+
+  const importDependencies = await collectImportDependencies(
+    repoRoot,
+    targets.filter(target => approvedEditScopes.some(scope => scope.path === target && scope.kind === 'file')),
+    options.config.context.maxFiles,
+  )
+  for (const path of importDependencies) {
+    addCandidate({
+      path,
+      priority: 92,
+      required: false,
       kind: 'repository-file',
       trust: 'untrusted-evidence',
     })
   }
 
   const keywords = issueKeywords(options.request.issue.title, options.request.issue.problem)
-  const related = await collectRelatedFiles(repoRoot, workspaceFiles, keywords, options.config.context.maxFiles)
+  const related = await collectRelatedFiles(
+    repoRoot,
+    workspaceFiles.optional,
+    keywords,
+    approvedEditScopes,
+    options.config.context.maxFiles,
+  )
   for (const path of related) {
     addCandidate({
       path,
@@ -158,105 +184,95 @@ export async function buildContextManifest(options: BuildContextOptions): Promis
   const sortedCandidates = [...candidates.values()].sort(
     (a, b) => b.priority - a.priority || a.path.localeCompare(b.path),
   )
-  const selected = sortedCandidates.slice(0, options.config.context.maxFiles)
-  const omitted = sortedCandidates.slice(options.config.context.maxFiles)
-  if (omitted.some(candidate => candidate.required)) {
+  const requiredCandidates = sortedCandidates.filter(candidate => candidate.required)
+  const optionalCandidates = sortedCandidates.filter(candidate => !candidate.required)
+  const selectedRequired = requiredCandidates.slice(0, options.config.context.maxFiles)
+  const optionalFileSlots = Math.max(0, options.config.context.maxFiles - selectedRequired.length)
+  const selectedOptional = optionalCandidates.slice(0, optionalFileSlots)
+  const omittedCandidatePaths = new Set(
+    optionalCandidates.slice(optionalFileSlots).map(candidate => candidate.path),
+  )
+  if (requiredCandidates.length > options.config.context.maxFiles) {
     errors.push('Required target or policy files exceed the configured context file limit.')
-  } else if (omitted.length > 0) {
-    warnings.push(`${omitted.length} lower-priority related context files were omitted by the file limit.`)
+  }
+  if (omittedCandidatePaths.size > 0) {
+    warnings.push(`${omittedCandidatePaths.size} lower-priority related context files were omitted by the file limit.`)
   }
 
   const sources: ContextSource[] = []
-  let totalBytes = 0
-  const addTextSource = (
-    input: Omit<ContextSource, 'contentHash' | 'byteLength' | 'truncated'>,
-    required: boolean,
-  ): boolean => {
-    const raw = Buffer.from(input.content, 'utf8')
-    const remaining = options.config.context.maxBytes - totalBytes
-    if (remaining <= 0) {
-      const message = `Context byte limit omitted ${input.locator}.`
-      if (required) errors.push(message)
-      else warnings.push(message)
-      return false
-    }
-    const bounded = boundUtf8(raw, Math.min(options.config.context.maxBytesPerFile, remaining))
-    if (bounded.truncated) {
-      const message = `Context source was truncated: ${input.locator}`
-      if (required) errors.push(message)
-      else warnings.push(message)
-    }
-    const source = sourceFromText({
-      ...input,
-      content: bounded.content,
-      originalByteLength: input.originalByteLength,
-      truncated: bounded.truncated,
-    })
-    totalBytes += source.byteLength
-    sources.push(source)
-    return true
-  }
-  addTextSource({
-    id: 'system-policy',
-    kind: 'system-policy',
-    locator: 'maintainer-bot://system-policy/v1',
-    trust: 'system-policy',
-    priority: 100,
-    content: SYSTEM_POLICY,
-    originalByteLength: Buffer.byteLength(SYSTEM_POLICY),
-  }, true)
+  const requiredSources: SourceDraft[] = [{
+    source: {
+      id: 'system-policy',
+      kind: 'system-policy',
+      locator: 'maintainer-bot://system-policy/v1',
+      trust: 'system-policy',
+      priority: 100,
+      content: SYSTEM_POLICY,
+      originalByteLength: Buffer.byteLength(SYSTEM_POLICY),
+    },
+  }]
+  const optionalSources: SourceDraft[] = []
   const issueContent = canonicalJson({
     issue: options.request.issue,
     confirmedAcceptanceCriteria: options.request.issue.acceptanceCriteria,
     issueRevision: options.admission.issueRevision,
     baseSha: options.request.baseSha,
   })
-  addTextSource({
-    id: 'issue',
-    kind: 'issue',
-    locator: `${options.request.issue.repository}#${options.request.issue.number}`,
-    trust: 'untrusted-evidence',
-    priority: 95,
-    content: issueContent,
-    originalByteLength: Buffer.byteLength(issueContent),
-  }, true)
+  requiredSources.push({
+    source: {
+      id: 'issue',
+      kind: 'issue',
+      locator: `${options.request.issue.repository}#${options.request.issue.number}`,
+      trust: 'untrusted-evidence',
+      priority: 95,
+      content: issueContent,
+      originalByteLength: Buffer.byteLength(issueContent),
+    },
+  })
 
-  const includedPaths: string[] = []
-  for (const candidate of selected) {
+  const workspaceMap = await buildWorkspaceMap(repoRoot)
+  const workspaceMapContent = canonicalJson(workspaceMap)
+  requiredSources.push({
+    source: {
+      id: 'workspace-map',
+      kind: 'workspace-map',
+      locator: 'workspace-map://package-json',
+      trust: 'untrusted-evidence',
+      priority: 90,
+      content: workspaceMapContent,
+      originalByteLength: Buffer.byteLength(workspaceMapContent),
+    },
+  })
+
+  for (const candidate of [...selectedRequired, ...selectedOptional]) {
     try {
       const raw = await readSafeRepositoryFile(repoRoot, candidate.path)
       if (candidate.required && hasConflictMarkers(raw.toString('utf8'))) {
         errors.push(`Required context contains unresolved conflict markers: ${candidate.path}`)
       }
-      const included = addTextSource({
-        id: `file:${candidate.path}`,
-        kind: candidate.kind,
-        locator: candidate.path,
-        trust: candidate.trust,
-        priority: candidate.priority,
-        content: raw.toString('utf8'),
-        originalByteLength: raw.byteLength,
-      }, candidate.kind === 'repository-policy' || candidate.required)
-      if (included) includedPaths.push(candidate.path)
+      const draft: SourceDraft = {
+        source: {
+          id: `file:${candidate.path}`,
+          kind: candidate.kind,
+          locator: candidate.path,
+          trust: candidate.trust,
+          priority: candidate.priority,
+          content: raw.toString('utf8'),
+          originalByteLength: raw.byteLength,
+        },
+        candidatePath: candidate.path,
+      }
+      if (candidate.required) requiredSources.push(draft)
+      else optionalSources.push(draft)
     } catch (error) {
       const message = `Could not read context file ${candidate.path}: ${error instanceof Error ? error.message : String(error)}`
       if (candidate.required) errors.push(message)
-      else warnings.push(message)
+      else {
+        warnings.push(message)
+        omittedCandidatePaths.add(candidate.path)
+      }
     }
   }
-
-  const importRelations = await collectImportRelations(repoRoot, includedPaths)
-  const workspaceMap = await buildWorkspaceMap(repoRoot)
-  const workspaceMapContent = canonicalJson(workspaceMap)
-  addTextSource({
-    id: 'workspace-map',
-    kind: 'workspace-map',
-    locator: 'workspace-map://package-json',
-    trust: 'untrusted-evidence',
-    priority: 90,
-    content: workspaceMapContent,
-    originalByteLength: Buffer.byteLength(workspaceMapContent),
-  }, true)
 
   const history = await options.runner.run(
     'git',
@@ -271,26 +287,84 @@ export async function buildContextManifest(options: BuildContextOptions): Promis
     { cwd: repoRoot, allowFailure: true, maxOutputChars: 80_000 },
   )
   if (history.exitCode !== 0) warnings.push('Relevant git history could not be collected.')
-  addTextSource({
-    id: 'git-history',
-    kind: 'git-history',
-    locator: `git:${options.request.baseSha}`,
-    trust: 'untrusted-evidence',
-    priority: 50,
-    content: history.stdout,
-    originalByteLength: Buffer.byteLength(history.stdout),
-  }, false)
+  optionalSources.push({
+    source: {
+      id: 'git-history',
+      kind: 'git-history',
+      locator: `git:${options.request.baseSha}`,
+      trust: 'untrusted-evidence',
+      priority: 50,
+      content: history.stdout,
+      originalByteLength: Buffer.byteLength(history.stdout),
+    },
+  })
 
   const linkedEvidence = canonicalJson(options.request.issue.linkedPullRequests)
-  addTextSource({
-    id: 'linked-evidence',
-    kind: 'linked-evidence',
-    locator: `${options.request.issue.repository}#${options.request.issue.number}:linked`,
-    trust: 'untrusted-evidence',
-    priority: 45,
-    content: linkedEvidence,
-    originalByteLength: Buffer.byteLength(linkedEvidence),
-  }, false)
+  optionalSources.push({
+    source: {
+      id: 'linked-evidence',
+      kind: 'linked-evidence',
+      locator: `${options.request.issue.repository}#${options.request.issue.number}:linked`,
+      trust: 'untrusted-evidence',
+      priority: 45,
+      content: linkedEvidence,
+      originalByteLength: Buffer.byteLength(linkedEvidence),
+    },
+  })
+
+  let totalBytes = 0
+  const includedPaths: string[] = []
+  for (const draft of requiredSources) {
+    const raw = Buffer.from(draft.source.content, 'utf8')
+    const remaining = options.config.context.maxBytes - totalBytes
+    if (raw.byteLength > options.config.context.maxBytesPerFile) {
+      errors.push(`Required context source exceeds maxBytesPerFile: ${draft.source.locator}`)
+    }
+    if (raw.byteLength > remaining) {
+      errors.push(`Required context sources exceed the configured context byte limit at ${draft.source.locator}.`)
+    }
+    const maxBytes = Math.max(0, Math.min(
+      options.config.context.maxBytesPerFile,
+      remaining,
+    ))
+    if (maxBytes === 0 && raw.byteLength > 0) continue
+    const bounded = boundUtf8(raw, maxBytes)
+    const source = sourceFromText({
+      ...draft.source,
+      content: bounded.content,
+      truncated: bounded.truncated,
+    })
+    totalBytes += source.byteLength
+    sources.push(source)
+    if (draft.candidatePath !== undefined) includedPaths.push(draft.candidatePath)
+  }
+
+  for (const draft of optionalSources.sort(
+    (a, b) => b.source.priority - a.source.priority || a.source.locator.localeCompare(b.source.locator),
+  )) {
+    const raw = Buffer.from(draft.source.content, 'utf8')
+    const bounded = boundUtf8(raw, options.config.context.maxBytesPerFile)
+    const boundedBytes = Buffer.byteLength(bounded.content)
+    const remaining = options.config.context.maxBytes - totalBytes
+    if (boundedBytes > remaining) {
+      warnings.push(`Context byte limit omitted optional source: ${draft.source.locator}`)
+      if (draft.candidatePath !== undefined) omittedCandidatePaths.add(draft.candidatePath)
+      continue
+    }
+    if (bounded.truncated) {
+      warnings.push(`Optional context source was truncated by maxBytesPerFile: ${draft.source.locator}`)
+    }
+    const source = sourceFromText({
+      ...draft.source,
+      content: bounded.content,
+      truncated: bounded.truncated,
+    })
+    totalBytes += source.byteLength
+    sources.push(source)
+    if (draft.candidatePath !== undefined) includedPaths.push(draft.candidatePath)
+  }
+
+  const importRelations = await collectImportRelations(repoRoot, includedPaths)
 
   const partial = {
     schemaVersion: 1 as const,
@@ -311,7 +385,7 @@ export async function buildContextManifest(options: BuildContextOptions): Promis
     retrieval: {
       method: 'deterministic-file-tree-import-history-v1' as const,
       selectedFiles: includedPaths,
-      omittedCandidateCount: omitted.length,
+      omittedCandidateCount: omittedCandidatePaths.size,
       importRelations,
     },
     sufficiency: {
@@ -377,8 +451,9 @@ async function collectWorkspaceFiles(
   root: string,
   workspaceNames: readonly string[],
   targets: readonly string[],
-): Promise<string[]> {
-  const paths = new Set<string>()
+): Promise<{ required: string[]; optional: string[] }> {
+  const required = new Set<string>()
+  const optional = new Set<string>()
   const packageDirs = await safeReadDir(join(root, 'packages'))
   for (const entry of packageDirs) {
     if (!entry.isDirectory()) continue
@@ -388,21 +463,24 @@ async function collectWorkspaceFiles(
     const matchesName = typeof parsed.name === 'string' && workspaceNames.includes(parsed.name)
     const matchesTarget = targets.some(target => pathWithin(target, `packages/${entry.name}`))
     if (!matchesName && !matchesTarget) continue
-    for (const file of [packagePath, `packages/${entry.name}/tsconfig.json`, `packages/${entry.name}/README.md`]) {
-      if (await isRegularFile(root, file)) paths.add(file)
+    for (const file of [packagePath, `packages/${entry.name}/tsconfig.json`]) {
+      if (await isRegularFile(root, file)) required.add(file)
     }
+    const readmePath = `packages/${entry.name}/README.md`
+    if (await isRegularFile(root, readmePath)) optional.add(readmePath)
     for (const folder of ['src', 'tests', 'fixtures', 'examples']) {
       const base = `packages/${entry.name}/${folder}`
-      for (const file of await walkTextFiles(root, base, 200)) paths.add(file)
+      for (const file of await walkTextFiles(root, base, 200)) optional.add(file)
     }
   }
-  return [...paths].sort()
+  return { required: [...required].sort(), optional: [...optional].sort() }
 }
 
 async function collectRelatedFiles(
   root: string,
   workspaceFiles: readonly string[],
   keywords: readonly string[],
+  targetScopes: readonly ApprovedEditScope[],
   limit: number,
 ): Promise<string[]> {
   const candidates = new Set<string>()
@@ -410,21 +488,70 @@ async function collectRelatedFiles(
   if (await isRegularFile(root, 'README.md')) candidates.add('README.md')
   for (const path of workspaceFiles) candidates.add(path)
 
+  const singleFileTarget = targetScopes.length > 0 && targetScopes.every(scope => scope.kind === 'file')
+  const targetPaths = targetScopes.map(scope => scope.path)
+  const targetStems = targetPaths.map(path => {
+    const name = posix.basename(path).replace(/\.[^.]+$/, '')
+    return name.replace(/\.(?:test|spec)$/, '').toLowerCase()
+  })
   const scored: Array<{ path: string; score: number }> = []
   for (const path of candidates) {
     let content: string
     try {
-      content = (await readSafeRepositoryFile(root, path)).toString('utf8').toLowerCase()
+      content = (await readSafeRepositoryFile(root, path)).toString('utf8')
     } catch {
       continue
     }
-    const score = keywords.reduce((total, keyword) => total + (content.includes(keyword) ? 1 : 0), 0)
-    if (score > 0 || /(?:package|tsconfig)\.json$/.test(path)) scored.push({ path, score })
+    const lowerContent = content.toLowerCase()
+    const score = keywords.reduce((total, keyword) => total + (lowerContent.includes(keyword) ? 1 : 0), 0)
+    const pathRelated = targetStems.some(stem => stem.length >= 4 && path.toLowerCase().includes(stem))
+    const importsTarget = relativeImports(path, content).some(imported => targetPaths.includes(imported))
+    const isExample = path.includes('/examples/')
+    const relevant = !singleFileTarget
+      ? score > 0
+      : pathRelated || importsTarget || (!isExample && score >= 2)
+    if (relevant) scored.push({ path, score: score + (pathRelated ? 20 : 0) + (importsTarget ? 30 : 0) })
   }
   return scored
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
     .slice(0, limit)
     .map(item => item.path)
+}
+
+async function collectImportDependencies(
+  root: string,
+  targets: readonly string[],
+  limit: number,
+): Promise<string[]> {
+  const targetSet = new Set(targets)
+  const collected = new Set<string>()
+  const queue = [...targets].sort()
+  while (queue.length > 0 && collected.size < limit) {
+    const from = queue.shift()!
+    let content: string
+    try {
+      content = (await readSafeRepositoryFile(root, from)).toString('utf8')
+    } catch {
+      continue
+    }
+    for (const imported of relativeImports(from, content)) {
+      if (targetSet.has(imported) || collected.has(imported) || !await isRegularFile(root, imported)) continue
+      collected.add(imported)
+      queue.push(imported)
+      if (collected.size >= limit) break
+    }
+  }
+  return [...collected].sort()
+}
+
+function relativeImports(from: string, content: string): string[] {
+  const imports = new Set<string>()
+  for (const match of content.matchAll(/(?:from\s+|import\s*\()(['"])(\.\.?\/[^'"]+)\1/g)) {
+    const specifier = match[2]
+    if (specifier === undefined) continue
+    for (const candidate of importCandidates(from, specifier)) imports.add(candidate)
+  }
+  return [...imports]
 }
 
 async function collectImportRelations(

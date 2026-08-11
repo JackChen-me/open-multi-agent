@@ -20,6 +20,7 @@ async function contextRepo(): Promise<string> {
     private: true,
     workspaces: ['packages/*'],
   }))
+  await writeFile(join(root, 'tsconfig.json'), '{}\n')
   await writeFile(join(root, 'packages/demo/AGENTS.md'), '# Demo policy\n')
   await writeFile(join(root, 'packages/demo/package.json'), JSON.stringify({ name: '@fixture/demo' }))
   await writeFile(join(root, 'packages/demo/tsconfig.json'), '{}\n')
@@ -139,6 +140,139 @@ describe('versioned repository context manifest', () => {
     })
     expect(manifest.sufficiency.sufficient).toBe(false)
     expect(manifest.sufficiency.errors.join(' ')).toMatch(/Required target or policy files exceed/)
+  })
+
+  it('reserves byte budget for required sources before omitting optional context', async () => {
+    const repoRoot = await contextRepo()
+    await writeFile(
+      join(repoRoot, 'docs/greeting-pressure.md'),
+      `# Greeting output fixture\n${'greeting output punctuation '.repeat(500)}`,
+    )
+    const request = authorizedRequest()
+    const config = testConfig({ context: {
+      maxFiles: 80,
+      maxBytes: 5_000,
+      maxBytesPerFile: 4_000,
+      maxHistoryEntries: 5,
+    } })
+    const first = await buildContextManifest({
+      repoRoot,
+      request,
+      admission: evaluateAdmission(request),
+      config,
+      runner: contextRunner(),
+      now: () => new Date('2026-08-10T01:00:00.000Z'),
+    })
+    const second = await buildContextManifest({
+      repoRoot,
+      request,
+      admission: evaluateAdmission(request),
+      config,
+      runner: contextRunner(),
+      now: () => new Date('2026-08-10T01:00:00.000Z'),
+    })
+
+    expect(first.sufficiency).toMatchObject({ sufficient: true, errors: [] })
+    expect(first.sources.map(source => source.locator)).toEqual(expect.arrayContaining([
+      'maintainer-bot://system-policy/v1',
+      'open-multi-agent/open-multi-agent#101',
+      'workspace-map://package-json',
+      'AGENTS.md',
+      '.github/CONTRIBUTING.md',
+      'package.json',
+      'tsconfig.json',
+      'packages/demo/package.json',
+      'packages/demo/tsconfig.json',
+      'packages/demo/src/greeting.ts',
+    ]))
+    expect(first.sources.map(source => source.locator)).not.toContain('docs/greeting-pressure.md')
+    expect(first.sufficiency.warnings).toContain(
+      'Context byte limit omitted optional source: docs/greeting-pressure.md',
+    )
+    expect(first.retrieval.omittedCandidateCount).toBeGreaterThan(0)
+    expect(second.sufficiency.warnings).toEqual(first.sufficiency.warnings)
+    expect(second.retrieval).toEqual(first.retrieval)
+  })
+
+  it('warns deterministically when optional context is truncated without failing sufficiency', async () => {
+    const repoRoot = await contextRepo()
+    await writeFile(
+      join(repoRoot, 'packages/demo/tests/greeting-large.test.ts'),
+      `import { greeting } from "../src/greeting.js"\n${'// greeting output punctuation\n'.repeat(300)}`,
+    )
+    const request = authorizedRequest()
+    const manifest = await buildContextManifest({
+      repoRoot,
+      request,
+      admission: evaluateAdmission(request),
+      config: testConfig({ context: {
+        maxFiles: 80,
+        maxBytes: 50_000,
+        maxBytesPerFile: 4_000,
+        maxHistoryEntries: 5,
+      } }),
+      runner: contextRunner(),
+    })
+
+    expect(manifest.sufficiency.sufficient).toBe(true)
+    expect(manifest.sufficiency.warnings).toContain(
+      'Optional context source was truncated by maxBytesPerFile: packages/demo/tests/greeting-large.test.ts',
+    )
+    expect(manifest.sources.find(
+      source => source.locator === 'packages/demo/tests/greeting-large.test.ts',
+    )?.truncated).toBe(true)
+  })
+
+  it('fails closed when a required source cannot fit intact', async () => {
+    const repoRoot = await contextRepo()
+    await writeFile(
+      join(repoRoot, 'packages/demo/src/greeting.ts'),
+      `export const greeting = "${'x'.repeat(6_000)}"\n`,
+    )
+    const request = authorizedRequest()
+    const manifest = await buildContextManifest({
+      repoRoot,
+      request,
+      admission: evaluateAdmission(request),
+      config: testConfig({ context: {
+        maxFiles: 80,
+        maxBytes: 50_000,
+        maxBytesPerFile: 4_000,
+        maxHistoryEntries: 5,
+      } }),
+      runner: contextRunner(),
+    })
+
+    expect(manifest.sufficiency.sufficient).toBe(false)
+    expect(manifest.sufficiency.errors).toContain(
+      'Required context source exceeds maxBytesPerFile: packages/demo/src/greeting.ts',
+    )
+    expect(manifest.sources.find(source => source.locator === 'packages/demo/src/greeting.ts')?.truncated)
+      .toBe(true)
+  })
+
+  it('does not pull unrelated workspace examples or package-lock into single-file context', async () => {
+    const repoRoot = await contextRepo()
+    await mkdir(join(repoRoot, 'packages/demo/examples'), { recursive: true })
+    await writeFile(join(repoRoot, 'package-lock.json'), '{"lockfileVersion":3}\n')
+    for (let index = 0; index < 20; index += 1) {
+      await writeFile(
+        join(repoRoot, `packages/demo/examples/unrelated-${index}.ts`),
+        'export const greetingOutputPunctuationFixture = true\n',
+      )
+    }
+    const request = authorizedRequest()
+    const manifest = await buildContextManifest({
+      repoRoot,
+      request,
+      admission: evaluateAdmission(request),
+      config: testConfig(),
+      runner: contextRunner(),
+    })
+
+    expect(manifest.sufficiency.sufficient).toBe(true)
+    expect(manifest.retrieval.selectedFiles.some(path => path.includes('/examples/'))).toBe(false)
+    expect(manifest.retrieval.selectedFiles).not.toContain('package-lock.json')
   })
 
   it('fails closed on unresolved conflict markers in required context', async () => {
