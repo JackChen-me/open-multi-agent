@@ -80,6 +80,11 @@ jobs:
               throw new Error('Minted App slug or installation ID does not match the trusted contract.')
             }
             const botLogin = `${expected.slug}[bot]`
+            // IssueComment actors expose the App slug while REST bot users include the [bot] suffix.
+            const isExpectedGraphQlBotActor = actor =>
+              actor?.__typename === 'Bot' &&
+              actor.databaseId === expected.botUserId &&
+              (actor.login === expected.slug || actor.login === botLogin)
             const [viewer, appResponse, botResponse, accessResponse] = await Promise.all([
               github.graphql('query { viewer { login } }'),
               github.request('GET /apps/{app_slug}', { app_slug: expected.slug }),
@@ -111,19 +116,17 @@ jobs:
                 query OMAStatusCommentAuthorship($id: ID!) {
                   node(id: $id) {
                     ... on IssueComment {
-                      author { login }
-                      editor { login }
-                      viewerDidAuthor
+                      author { __typename login ... on Bot { databaseId } }
+                      editor { __typename login ... on Bot { databaseId } }
                       createdViaEmail
                     }
                   }
                 }
               `, { id: comment.node_id })
               if (
-                proof.node?.author?.login !== botLogin ||
-                proof.node.viewerDidAuthor !== true ||
-                proof.node.createdViaEmail ||
-                (proof.node.editor !== null && proof.node.editor?.login !== botLogin)
+                !isExpectedGraphQlBotActor(proof.node?.author) ||
+                proof.node?.createdViaEmail !== false ||
+                (proof.node?.editor !== null && !isExpectedGraphQlBotActor(proof.node?.editor))
               ) throw new Error('Status comment App authorship or editor provenance is invalid.')
             }
             const repo = await github.rest.repos.get(context.repo)
@@ -435,8 +438,14 @@ jobs:
             const claimId = `${context.runId}.${process.env.GITHUB_RUN_ATTEMPT}`
             const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
             const baseSha = process.env.OMA_BASE_SHA || context.sha
-            const botLogin = `${process.env.OMA_APP_SLUG}[bot]`
+            const appSlug = process.env.OMA_APP_SLUG ?? ''
+            const botLogin = `${appSlug}[bot]`
             const botUserId = Number(process.env.OMA_APP_BOT_USER_ID)
+            // IssueComment actors expose the App slug while REST bot users include the [bot] suffix.
+            const isExpectedGraphQlBotActor = actor =>
+              actor?.__typename === 'Bot' &&
+              actor.databaseId === botUserId &&
+              (actor.login === appSlug || actor.login === botLogin)
             const viewer = await github.graphql('query { viewer { login } }')
             if (viewer.viewer?.login !== botLogin || !Number.isSafeInteger(botUserId) || botUserId <= 0) {
               throw new Error('Failure fallback does not have the expected App identity.')
@@ -457,19 +466,17 @@ jobs:
               query OMAStatusCommentAuthorship($id: ID!) {
                 node(id: $id) {
                   ... on IssueComment {
-                    author { login }
-                    editor { login }
-                    viewerDidAuthor
+                    author { __typename login ... on Bot { databaseId } }
+                    editor { __typename login ... on Bot { databaseId } }
                     createdViaEmail
                   }
                 }
               }
             `, { id: current.node_id })
             if (
-              proof.node?.author?.login !== botLogin ||
-              proof.node.viewerDidAuthor !== true ||
-              proof.node.createdViaEmail ||
-              (proof.node.editor !== null && proof.node.editor?.login !== botLogin)
+              !isExpectedGraphQlBotActor(proof.node?.author) ||
+              proof.node?.createdViaEmail !== false ||
+              (proof.node?.editor !== null && !isExpectedGraphQlBotActor(proof.node?.editor))
             ) throw new Error('Failure fallback status provenance is invalid.')
             const matches = [...current.body.matchAll(new RegExp(`<!--\\s*${marker}\\s+(\\{[^\\n]*\\})\\s*-->`, 'g'))]
             if (matches.length !== 1) throw new Error('Trusted Maintainer Bot comment has invalid machine metadata.')
@@ -548,19 +555,17 @@ jobs:
               query OMAUpdatedStatusCommentAuthorship($id: ID!) {
                 node(id: $id) {
                   ... on IssueComment {
-                    author { login }
-                    editor { login }
-                    viewerDidAuthor
+                    author { __typename login ... on Bot { databaseId } }
+                    editor { __typename login ... on Bot { databaseId } }
                     createdViaEmail
                   }
                 }
               }
             `, { id: updated.node_id })
             if (
-              updatedProof.node?.author?.login !== botLogin ||
-              updatedProof.node.viewerDidAuthor !== true ||
-              updatedProof.node.createdViaEmail ||
-              (updatedProof.node.editor !== null && updatedProof.node.editor?.login !== botLogin)
+              !isExpectedGraphQlBotActor(updatedProof.node?.author) ||
+              updatedProof.node?.createdViaEmail !== false ||
+              (updatedProof.node?.editor !== null && !isExpectedGraphQlBotActor(updatedProof.node?.editor))
             ) throw new Error('Updated failure status App provenance is invalid.')
             await core.summary
               .addHeading(`OMA Maintainer Bot — ${status}`)

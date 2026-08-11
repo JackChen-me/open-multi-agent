@@ -161,9 +161,12 @@ Because GitHub-hosted runners are ephemeral, `$RUNNER_TEMP` is never the
 cross-run authority. Activation v1 instead uses one status comment owned by
 the precisely verified dedicated App bot, containing a bounded
 machine-readable claim ledger, Actions run status, and deterministic branch/PR
-metadata. REST actor ID/login/type plus GraphQL author/editor/viewer provenance
-must all match the verified App; ordinary users and `github-actions[bot]`
-markers are ignored as durable authority. The ledger retains prior
+metadata. The token viewer and REST actor ID/login/type must match the verified
+App bot. GraphQL author/editor actors must independently match that Bot's
+database ID and type; their login may use GitHub's App slug form or the REST
+`[bot]` form, and email-created comments are rejected. Ordinary users and
+`github-actions[bot]` markers are ignored as durable authority. The ledger
+retains prior
 runKeys when a later revision becomes visible and fails closed at 64 claims
 instead of silently dropping idempotency history.
 

@@ -6,7 +6,7 @@ import type {
   CommandRunner,
   RunCommandOptions,
 } from '@open-multi-agent/maintainer-bot'
-import type { GitHubClient } from '../src/github.js'
+import type { GitHubClient, GitHubIssueCommentAuthorship } from '../src/github.js'
 import { loadProductionPolicy } from '../src/policy.js'
 import type {
   GitHubActor,
@@ -120,12 +120,7 @@ export class FakeGitHub implements GitHubClient {
   app = { id: APP_ID, clientId: APP_CLIENT_ID, slug: APP_SLUG }
   botUser: GitHubActor = { id: APP_BOT_USER_ID, login: APP_BOT_LOGIN, type: 'Bot' }
   installationRepositories = [REPOSITORY]
-  commentAuthorshipOverrides = new Map<string, {
-    authorLogin: string | null
-    editorLogin: string | null
-    viewerDidAuthor: boolean
-    createdViaEmail: boolean
-  }>()
+  commentAuthorshipOverrides = new Map<string, GitHubIssueCommentAuthorship>()
   issue: GitHubIssue = issueFromEvent()
   comments: GitHubComment[] = []
   timeline: GitHubTimelineEvent[] = []
@@ -158,10 +153,10 @@ export class FakeGitHub implements GitHubClient {
     if (override !== undefined) return structuredClone(override)
     const comment = this.comments.find(candidate => candidate.node_id === nodeId)
     if (comment === undefined) throw new Error('comment not found')
+    const author = graphQlActor(comment.user)
     return {
-      authorLogin: comment.user.login,
-      editorLogin: comment.updated_at === comment.created_at ? null : comment.user.login,
-      viewerDidAuthor: comment.user.login === this.viewerLogin,
+      author,
+      editor: comment.updated_at === comment.created_at ? null : author,
       createdViaEmail: false,
     }
   }
@@ -280,6 +275,16 @@ export function githubActionsComment(id: number, body: string): GitHubComment {
   return {
     ...botComment(id, body),
     user: { id: 41_898_282, login: 'github-actions[bot]', type: 'Bot' },
+  }
+}
+
+function graphQlActor(user: GitHubActor) {
+  return {
+    databaseId: user.id,
+    login: user.type === 'Bot' && user.login.endsWith('[bot]')
+      ? user.login.slice(0, -'[bot]'.length)
+      : user.login,
+    type: user.type,
   }
 }
 

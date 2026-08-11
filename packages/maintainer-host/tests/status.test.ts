@@ -35,7 +35,7 @@ function metadata(overrides: Record<string, unknown> = {}) {
 }
 
 describe('single trusted BOT status comment', () => {
-  it('round-trips machine metadata and ignores user and github-actions marker forgeries', async () => {
+  it('accepts the GraphQL App slug actor form and ignores user and github-actions marker forgeries', async () => {
     const body = renderStatusComment(metadata(), 'Running deterministic checks.')
     expect(parseStatusComment(body)).toMatchObject({ status: 'RUNNING', runKey: 'c'.repeat(64) })
     const forged = { ...botComment(1, body), user: { id: 99, login: 'attacker', type: 'User' } }
@@ -79,14 +79,40 @@ describe('single trusted BOT status comment', () => {
     const wrongEditor = new FakeGitHub()
     wrongEditor.comments = [botComment(4, body)]
     wrongEditor.commentAuthorshipOverrides.set('IC_4', {
-      authorLogin: APP_IDENTITY.botLogin,
-      editorLogin: 'attacker',
-      viewerDidAuthor: true,
+      author: {
+        databaseId: APP_IDENTITY.botUserId,
+        login: APP_IDENTITY.slug,
+        type: 'Bot',
+      },
+      editor: {
+        databaseId: 99,
+        login: 'attacker',
+        type: 'User',
+      },
       createdViaEmail: false,
     })
     await expect(findTrustedStatusComment({
       github: wrongEditor,
       comments: wrongEditor.comments,
+      identity: APP_IDENTITY,
+      repository: REPOSITORY,
+      issueNumber: 488,
+    })).rejects.toThrow(/authorship or editor provenance/)
+
+    const wrongAuthor = new FakeGitHub()
+    wrongAuthor.comments = [botComment(5, body)]
+    wrongAuthor.commentAuthorshipOverrides.set('IC_5', {
+      author: {
+        databaseId: APP_IDENTITY.botUserId + 1,
+        login: APP_IDENTITY.slug,
+        type: 'Bot',
+      },
+      editor: null,
+      createdViaEmail: false,
+    })
+    await expect(findTrustedStatusComment({
+      github: wrongAuthor,
+      comments: wrongAuthor.comments,
       identity: APP_IDENTITY,
       repository: REPOSITORY,
       issueNumber: 488,

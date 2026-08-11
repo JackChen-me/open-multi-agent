@@ -31,21 +31,30 @@ const installationRepositoriesSchema = z.object({
 const viewerSchema = z.object({
   data: z.object({ viewer: z.object({ login: z.string().min(1) }) }),
 })
+const issueCommentActorSchema = z.object({
+  __typename: z.string().min(1),
+  login: z.string().min(1),
+  databaseId: z.number().int().positive().optional(),
+})
 const issueCommentAuthorshipSchema = z.object({
   data: z.object({
     node: z.object({
-      author: z.object({ login: z.string().min(1) }).nullable(),
-      editor: z.object({ login: z.string().min(1) }).nullable(),
-      viewerDidAuthor: z.boolean(),
+      author: issueCommentActorSchema.nullable(),
+      editor: issueCommentActorSchema.nullable(),
       createdViaEmail: z.boolean(),
     }).nullable(),
   }),
 })
 
+export interface GitHubIssueCommentActor {
+  readonly databaseId: number | null
+  readonly login: string
+  readonly type: string
+}
+
 export interface GitHubIssueCommentAuthorship {
-  readonly authorLogin: string | null
-  readonly editorLogin: string | null
-  readonly viewerDidAuthor: boolean
+  readonly author: GitHubIssueCommentActor | null
+  readonly editor: GitHubIssueCommentActor | null
   readonly createdViaEmail: boolean
 }
 
@@ -128,9 +137,8 @@ export class GitHubRestClient implements GitHubClient {
       query: `query OMAStatusCommentAuthorship($id: ID!) {
         node(id: $id) {
           ... on IssueComment {
-            author { login }
-            editor { login }
-            viewerDidAuthor
+            author { __typename login ... on Bot { databaseId } }
+            editor { __typename login ... on Bot { databaseId } }
             createdViaEmail
           }
         }
@@ -139,9 +147,8 @@ export class GitHubRestClient implements GitHubClient {
     }))
     if (result.data.node === null) throw new Error('Trusted Maintainer Bot status comment no longer exists.')
     return {
-      authorLogin: result.data.node.author?.login ?? null,
-      editorLogin: result.data.node.editor?.login ?? null,
-      viewerDidAuthor: result.data.node.viewerDidAuthor,
+      author: issueCommentActor(result.data.node.author),
+      editor: issueCommentActor(result.data.node.editor),
       createdViaEmail: result.data.node.createdViaEmail,
     }
   }
@@ -272,6 +279,17 @@ export class GitHubRestClient implements GitHubClient {
     })
     if (!response.ok) throw new GitHubApiError(response.status, method, path.replace(/\?.*$/, ''))
     return response.status === 204 ? null : response.json()
+  }
+}
+
+function issueCommentActor(
+  actor: z.infer<typeof issueCommentActorSchema> | null,
+): GitHubIssueCommentActor | null {
+  if (actor === null) return null
+  return {
+    databaseId: actor.databaseId ?? null,
+    login: actor.login,
+    type: actor.__typename,
   }
 }
 

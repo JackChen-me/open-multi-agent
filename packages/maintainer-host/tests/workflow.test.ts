@@ -40,6 +40,13 @@ describe('GitHub Actions activation workflow', () => {
     expect(workflow).toContain("terminalClaim ? previous.status : 'FAILED'")
     expect(workflow).toContain('process.env.GITHUB_WORKFLOW_SHA')
     expect(workflow).toContain('workflowSha !== baseSha')
+    expect(workflow.match(/const isExpectedGraphQlBotActor = actor =>/g)).toHaveLength(2)
+    expect(workflow.match(/author \{ __typename login \.\.\. on Bot \{ databaseId \} \}/g)).toHaveLength(3)
+    expect(workflow.match(/editor \{ __typename login \.\.\. on Bot \{ databaseId \} \}/g)).toHaveLength(3)
+    expect(workflow.match(/!isExpectedGraphQlBotActor\(/g)).toHaveLength(6)
+    expect(workflow).not.toContain('viewerDidAuthor')
+    expect(workflow).toContain('comment.user?.id !== expected.botUserId')
+    expect(workflow).toContain('updated.user?.id !== botUserId')
 
     const tokenStep = workflow.slice(
       workflow.indexOf('- name: Create repository-scoped Maintainer Bot App token'),

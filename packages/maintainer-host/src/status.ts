@@ -5,7 +5,7 @@ import {
   type StatusClaim,
   type StatusMetadata,
 } from './schema.js'
-import type { GitHubClient } from './github.js'
+import type { GitHubClient, GitHubIssueCommentActor } from './github.js'
 import { sanitizePublicLine } from './public-output.js'
 
 export const STATUS_MARKER = 'oma-maintainer-bot-status:v2'
@@ -60,6 +60,16 @@ export function isExpectedAppBotUser(
   return user.id === identity.botUserId
     && user.login === identity.botLogin
     && user.type === 'Bot'
+}
+
+export function isExpectedGraphQlAppBotActor(
+  actor: GitHubIssueCommentActor | null,
+  identity: GitHubAppWriterIdentity,
+): boolean {
+  // IssueComment actors expose the App slug while REST bot users include the [bot] suffix.
+  return actor?.databaseId === identity.botUserId
+    && actor.type === 'Bot'
+    && (actor.login === identity.slug || actor.login === identity.botLogin)
 }
 
 export async function findTrustedStatusComment(input: {
@@ -152,10 +162,9 @@ async function assertTrustedStatusCommentAuthorship(
   }
   const authorship = await github.getIssueCommentAuthorship(comment.node_id)
   if (
-    authorship.authorLogin !== identity.botLogin
-    || authorship.viewerDidAuthor !== true
+    !isExpectedGraphQlAppBotActor(authorship.author, identity)
     || authorship.createdViaEmail
-    || authorship.editorLogin !== null && authorship.editorLogin !== identity.botLogin
+    || authorship.editor !== null && !isExpectedGraphQlAppBotActor(authorship.editor, identity)
   ) {
     throw new Error('Maintainer Bot status comment authorship or editor provenance is not the expected GitHub App.')
   }
