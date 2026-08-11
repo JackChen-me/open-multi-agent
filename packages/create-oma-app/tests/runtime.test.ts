@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveRuntime } from '../template/src/runtime.js'
 
 const original = {
@@ -20,6 +20,10 @@ afterEach(() => {
   restore('OLLAMA_HOST', original.host)
   restore('OPENAI_API_KEY', original.key)
   restore('OPENAI_BASE_URL', original.base)
+})
+
+beforeEach(() => {
+  delete process.env.OMA_MODEL
 })
 
 describe('resolveRuntime', () => {
