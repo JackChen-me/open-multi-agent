@@ -12,6 +12,8 @@ describe('pre-registered deterministic validation runner', () => {
       env: {
         PATH: '/usr/bin',
         GITHUB_TOKEN: 'must-not-leak',
+        MAINTAINER_BOT_APP_TOKEN: 'must-not-leak',
+        OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'must-not-leak',
         DEEPSEEK_API_KEY: 'must-not-leak',
         SAFE_VALUE: 'kept',
       },
@@ -23,6 +25,8 @@ describe('pre-registered deterministic validation runner', () => {
     expect(runner.calls[0]?.args).toEqual(['test', '-w', '@fixture/demo'])
     expect(runner.calls[0]?.options.env).toMatchObject({ PATH: '/usr/bin', SAFE_VALUE: 'kept' })
     expect(runner.calls[0]?.options.env).not.toHaveProperty('GITHUB_TOKEN')
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('MAINTAINER_BOT_APP_TOKEN')
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('OMA_MAINTAINER_BOT_APP_PRIVATE_KEY')
     expect(runner.calls[0]?.options.env).not.toHaveProperty('DEEPSEEK_API_KEY')
     expect(allValidationsPassed(results)).toBe(true)
   })
@@ -49,5 +53,37 @@ describe('pre-registered deterministic validation runner', () => {
     })
     expect(results[0]?.truncated).toBe(true)
     expect(allValidationsPassed(results)).toBe(false)
+  })
+
+  it('applies trusted per-command environment overrides and unsets after credential stripping', async () => {
+    const runner = new ScriptedCommandRunner(() => ({ stdout: 'ok', stderr: '', exitCode: 0 }))
+    const config = testConfig({
+      validationCommands: [{
+        id: 'ambient-test',
+        command: 'npm',
+        args: ['test'],
+        cwd: '.',
+        timeoutMs: 10_000,
+        env: { OMA_MODEL: 'ambient-model' },
+        unsetEnv: ['INHERITED_MODEL'],
+      }],
+    })
+    const results = await runRegisteredValidations({
+      repoRoot: '/tmp/repository',
+      config,
+      runner,
+      env: {
+        PATH: '/usr/bin',
+        INHERITED_MODEL: 'remove-me',
+        GITHUB_TOKEN: 'remove-me-too',
+      },
+    })
+    expect(runner.calls[0]?.options.env).toMatchObject({ PATH: '/usr/bin', OMA_MODEL: 'ambient-model' })
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('INHERITED_MODEL')
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('GITHUB_TOKEN')
+    expect(results[0]?.environment).toEqual({
+      set: [{ name: 'OMA_MODEL', value: 'ambient-model' }],
+      unset: ['INHERITED_MODEL'],
+    })
   })
 })

@@ -1,0 +1,264 @@
+{
+  "schemaVersion": 1,
+  "contract": "oma-maintainer-activation-v1",
+  "enabled": true,
+  "repository": "open-multi-agent/open-multi-agent",
+  "agentReadyLabel": "agent-ready",
+  "policyVersion": "maintainer-activation-v1",
+  "promptVersion": "maintainer-prompts-v1",
+  "model": "deepseek-v4-flash",
+  "allowedPaths": [
+    "README.md",
+    "docs",
+    "packages/core/src",
+    "packages/core/tests",
+    "packages/core/examples",
+    "packages/otel/src",
+    "packages/otel/tests",
+    "packages/create-oma-app/src",
+    "packages/create-oma-app/tests",
+    "packages/create-oma-app/template",
+    "packages/create-oma-app/templates",
+    "packages/maintainer-bot/src",
+    "packages/maintainer-bot/tests",
+    "packages/maintainer-bot/fixtures",
+    "packages/maintainer-bot/README.md"
+  ],
+  "protectedPaths": [
+    ".git",
+    ".github",
+    ".env",
+    ".npmrc",
+    "AGENTS.md",
+    "LICENSE",
+    "SECURITY.md",
+    "package.json",
+    "package-lock.json",
+    "docs/durable-approvals.md",
+    "docs/egress-policy.md",
+    "packages/core/src/index.ts",
+    "packages/core/src/acp.ts",
+    "packages/core/src/ai-sdk.ts",
+    "packages/core/src/classifiers.ts",
+    "packages/core/src/mcp.ts",
+    "packages/core/src/process.ts",
+    "packages/core/src/shell.ts",
+    "packages/maintainer-bot/config",
+    "packages/maintainer-host"
+  ],
+  "manualOnlyPaths": [
+    ".github",
+    "package.json",
+    "package-lock.json",
+    "docs/durable-approvals.md",
+    "docs/egress-policy.md",
+    "packages/core/src/index.ts",
+    "packages/core/src/acp.ts",
+    "packages/core/src/ai-sdk.ts",
+    "packages/core/src/classifiers.ts",
+    "packages/core/src/mcp.ts",
+    "packages/core/src/process.ts",
+    "packages/core/src/shell.ts"
+  ],
+  "alwaysValidationIds": ["git-diff-check"],
+  "workspaces": [
+    {
+      "name": "repository-docs",
+      "root": "docs",
+      "validationIds": ["git-diff-check"],
+      "pathRules": []
+    },
+    {
+      "name": "repository-readme",
+      "root": "README.md",
+      "validationIds": ["git-diff-check"],
+      "pathRules": []
+    },
+    {
+      "name": "@open-multi-agent/core",
+      "root": "packages/core",
+      "validationIds": ["core-lint", "core-test", "core-build"],
+      "pathRules": []
+    },
+    {
+      "name": "@open-multi-agent/otel",
+      "root": "packages/otel",
+      "validationIds": ["otel-lint", "otel-test", "otel-build"],
+      "pathRules": []
+    },
+    {
+      "name": "create-oma-app",
+      "root": "packages/create-oma-app",
+      "validationIds": ["create-lint", "create-test", "create-template-typecheck"],
+      "pathRules": [
+        {
+          "path": "packages/create-oma-app/src",
+          "kind": "directory",
+          "validationIds": ["create-scaffold"]
+        },
+        {
+          "path": "packages/create-oma-app/tests/runtime.test.ts",
+          "kind": "file",
+          "validationIds": ["create-runtime-ambient", "create-runtime-clean"]
+        },
+        {
+          "path": "packages/create-oma-app/template",
+          "kind": "directory",
+          "validationIds": ["create-scaffold"]
+        },
+        {
+          "path": "packages/create-oma-app/templates",
+          "kind": "directory",
+          "validationIds": ["create-scaffold"]
+        }
+      ]
+    },
+    {
+      "name": "@open-multi-agent/maintainer-bot",
+      "root": "packages/maintainer-bot",
+      "validationIds": ["maintainer-bot-lint", "maintainer-bot-test", "maintainer-bot-build"],
+      "pathRules": []
+    }
+  ],
+  "validationRegistry": [
+    {
+      "id": "git-diff-check",
+      "command": "git",
+      "args": ["diff", "--check"],
+      "cwd": ".",
+      "timeoutMs": 120000
+    },
+    {
+      "id": "core-lint",
+      "command": "npm",
+      "args": ["run", "lint", "-w", "@open-multi-agent/core"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "core-test",
+      "command": "npm",
+      "args": ["run", "test", "-w", "@open-multi-agent/core"],
+      "cwd": ".",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "core-build",
+      "command": "npm",
+      "args": ["run", "build", "-w", "@open-multi-agent/core"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "otel-lint",
+      "command": "npm",
+      "args": ["run", "lint", "-w", "@open-multi-agent/otel"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "otel-test",
+      "command": "npm",
+      "args": ["run", "test", "-w", "@open-multi-agent/otel"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "otel-build",
+      "command": "npm",
+      "args": ["run", "build", "-w", "@open-multi-agent/otel"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "create-runtime-ambient",
+      "command": "npm",
+      "args": ["run", "test", "-w", "create-oma-app", "--", "runtime.test.ts"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "env": { "OMA_MODEL": "ambient-model" }
+    },
+    {
+      "id": "create-runtime-clean",
+      "command": "npm",
+      "args": ["run", "test", "-w", "create-oma-app", "--", "runtime.test.ts"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "unsetEnv": ["OMA_MODEL"]
+    },
+    {
+      "id": "create-lint",
+      "command": "npm",
+      "args": ["run", "lint", "-w", "create-oma-app"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "create-test",
+      "command": "npm",
+      "args": ["run", "test", "-w", "create-oma-app"],
+      "cwd": ".",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "create-template-typecheck",
+      "command": "npm",
+      "args": ["run", "typecheck:template", "-w", "create-oma-app"],
+      "cwd": ".",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "create-scaffold",
+      "command": "npm",
+      "args": ["run", "test:scaffold", "-w", "create-oma-app"],
+      "cwd": ".",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "maintainer-bot-lint",
+      "command": "npm",
+      "args": ["run", "lint", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "maintainer-bot-test",
+      "command": "npm",
+      "args": ["run", "test", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "maintainer-bot-build",
+      "command": "npm",
+      "args": ["run", "build", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    }
+  ],
+  "context": {
+    "maxFiles": 140,
+    "maxBytes": 900000,
+    "maxBytesPerFile": 100000,
+    "maxHistoryEntries": 20
+  },
+  "edits": {
+    "maxFiles": 12,
+    "maxBytesPerFile": 160000,
+    "maxTotalBytes": 400000
+  },
+  "limits": {
+    "maxTokenBudget": 160000,
+    "maxCostUsd": 2,
+    "runTimeoutMs": 1800000,
+    "maxRepairLoops": 2
+  },
+  "modelPricing": {
+    "inputPerMillionUsd": 0.14,
+    "outputPerMillionUsd": 0.28
+  },
+  "pullRequest": {
+    "branchPrefix": "agent/issue-",
+    "maxChangedFiles": 12
+  }
+}

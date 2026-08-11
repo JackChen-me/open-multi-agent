@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { modelTriageSchema } from '../src/schema.js'
+import { modelTriageSchema, validationCommandSchema } from '../src/schema.js'
 import { authorizedRequest } from './helpers.js'
 
 function triage(overrides: Record<string, unknown> = {}) {
@@ -33,5 +33,17 @@ describe('model triage schema', () => {
       verdict: 'needs_human',
       uncertainties: ['The issue leaves the public API shape undecided.'],
     })).verdict).toBe('needs_human')
+  })
+})
+
+describe('validation command schema', () => {
+  it('allows non-secret trusted environment controls and rejects credential overrides', () => {
+    expect(validationCommandSchema.parse({
+      id: 'ambient-test', command: 'npm', args: ['test'], env: { OMA_MODEL: 'ambient-model' },
+      unsetEnv: ['OMA_MODEL_FALLBACK'],
+    }).env).toEqual({ OMA_MODEL: 'ambient-model' })
+    expect(() => validationCommandSchema.parse({
+      id: 'unsafe-test', command: 'npm', args: ['test'], env: { GITHUB_TOKEN: 'value' },
+    })).toThrow(/credential-like/)
   })
 })

@@ -2,6 +2,7 @@ import { hashJson, sha256 } from './hash.js'
 import type { ReviewBundle } from './review-bundle.js'
 import {
   draftPrProposalSchema,
+  validationResultSchema,
   type ContextManifest,
   type ControlPlaneRequest,
   type DraftPrProposal,
@@ -37,6 +38,7 @@ export function buildDraftPrProposal(options: BuildDraftPrProposalOptions): Draf
     throw new Error('Reviewer rejection blocks a Draft PR proposal.')
   }
   const changedFiles = consolidateEdits(options.appliedEdits)
+  const validationResults = options.validationResults.map(result => validationResultSchema.parse(result))
   if (changedFiles.length === 0) throw new Error('A Draft PR proposal requires at least one changed file.')
   assertReviewEvidence(options, changedFiles)
   const partial = {
@@ -52,7 +54,7 @@ export function buildDraftPrProposal(options: BuildDraftPrProposalOptions): Draf
     summary: options.implementationSummary,
     acceptanceCriteria: options.request.issue.acceptanceCriteria,
     changedFiles,
-    validationResults: options.validationResults,
+    validationResults,
     skippedChecks: [...(options.skippedChecks ?? [])],
     model: options.config.model,
     promptVersion: options.config.promptVersion,
@@ -101,7 +103,8 @@ function assertReviewEvidence(
     'Fresh review current-file snapshots differ from the proposed files.',
   )
   if (bundle.diffHash !== sha256(bundle.diff)) throw new Error('Fresh review diff hash is invalid.')
-  if (hashJson(bundle.validationResults) !== hashJson(options.validationResults)) {
+  const normalizedValidationResults = options.validationResults.map(result => validationResultSchema.parse(result))
+  if (hashJson(bundle.validationResults) !== hashJson(normalizedValidationResults)) {
     throw new Error('Fresh review validation evidence differs from the proposal evidence.')
   }
   const snapshots = new Map(bundle.currentFiles.map(file => [file.path, file]))

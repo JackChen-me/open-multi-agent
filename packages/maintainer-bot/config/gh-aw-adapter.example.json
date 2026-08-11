@@ -19,6 +19,8 @@
     "modelEnvironmentForbidden": [
       "GITHUB_TOKEN",
       "GH_TOKEN",
+      "MAINTAINER_BOT_APP_TOKEN",
+      "OMA_MAINTAINER_BOT_APP_PRIVATE_KEY",
       "GITHUB_APP_PRIVATE_KEY",
       "GITHUB_APP_INSTALLATION_TOKEN",
       "NPM_TOKEN",

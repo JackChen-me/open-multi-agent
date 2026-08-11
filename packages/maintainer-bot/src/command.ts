@@ -106,6 +106,8 @@ export function assertModelCredentialIsolation(env: NodeJS.ProcessEnv = process.
     'RELEASE_BOT_GITHUB_TOKEN',
     'GITHUB_APP_PRIVATE_KEY',
     'GITHUB_APP_INSTALLATION_TOKEN',
+    'MAINTAINER_BOT_APP_TOKEN',
+    'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY',
     'NPM_TOKEN',
     'NODE_AUTH_TOKEN',
   ]
@@ -113,7 +115,7 @@ export function assertModelCredentialIsolation(env: NodeJS.ProcessEnv = process.
     ...forbidden.filter(name => Boolean(env[name])),
     ...Object.keys(env).filter(name =>
       Boolean(env[name])
-      && /(?:GITHUB|^GH_|NPM|NODE_AUTH)/i.test(name)
+      && /(?:GITHUB|^GH_|NPM|NODE_AUTH|MAINTAINER_BOT_APP)/i.test(name)
       && /(?:TOKEN|SECRET|PRIVATE_KEY|CREDENTIAL)/i.test(name),
     ),
   ])]

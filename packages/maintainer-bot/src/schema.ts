@@ -3,6 +3,7 @@ import { z } from 'zod'
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/)
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/)
 const repoPath = z.string().trim().min(1).max(500)
+const environmentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)
 const boundedLine = z.string().trim().min(1).max(1_000).refine(
   value => !/[\r\n]/.test(value),
   'must be a single line',
@@ -74,6 +75,8 @@ export const issueRiskFlagSchema = z.enum([
   'dependency-compatibility-unknown',
   'nondeterministic-validation',
 ])
+
+export type IssueRiskFlag = z.infer<typeof issueRiskFlagSchema>
 
 export const issueCommentSchema = z.object({
   id: z.string().min(1),
@@ -168,6 +171,32 @@ export const validationCommandSchema = z.object({
   args: z.array(z.string().max(2_000)).max(100),
   cwd: repoPath.default('.'),
   timeoutMs: z.number().int().positive().max(30 * 60_000).default(10 * 60_000),
+  env: z.record(environmentName, z.string().max(2_000)).default({}),
+  unsetEnv: z.array(environmentName).max(100).default([]),
+}).superRefine((command, context) => {
+  for (const name of Object.keys(command.env)) {
+    if (/(?:TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH_SOCK)/i.test(name)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['env', name],
+        message: 'validation environment overrides cannot define credential-like variables',
+      })
+    }
+    if (command.unsetEnv.includes(name)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['env', name],
+        message: 'a validation environment variable cannot be both set and unset',
+      })
+    }
+  }
+  if (new Set(command.unsetEnv).size !== command.unsetEnv.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['unsetEnv'],
+      message: 'validation unsetEnv entries must be unique',
+    })
+  }
 })
 
 export type ValidationCommand = z.infer<typeof validationCommandSchema>
@@ -364,6 +393,10 @@ export const validationResultSchema = z.object({
   stdout: z.string(),
   stderr: z.string(),
   truncated: z.boolean(),
+  environment: z.object({
+    set: z.array(z.object({ name: environmentName, value: z.string().max(2_000) })),
+    unset: z.array(environmentName),
+  }).default({ set: [], unset: [] }),
 })
 
 export type ValidationResult = z.infer<typeof validationResultSchema>

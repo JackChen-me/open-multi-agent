@@ -6,6 +6,10 @@ describe('model credential isolation', () => {
     expect(() => assertModelCredentialIsolation({
       CODEX_GITHUB_PERSONAL_ACCESS_TOKEN: 'must-not-leak',
     })).toThrow(/CODEX_GITHUB_PERSONAL_ACCESS_TOKEN/)
+    expect(() => assertModelCredentialIsolation({
+      MAINTAINER_BOT_APP_TOKEN: 'must-not-leak',
+      OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'must-not-leak',
+    })).toThrow(/MAINTAINER_BOT_APP_TOKEN/)
   })
 
   it('allows the model provider credential in an otherwise isolated environment', () => {

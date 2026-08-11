@@ -13,6 +13,7 @@ This is a private npm-workspaces root. Run the commands below from the repositor
 | `create-oma-app` | Published scaffolder and starter templates | `packages/create-oma-app/src/`, `packages/create-oma-app/templates/`, `packages/create-oma-app/tests/` |
 | `@open-multi-agent/release-bot` | Private OMA-powered release planning and deterministic publication automation; never published | `packages/release-bot/src/`, `packages/release-bot/tests/`, `.github/workflows/release-bot.yml`, `.github/workflows/publish.yml` |
 | `@open-multi-agent/maintainer-bot` | Private evidence-first `agent-ready` Issue to Draft PR proposal engine; never receives GitHub write credentials or creates PRs itself | `packages/maintainer-bot/src/`, `packages/maintainer-bot/tests/`, `docs/maintainer-bot.md` |
+| `@open-multi-agent/maintainer-host` | Private deterministic GitHub Actions activation, durable claim, credential isolation, and Draft PR writer; never published | `packages/maintainer-host/src/`, `packages/maintainer-host/tests/`, `.github/workflows/maintainer-bot.yml` |
 
 Root-level `README.md`, `docs/`, `.github/`, and `scripts/` apply across workspaces. Paths in this file are repository-relative; do not assume an unprefixed `src/` or `tests/` means the workspace you intend.
 
@@ -60,6 +61,7 @@ Always inspect the focused diff and run `git diff --check`. Run the smallest rel
 - **Examples or catalog metadata:** `npm run test:example-catalog`; add a runnable example smoke test when executable behavior changes.
 - **Cross-workspace or dependency changes:** `npm run lint`, `npm test`, and `npm run build`; add the package/import/template smoke checks relevant to the changed surface.
 - **Maintainer bot:** relevant tests, then `npm run lint -w @open-multi-agent/maintainer-bot`, `npm run test -w @open-multi-agent/maintainer-bot`, and `npm run build -w @open-multi-agent/maintainer-bot`. Its model tests must use mock adapters and no GitHub write credentials.
+- **Maintainer host or activation workflow:** relevant host and engine tests, then `npm run lint -w @open-multi-agent/maintainer-host`, `npm run test -w @open-multi-agent/maintainer-host`, and `npm run build -w @open-multi-agent/maintainer-host`; statically validate the workflow. Tests must use a mocked GitHub client and scripted model, never a real write token or provider key.
 - **Provider E2E:** run only when the changed surface requires real-provider verification and the necessary credentials are safely available. Never expose credential values.
 
 Before finishing, report every command run and its outcome. If a relevant check was skipped or could not run, state the reason and residual risk. CI remains the source of truth for the complete Node 20/22/24 pre-merge matrix.

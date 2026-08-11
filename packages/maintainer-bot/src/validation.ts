@@ -21,10 +21,10 @@ export async function runRegisteredValidations(
 ): Promise<ValidationResult[]> {
   assertUniqueValidationIds(options.config.validationCommands)
   const now = options.now ?? (() => Date.now())
-  const environment = sanitizedChildEnvironment(options.env)
   const results: ValidationResult[] = []
   for (const validation of options.config.validationCommands) {
     assertValidationCwd(validation, options.config)
+    const environment = validationEnvironment(options.env, validation)
     const startedAt = now()
     const result = await options.runner.run(validation.command, validation.args, {
       cwd: validation.cwd === '.' ? options.repoRoot : resolveInside(options.repoRoot, validation.cwd),
@@ -45,9 +45,25 @@ export async function runRegisteredValidations(
       stdout: stdout.text,
       stderr: stderr.text,
       truncated: stdout.truncated || stderr.truncated,
+      environment: {
+        set: Object.entries(validation.env)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, value]) => ({ name, value })),
+        unset: [...validation.unsetEnv].sort(),
+      },
     }))
   }
   return results
+}
+
+function validationEnvironment(
+  source: NodeJS.ProcessEnv | undefined,
+  validation: ValidationCommand,
+): NodeJS.ProcessEnv {
+  const environment = sanitizedChildEnvironment(source)
+  for (const name of validation.unsetEnv) delete environment[name]
+  for (const [name, value] of Object.entries(validation.env)) environment[name] = value
+  return environment
 }
 
 export function allValidationsPassed(results: readonly ValidationResult[]): boolean {

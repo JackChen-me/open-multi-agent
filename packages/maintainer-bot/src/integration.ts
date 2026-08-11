@@ -219,10 +219,19 @@ export function revalidateDraftPrArtifact(
     throw new Error('Safe output reviewer did not pass every authorized acceptance criterion.')
   }
   const expectedValidations = config.validationCommands
-    .map(command => ({ id: command.id, command: renderCommand(command.command, command.args) }))
+    .map(command => ({
+      id: command.id,
+      command: renderCommand(command.command, command.args),
+      environment: {
+        set: Object.entries(command.env)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, value]) => ({ name, value })),
+        unset: [...command.unsetEnv].sort(),
+      },
+    }))
     .sort((a, b) => a.id.localeCompare(b.id))
   const actualValidations = proposal.validationResults
-    .map(result => ({ id: result.id, command: result.command }))
+    .map(result => ({ id: result.id, command: result.command, environment: result.environment }))
     .sort((a, b) => a.id.localeCompare(b.id))
   assertUniqueStrings(actualValidations.map(result => result.id), 'Safe output contains duplicate validation results.')
   if (JSON.stringify(actualValidations) !== JSON.stringify(expectedValidations)) {
