@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "contract": "oma-maintainer-harness-canary-v1",
+  "repository": "open-multi-agent/open-multi-agent",
+  "claudeCodeVersion": "2.1.220",
+  "model": "deepseek-v4-flash",
+  "allowedPaths": [
+    "packages/core/tests"
+  ],
+  "protectedPaths": [
+    ".git",
+    ".github",
+    ".env",
+    ".npmrc",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "package.json",
+    "package-lock.json"
+  ],
+  "validationRules": [
+    {
+      "path": "packages/core/tests/subpath-exports.test.ts",
+      "validationCommands": [
+        {
+          "id": "core-subpath-exports",
+          "command": "npm",
+          "args": ["run", "test", "-w", "@open-multi-agent/core", "--", "tests/subpath-exports.test.ts", "--no-cache"],
+          "cwd": ".",
+          "timeoutMs": 600000
+        },
+        {
+          "id": "git-diff-check",
+          "command": "git",
+          "args": ["diff", "--check"],
+          "cwd": ".",
+          "timeoutMs": 120000
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "wallClockMs": 1800000,
+    "maxTurns": 20,
+    "maxChangedFiles": 4,
+    "maxDiffBytes": 100000,
+    "maxFileBytes": 160000,
+    "maxProcessOutputBytes": 5000000,
+    "maxValidationOutputBytes": 50000
+  }
+}

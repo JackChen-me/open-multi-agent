@@ -1,0 +1,162 @@
+name: OMA Maintainer Harness Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Open agent-ready Issue to evaluate
+        required: true
+        default: '491'
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: oma-maintainer-harness-canary-${{ github.repository }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  coder:
+    if: github.repository == 'open-multi-agent/open-multi-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Create isolated control and artifact directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/oma-harness-control" "$RUNNER_TEMP/oma-harness-artifact"
+
+      - name: Fetch current Issue snapshot and pin default-branch SHA
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          OMA_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          OMA_SNAPSHOT_PATH: ${{ runner.temp }}/oma-harness-control/snapshot.json
+        with:
+          script: |
+            const fs = require('node:fs')
+            const issueNumberText = process.env.OMA_ISSUE_NUMBER ?? ''
+            if (!/^[1-9]\d{0,8}$/.test(issueNumberText)) throw new Error('issue_number must be a positive integer.')
+            const issueNumber = Number(issueNumberText)
+            const repository = context.repo.owner + '/' + context.repo.repo
+            const repo = await github.rest.repos.get(context.repo)
+            const branch = await github.rest.repos.getBranch({ ...context.repo, branch: repo.data.default_branch })
+            const baseSha = branch.data.commit.sha
+            if (context.sha !== baseSha) throw new Error('Canary workflow must run from the current default-branch SHA.')
+            const issue = (await github.rest.issues.get({ ...context.repo, issue_number: issueNumber })).data
+            if (issue.pull_request) throw new Error('Canary input must identify an Issue, not a pull request.')
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            })
+            if (comments.length > 200) throw new Error('Canary snapshot exceeds the material-evidence limit.')
+            const snapshot = {
+              schemaVersion: 1,
+              repository,
+              baseSha,
+              issue: {
+                number: issue.number,
+                title: issue.title,
+                body: issue.body ?? '',
+                state: issue.state,
+                author: issue.user?.login ?? 'unknown',
+                updatedAt: issue.updated_at,
+                labels: issue.labels.map(label => typeof label === 'string' ? label : label.name).filter(Boolean).sort(),
+              },
+              materialEvidence: comments.map(comment => ({
+                id: comment.id,
+                author: comment.user?.login ?? 'unknown',
+                body: comment.body ?? '',
+                updatedAt: comment.updated_at,
+              })),
+            }
+            fs.writeFileSync(process.env.OMA_SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2) + '\n', { mode: 0o600 })
+
+      - name: Check out pinned base without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: canary-repo
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: canary-repo/package-lock.json
+
+      - name: Install Claude Code sandbox runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap socat
+
+      - name: Install repository dependencies and pinned Claude Code
+        working-directory: canary-repo
+        shell: bash
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-cache
+        run: |
+          set -euo pipefail
+          npm ci
+          npm install --global @anthropic-ai/claude-code@2.1.220
+          claude --version | grep -F '2.1.220'
+
+      - name: Build deterministic canary runner
+        working-directory: canary-repo
+        shell: bash
+        run: npm run build -w @open-multi-agent/maintainer-harness-canary
+
+      - name: Preflight fail-closed validation sandbox
+        working-directory: canary-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          node packages/maintainer-harness-canary/dist/cli.js sandbox-preflight \
+            --repo "$GITHUB_WORKSPACE/canary-repo"
+
+      - name: Prepare structured canary request
+        working-directory: canary-repo
+        shell: bash
+        run: |
+          node packages/maintainer-harness-canary/dist/cli.js prepare \
+            --snapshot "$RUNNER_TEMP/oma-harness-control/snapshot.json" \
+            --policy packages/maintainer-harness-canary/config/canary-policy.json \
+            --output "$RUNNER_TEMP/oma-harness-control/request.json"
+
+      - name: Run credential-isolated Claude Code and DeepSeek canary
+        working-directory: canary-repo
+        shell: bash
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          exec 3<<<"${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}"
+          unset DEEPSEEK_API_KEY
+          exec env -i \
+            PATH="$PATH" \
+            LANG="${LANG:-C.UTF-8}" \
+            CI=1 \
+            TMPDIR="$RUNNER_TEMP" \
+            npm_config_cache="$RUNNER_TEMP/npm-cache" \
+            node packages/maintainer-harness-canary/dist/cli.js run \
+            --provider-key-fd 3 \
+            --request "$RUNNER_TEMP/oma-harness-control/request.json" \
+            --policy packages/maintainer-harness-canary/config/canary-policy.json \
+            --repo "$GITHUB_WORKSPACE/canary-repo" \
+            --artifact-dir "$RUNNER_TEMP/oma-harness-artifact"
+
+      - name: Upload untrusted canary evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maintainer-harness-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oma-harness-artifact
+          # A setup failure must remain the primary failure; expected runner failures write result.json.
+          if-no-files-found: warn
+          retention-days: 7
