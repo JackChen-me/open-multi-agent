@@ -233,6 +233,7 @@ describe('harness environment, settings, and credential isolation', () => {
         RUNNER_TRACKING_ID: 'tracking',
         NPM_TOKEN: 'npm-token',
         NODE_AUTH_TOKEN: 'node-token',
+        npm_config_cache: '/tmp/host-npm-cache',
         SSH_AUTH_SOCK: '/tmp/ssh.sock',
         OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'private-key',
       },
@@ -241,10 +242,15 @@ describe('harness environment, settings, and credential isolation', () => {
     })
     expect(env['ANTHROPIC_AUTH_TOKEN']).toBe(FAKE_KEY)
     expect(env['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB']).toBe('1')
-    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'RUNNER_TRACKING_ID', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'SSH_AUTH_SOCK', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY']) {
+    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'RUNNER_TRACKING_ID', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'npm_config_cache', 'SSH_AUTH_SOCK', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY']) {
       expect(env[name]).toBeUndefined()
     }
-    expect(() => assertHarnessCredentialIsolation({ GITHUB_TOKEN: 'x', CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' })).toThrow(/forbidden host credentials/)
+    for (const name of ['GITHUB_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'npm_config_cache']) {
+      expect(() => assertHarnessCredentialIsolation({
+        [name]: 'must-be-rejected',
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
+      })).toThrow(/forbidden host credentials/)
+    }
     expect(() => assertHarnessCredentialIsolation({ ANTHROPIC_AUTH_TOKEN: 'x' })).toThrow(/scrubbing/)
 
     const settings = buildHarnessSettings({

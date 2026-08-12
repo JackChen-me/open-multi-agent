@@ -150,7 +150,6 @@ jobs:
             LANG="${LANG:-C.UTF-8}" \
             CI=1 \
             TMPDIR="$RUNNER_TEMP" \
-            npm_config_cache="$RUNNER_TEMP/npm-cache" \
             node packages/maintainer-harness-canary/dist/cli.js run \
             --provider-key-fd 3 \
             --request "$RUNNER_TEMP/oma-harness-control/request.json" \

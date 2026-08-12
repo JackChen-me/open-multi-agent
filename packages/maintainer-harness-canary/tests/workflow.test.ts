@@ -9,6 +9,10 @@ describe('GitHub-hosted harness canary workflow', () => {
     const validationSandbox = await readFile(resolve(process.cwd(), 'src/validation-sandbox.ts'), 'utf8')
     const boundedProcess = await readFile(resolve(process.cwd(), 'src/bounded-process.ts'), 'utf8')
     const appArmorProfile = await readFile(resolve(process.cwd(), 'config/bwrap.apparmor'), 'utf8')
+    const installStep = workflow.match(/      - name: Install repository dependencies and pinned Claude Code[\s\S]*?(?=\n      - name:)/)?.[0]
+    const modelStep = workflow.match(/      - name: Run credential-isolated Claude Code and DeepSeek canary[\s\S]*?(?=\n      - name:)/)?.[0]
+    expect(installStep).toBeDefined()
+    expect(modelStep).toBeDefined()
     expect(workflow).toContain('workflow_dispatch:')
     expect(workflow).toContain('runs-on: ubuntu-24.04')
     const triggers = workflow.slice(workflow.indexOf('on:'), workflow.indexOf('permissions:'))
@@ -20,6 +24,10 @@ describe('GitHub-hosted harness canary workflow', () => {
     expect(workflow).not.toContain('pull-requests: write')
     expect(workflow).toContain('persist-credentials: false')
     expect(workflow).toContain('@anthropic-ai/claude-code@2.1.220')
+    expect(installStep).toContain('npm_config_cache: ${{ runner.temp }}/npm-cache')
+    expect(modelStep).toContain('exec env -i')
+    expect(modelStep).not.toContain('npm_config_cache')
+    expect(workflow.match(/npm_config_cache/g)).toHaveLength(1)
     expect(workflow).toContain('sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat')
     expect(workflow).toContain("test \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)\" = '1'")
     expect(workflow.match(/apparmor_restrict_unprivileged_userns/g)).toHaveLength(2)

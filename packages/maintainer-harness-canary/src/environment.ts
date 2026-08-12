@@ -7,7 +7,6 @@ const SAFE_SOURCE_NAMES = [
   'TZ',
   'CI',
   'TMPDIR',
-  'npm_config_cache',
 ] as const
 
 export function buildHarnessEnvironment(options: {
