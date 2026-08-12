@@ -1,6 +1,7 @@
 import { dirname, relative, resolve, sep } from 'node:path'
-import { realpath } from 'node:fs/promises'
+import { readdir, realpath } from 'node:fs/promises'
 import {
+  NodeCommandRunner,
   type CommandResult,
   type ValidationCommand,
   redactSensitiveText,
@@ -10,6 +11,12 @@ import {
   BoundedProcessRunner,
   type SandboxProcessRunner,
 } from './bounded-process.js'
+import {
+  assertValidationWorkspaceIntegrity,
+  cleanupValidationWorkspace,
+  createValidationWorkspace,
+  type ValidationWorkspace,
+} from './validation-workspace.js'
 
 export const BUBBLEWRAP_PATH = '/usr/bin/bwrap'
 export const SANDBOX_REPO_ROOT = '/workspace'
@@ -63,14 +70,17 @@ export interface ValidationSandboxInvocation {
 }
 
 export async function buildValidationSandboxInvocation(options: {
-  readonly repoRoot: string
+  readonly workspaceRoot: string
+  readonly dependencyRoot: string
   readonly command: ValidationCommand
   readonly nodeExecutable?: string
 }): Promise<ValidationSandboxInvocation> {
   assertPolicyEnvironment(options.command)
-  const repoRoot = await realpath(resolve(options.repoRoot))
-  const hostCwd = await realpath(resolve(repoRoot, options.command.cwd))
-  const cwdRelation = relative(repoRoot, hostCwd)
+  const workspaceRoot = await realpath(resolve(options.workspaceRoot))
+  const dependencyRoot = await realpath(resolve(options.dependencyRoot))
+  const gitMetadataRoot = await realpath(resolve(workspaceRoot, '.git'))
+  const hostCwd = await realpath(resolve(workspaceRoot, options.command.cwd))
+  const cwdRelation = relative(workspaceRoot, hostCwd)
   if (cwdRelation === '..' || cwdRelation.startsWith(`..${sep}`) || cwdRelation.startsWith(sep)) {
     throw new ValidationSandboxError('Validation cwd resolves outside the repository.')
   }
@@ -113,7 +123,9 @@ export async function buildValidationSandboxInvocation(options: {
     '--symlink', 'usr/lib', '/lib',
     '--symlink', 'usr/lib64', '/lib64',
     '--ro-bind', nodeRoot, nodeRoot,
-    '--ro-bind', repoRoot, SANDBOX_REPO_ROOT,
+    '--bind', workspaceRoot, SANDBOX_REPO_ROOT,
+    '--ro-bind', gitMetadataRoot, `${SANDBOX_REPO_ROOT}/.git`,
+    '--ro-bind', dependencyRoot, `${SANDBOX_REPO_ROOT}/node_modules`,
     '--chdir', sandboxCwd,
     '--clearenv',
     ...Object.entries(sandboxEnvironment).flatMap(([name, value]) => ['--setenv', name, value]),
@@ -132,7 +144,8 @@ export async function buildValidationSandboxInvocation(options: {
 }
 
 export async function runValidationInSandbox(options: {
-  readonly repoRoot: string
+  readonly workspaceRoot: string
+  readonly dependencyRoot: string
   readonly command: ValidationCommand
   readonly maxOutputBytes: number
   readonly runner?: SandboxProcessRunner
@@ -154,24 +167,54 @@ export async function runValidationInSandbox(options: {
 export async function preflightValidationSandbox(options: {
   readonly repoRoot: string
   readonly runner?: SandboxProcessRunner
+  /** Test-only location seam. The production CLI never exposes this option. */
+  readonly workspaceParentDir?: string
 }): Promise<void> {
+  const repoRoot = await realpath(resolve(options.repoRoot))
+  await assertNoViteStyleTempFiles(repoRoot)
+  const commandRunner = new NodeCommandRunner()
+  const baseSha = (await commandRunner.run('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim()
   const command: ValidationCommand = {
     id: 'sandbox-preflight',
     command: process.execPath,
-    args: ['--version'],
+    args: ['--eval', `
+const { realpathSync, unlinkSync, writeFileSync } = require('node:fs')
+const temporary = '/workspace/packages/core/vitest.config.ts.timestamp-oma-preflight.mjs'
+try {
+  writeFileSync(temporary, 'export default {}\\n')
+} finally {
+  unlinkSync(temporary)
+}
+if (realpathSync('/workspace/node_modules/@open-multi-agent/core') !== '/workspace/packages/core') {
+  throw new Error('Workspace dependency symlink escaped the disposable snapshot.')
+}
+`],
     cwd: '.',
     timeoutMs: 30_000,
     env: {},
     unsetEnv: [],
   }
   let result: CommandResult
+  let workspace: ValidationWorkspace | undefined
   try {
+    workspace = await createValidationWorkspace({
+      sourceRepoRoot: repoRoot,
+      baseSha,
+      changedPaths: [],
+      candidateDiff: '',
+      maxFileBytes: Number.MAX_SAFE_INTEGER,
+      parentDir: options.workspaceParentDir,
+    })
     result = await runValidationInSandbox({
-      repoRoot: options.repoRoot,
+      workspaceRoot: workspace.repoRoot,
+      dependencyRoot: workspace.dependencyRoot,
       command,
       maxOutputBytes: 10_000,
       runner: options.runner,
     })
+    if (result.exitCode === 0) {
+      await assertValidationWorkspaceIntegrity(workspace, Number.MAX_SAFE_INTEGER)
+    }
   } catch (error) {
     if (error instanceof BoundedProcessError) {
       throw new ValidationSandboxPreflightError({
@@ -195,6 +238,9 @@ export async function preflightValidationSandbox(options: {
       stdout: '<empty>',
       stderr: '<empty>',
     })
+  } finally {
+    if (workspace !== undefined) await cleanupValidationWorkspace(workspace)
+    await assertNoViteStyleTempFiles(repoRoot)
   }
   if (result.exitCode !== 0) {
     throw new ValidationSandboxPreflightError({
@@ -202,15 +248,24 @@ export async function preflightValidationSandbox(options: {
       reasonCode: 'BWRAP_EXIT_NONZERO',
       exitCode: result.exitCode,
       osErrorCode: null,
-      stdout: sanitizePreflightEvidence(result.stdout, options.repoRoot),
-      stderr: sanitizePreflightEvidence(result.stderr, options.repoRoot),
+      stdout: sanitizePreflightEvidence(result.stdout, repoRoot),
+      stderr: sanitizePreflightEvidence(result.stderr, repoRoot),
     })
   }
 }
 
+async function assertNoViteStyleTempFiles(repoRoot: string): Promise<void> {
+  const names = await readdir(resolve(repoRoot, 'packages/core'))
+  if (names.some(name => /^vitest\.config\.ts\.timestamp-.*\.mjs$/.test(name))) {
+    throw new Error('Host candidate checkout contains a Vite-style temporary config file.')
+  }
+}
+
 function sanitizePreflightEvidence(value: string, repoRoot: string): string {
-  const redacted = redactSensitiveText(value)
-    .split(repoRoot).join('<repo>')
+  const repoAliases = [repoRoot, repoRoot.replace(/^\/private(?=\/)/, '')]
+  let redacted = redactSensitiveText(value)
+  for (const alias of repoAliases) redacted = redacted.split(alias).join('<repo>')
+  redacted = redacted
     .replace(/\/(?:Users|home|private\/tmp|tmp)\/[^\s:'"`]+/g, '<path>')
     .replace(/(^|[\s(])\/[^\s:'"`)]*/g, '$1<path>')
     .replace(/[\r\n\t]+/g, ' ')

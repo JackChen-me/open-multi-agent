@@ -7,6 +7,7 @@ describe('GitHub-hosted harness canary workflow', () => {
     const workflow = await readFile(resolve(process.cwd(), '../../.github/workflows/maintainer-harness-canary.yml'), 'utf8')
     const cli = await readFile(resolve(process.cwd(), 'src/cli.ts'), 'utf8')
     const validationSandbox = await readFile(resolve(process.cwd(), 'src/validation-sandbox.ts'), 'utf8')
+    const validationWorkspace = await readFile(resolve(process.cwd(), 'src/validation-workspace.ts'), 'utf8')
     const boundedProcess = await readFile(resolve(process.cwd(), 'src/bounded-process.ts'), 'utf8')
     const appArmorProfile = await readFile(resolve(process.cwd(), 'config/bwrap.apparmor'), 'utf8')
     const installStep = workflow.match(/      - name: Install repository dependencies and pinned Claude Code[\s\S]*?(?=\n      - name:)/)?.[0]
@@ -54,9 +55,16 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
       "'--proc', '/proc'",
       "'--tmpfs', '/tmp'",
       "'--tmpfs', '/home'",
-      "'--ro-bind', repoRoot, SANDBOX_REPO_ROOT",
+      "'--bind', workspaceRoot, SANDBOX_REPO_ROOT",
+      "'--ro-bind', gitMetadataRoot, `${SANDBOX_REPO_ROOT}/.git`",
+      "'--ro-bind', dependencyRoot, `${SANDBOX_REPO_ROOT}/node_modules`",
       "'--clearenv'",
     ]) expect(validationSandbox).toContain(contract)
+    expect(validationSandbox).not.toContain("'--bind', repoRoot, SANDBOX_REPO_ROOT")
+    expect(validationWorkspace).toContain("'clone', '--quiet', '--no-hardlinks', '--no-checkout'")
+    expect(validationWorkspace).toContain("'remote', 'remove', 'origin'")
+    expect(validationWorkspace).toContain("'apply', '--binary', '--whitespace=nowarn'")
+    expect(validationWorkspace).toContain('cleanupValidationWorkspace')
     expect(validationSandbox).not.toContain("new NodeCommandRunner()).run(options.command.command")
     expect(validationSandbox).toContain('new BoundedProcessRunner()')
     expect(boundedProcess).toContain("shell: false")

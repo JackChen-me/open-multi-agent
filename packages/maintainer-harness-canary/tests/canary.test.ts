@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fstatSync, openSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -16,7 +16,9 @@ import {
   buildHarnessSettings,
   buildValidationSandboxInvocation,
   canaryArtifactSchema,
+  cleanupValidationWorkspace,
   computeCanarySnapshotRevision,
+  createValidationWorkspace,
   prepareCanaryRequest,
   preflightValidationSandbox,
   readProviderKeyFromFd,
@@ -98,11 +100,13 @@ test('${SANDBOX_ATTACK_MARKER}', async () => {
 
 class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
   readonly invocations: Array<{ command: string; args: readonly string[]; options: BoundedProcessRunOptions }> = []
+  readonly viteTemporaryWorkspaces: string[] = []
 
   constructor(
     private readonly failToStart = false,
     private readonly forcedExitCode?: number,
     private readonly boundedFailure?: BoundedProcessError,
+    private readonly mutateWorkspace?: (workspaceRoot: string) => Promise<void>,
   ) {}
 
   async run(command: string, args: readonly string[], options: BoundedProcessRunOptions): Promise<CommandResult> {
@@ -120,9 +124,13 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
     if (this.forcedExitCode !== undefined) {
       return { stdout: '', stderr: 'mock sandbox setup failed\n', exitCode: this.forcedExitCode }
     }
-    const repoBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/workspace')
+    const repoBind = args.findIndex((value, index) => value === '--bind' && args[index + 2] === '/workspace')
     expect(repoBind).toBeGreaterThanOrEqual(0)
     const hostRepo = args[repoBind + 1]!
+    expect(args).toEqual(expect.arrayContaining([
+      '--ro-bind', join(hostRepo, '.git'), '/workspace/.git',
+      '--ro-bind', expect.any(String), '/workspace/node_modules',
+    ]))
     const source = await readFile(join(hostRepo, BASE_FILE), 'utf8')
     if (source.includes(SANDBOX_ATTACK_MARKER)) {
       return { stdout: '', stderr: 'sandbox denied hostile validation attempts\n', exitCode: 1 }
@@ -132,6 +140,13 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
     if (innerArgs.some(value => value.includes('process.exit(7)'))) {
       return { stdout: '', stderr: '', exitCode: 7 }
     }
+    if (innerArgs.some(value => value.includes('vitest.config.ts.timestamp-oma-preflight.mjs'))) {
+      const temporary = join(hostRepo, 'packages/core/vitest.config.ts.timestamp-oma-preflight.mjs')
+      await writeFile(temporary, 'export default {}\n')
+      this.viteTemporaryWorkspaces.push(hostRepo)
+      await unlink(temporary)
+    }
+    await this.mutateWorkspace?.(hostRepo)
     return {
       stdout: source.includes('provider-key-visible=') ? 'provider-key-visible=false\nancestor-visible=false\n' : 'mock sandbox validation passed\n',
       stderr: '',
@@ -338,26 +353,76 @@ describe('fail-closed deterministic validation sandbox', () => {
     })).rejects.toMatchObject({ reason: 'SPAWN_ERROR', osErrorCode: 'ENOENT' })
   })
 
-  it('constructs a PID/proc/network-isolated read-only Bubblewrap invocation with a cleared environment', async () => {
+  it('builds the disposable snapshot from tracked base plus the exact candidate patch only', async () => {
+    const fixture = await repoFixture('success')
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
+    await writeFile(join(fixture.root, BASE_FILE), candidate)
+    await writeFile(join(fixture.root, 'ignored-host.txt'), 'ignored host state\n')
+    await writeFile(join(fixture.root, 'untracked-host.txt'), 'untracked host state\n')
+    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
+    const workspace = await createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [BASE_FILE],
+      candidateDiff: diff,
+      maxFileBytes: 20_000,
+      parentDir: parent,
+    })
+    expect(await readFile(join(workspace.repoRoot, BASE_FILE), 'utf8')).toBe(candidate)
+    expect(await fileExists(join(workspace.repoRoot, 'ignored-host.txt'))).toBe(false)
+    expect(await fileExists(join(workspace.repoRoot, 'untracked-host.txt'))).toBe(false)
+    expect((await exec('git', ['rev-parse', 'HEAD'], { cwd: workspace.repoRoot })).stdout.trim()).toBe(fixture.baseSha)
+    expect((await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: workspace.repoRoot })).stdout).toBe(diff)
+    await cleanupValidationWorkspace(workspace)
+    expect(await readdir(parent)).toEqual([])
+  })
+
+  it('mounts only a disposable workspace writable while Git metadata and dependencies stay read-only', async () => {
     const fixture = await repoFixture('success')
     const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
-    const invocation = await buildValidationSandboxInvocation({ repoRoot: fixture.root, command })
-    const canonicalRoot = await realpath(fixture.root)
-    expect(invocation.command).toBe('/usr/bin/bwrap')
-    expect(invocation.cwd).toBe('/')
-    expect(invocation.env).toEqual({})
-    expect(invocation.args).toEqual(expect.arrayContaining([
-      '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
-      '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev',
-      '--cap-drop', 'ALL',
-      '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
-      '--ro-bind', canonicalRoot, '/workspace', '--chdir', '/workspace',
-    ]))
-    expect(invocation.args).not.toContain(fixture.artifactDir)
-    expect(invocation.args).not.toContain(fixture.harnessDir)
-    expect(invocation.args).not.toContain(process.env['HOME'])
-    expect(invocation.args).not.toContain(process.env['RUNNER_TEMP'])
-    expect(invocation.args).not.toContain('--bind')
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    await writeFile(join(fixture.root, BASE_FILE), original.replace('// TODO missing barrels', "assert.ok('/observability')"))
+    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const workspace = await createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [BASE_FILE],
+      candidateDiff: diff,
+      maxFileBytes: 20_000,
+    })
+    try {
+      const invocation = await buildValidationSandboxInvocation({
+        workspaceRoot: workspace.repoRoot,
+        dependencyRoot: workspace.dependencyRoot,
+        command,
+      })
+      const canonicalWorkspace = await realpath(workspace.repoRoot)
+      const canonicalOriginal = await realpath(fixture.root)
+      expect(invocation.command).toBe('/usr/bin/bwrap')
+      expect(invocation.cwd).toBe('/')
+      expect(invocation.env).toEqual({})
+      expect(invocation.args).toEqual(expect.arrayContaining([
+        '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
+        '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev',
+        '--cap-drop', 'ALL',
+        '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
+        '--bind', canonicalWorkspace, '/workspace',
+        '--ro-bind', join(canonicalWorkspace, '.git'), '/workspace/.git',
+        '--ro-bind', workspace.dependencyRoot, '/workspace/node_modules',
+        '--chdir', '/workspace',
+      ]))
+      expect(invocation.args).not.toEqual(expect.arrayContaining(['--bind', canonicalOriginal, '/workspace']))
+      expect(invocation.args).not.toEqual(expect.arrayContaining(['--ro-bind', canonicalOriginal, '/workspace']))
+      expect(invocation.args).not.toContain(fixture.artifactDir)
+      expect(invocation.args).not.toContain(fixture.harnessDir)
+      expect(invocation.args).not.toContain(process.env['HOME'])
+      expect(invocation.args).not.toContain(process.env['RUNNER_TEMP'])
+      expect(await readlink(join(workspace.dependencyRoot, '@open-multi-agent/core'))).toBe('../../packages/core')
+    } finally {
+      await cleanupValidationWorkspace(workspace)
+    }
   })
 
   it('rejects policy attempts to override protected or credential environment names', async () => {
@@ -365,7 +430,11 @@ describe('fail-closed deterministic validation sandbox', () => {
     const validCommand = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
     for (const env of [{ HOME: '/host' }, { ACTIONS_RUNTIME_TOKEN: 'bad' }]) {
       const command = { ...validCommand, env }
-      await expect(buildValidationSandboxInvocation({ repoRoot: fixture.root, command })).rejects.toThrow(/environment/)
+      await expect(buildValidationSandboxInvocation({
+        workspaceRoot: fixture.root,
+        dependencyRoot: join(fixture.root, 'node_modules'),
+        command,
+      })).rejects.toThrow(/environment/)
     }
   })
 
@@ -411,6 +480,21 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(JSON.parse(JSON.stringify(diagnostic))).toEqual(diagnostic)
   })
 
+  it('preflights a Vite-style sibling write only in the disposable workspace and cleans it', async () => {
+    const fixture = await repoFixture('success')
+    const parent = await mkdtemp(join(tmpdir(), 'oma-preflight-parent-'))
+    const runner = new StrictMockValidationSandboxRunner()
+    await preflightValidationSandbox({
+      repoRoot: fixture.root,
+      runner,
+      workspaceParentDir: parent,
+    })
+    expect(runner.viteTemporaryWorkspaces).toHaveLength(1)
+    expect(runner.viteTemporaryWorkspaces[0]).not.toBe(await realpath(fixture.root))
+    expect((await readdir(join(fixture.root, 'packages/core'))).some(name => name.includes('.timestamp-'))).toBe(false)
+    expect(await readdir(parent)).toEqual([])
+  })
+
   it('fails closed when Bubblewrap starts but its sandbox setup exits nonzero', async () => {
     const fixture = await repoFixture('success')
     await expect(runFixture(fixture, {
@@ -418,6 +502,71 @@ describe('fail-closed deterministic validation sandbox', () => {
     })).rejects.toThrow('VALIDATION_FAILED')
     const artifact = await expectFailedArtifact(fixture, 'VALIDATION_FAILED')
     expect(artifact.validationResults[0]).toMatchObject({ success: false, exitCode: 125 })
+  })
+
+  it('runs ordered policy commands in one disposable snapshot and cleans it after success', async () => {
+    const fixture = await repoFixture('success')
+    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
+    const selectedPolicy = policy()
+    const rule = selectedPolicy.validationRules[0]!
+    const first = rule.validationCommands[0]!
+    const twoCommandPolicy: CanaryPolicy = {
+      ...selectedPolicy,
+      validationRules: [{
+        ...rule,
+        validationCommands: [first, { ...first, id: 'second-focused-check' }],
+      }],
+    }
+    const runner = new StrictMockValidationSandboxRunner()
+    const artifact = await runFixture(fixture, {
+      policy: twoCommandPolicy,
+      validationSandboxProcessRunner: runner,
+      validationWorkspaceParentDir: parent,
+    })
+    expect(artifact.status).toBe('SUCCEEDED')
+    expect(runner.invocations).toHaveLength(2)
+    const workspaceSources = runner.invocations.map(invocation => {
+      const bind = invocation.args.findIndex((value, index) => value === '--bind' && invocation.args[index + 2] === '/workspace')
+      return invocation.args[bind + 1]
+    })
+    expect(new Set(workspaceSources).size).toBe(1)
+    expect(await readdir(parent)).toEqual([])
+  })
+
+  it.each([
+    ['candidate diff', async (workspaceRoot: string) => {
+      await writeFile(join(workspaceRoot, BASE_FILE), 'validation changed candidate\n')
+    }],
+    ['HEAD', async (workspaceRoot: string) => {
+      await writeFile(join(workspaceRoot, '.git/HEAD'), `${'f'.repeat(40)}\n`)
+    }],
+    ['path set', async (workspaceRoot: string) => {
+      await writeFile(join(workspaceRoot, 'validation-extra.txt'), 'unexpected\n')
+    }],
+    ['file type', async (workspaceRoot: string) => {
+      await unlink(join(workspaceRoot, BASE_FILE))
+      await symlink('../src/extra.ts', join(workspaceRoot, BASE_FILE))
+    }],
+  ] as const)('fails closed and cleans up when validation changes the snapshot %s', async (_label, mutateWorkspace) => {
+    const fixture = await repoFixture('success')
+    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
+    const runner = new StrictMockValidationSandboxRunner(false, undefined, undefined, mutateWorkspace)
+    await expect(runFixture(fixture, {
+      validationSandboxProcessRunner: runner,
+      validationWorkspaceParentDir: parent,
+    })).rejects.toThrow('VALIDATION_FAILED')
+    await expectFailedArtifact(fixture, 'VALIDATION_FAILED')
+    expect(await readdir(parent)).toEqual([])
+  })
+
+  it('cleans the disposable snapshot when validation fails', async () => {
+    const fixture = await repoFixture('success')
+    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
+    await expect(runFixture(fixture, {
+      validationSandboxProcessRunner: new StrictMockValidationSandboxRunner(false, 125),
+      validationWorkspaceParentDir: parent,
+    })).rejects.toThrow('VALIDATION_FAILED')
+    expect(await readdir(parent)).toEqual([])
   })
 
   it('writes only a safe failure artifact when bounded validation output is exceeded', async () => {
@@ -672,6 +821,7 @@ async function repoFixture(mode: string) {
   const capturePath = join(harnessDir, 'capture.json')
   await mkdir(join(root, 'packages/core/tests'), { recursive: true })
   await mkdir(join(root, 'packages/core/src'), { recursive: true })
+  await writeFile(join(root, '.gitignore'), 'node_modules/\nignored-host.txt\n')
   await writeFile(join(root, BASE_FILE), `import test from 'node:test'\nimport assert from 'node:assert/strict'\n\ntest('subpaths', () => {\n  assert.ok('existing')\n  // TODO missing barrels\n})\n`)
   await writeFile(join(root, 'packages/core/src/extra.ts'), 'export const extra = true\n')
   await exec('git', ['init', '-q'], { cwd: root })
@@ -681,6 +831,8 @@ async function repoFixture(mode: string) {
   await exec('git', ['commit', '-qm', 'fixture'], { cwd: root })
   const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: root })
   const baseSha = stdout.trim()
+  await mkdir(join(root, 'node_modules/@open-multi-agent'), { recursive: true })
+  await symlink('../../packages/core', join(root, 'node_modules/@open-multi-agent/core'))
   const harnessScript = join(harnessDir, 'mock-harness.mjs')
   const operations: Record<string, string> = {
     success: `await writeFile(target, (await readFile(target, 'utf8')).replace('// TODO missing barrels', "assert.ok('/observability')\\n  assert.ok('/observability/file')\\n  assert.ok('/acp')\\n  assert.ok('/process')"))`,
@@ -729,6 +881,7 @@ async function runFixture(
     requestMutator?: (request: CanaryRequest) => CanaryRequest
     sourceEnvironment?: NodeJS.ProcessEnv
     validationSandboxProcessRunner?: SandboxProcessRunner
+    validationWorkspaceParentDir?: string
   } = {},
 ) {
   if (fixture.attackSource.length > 0) {
@@ -751,6 +904,7 @@ async function runFixture(
     claudeCommand: options.claudeCommand ?? process.execPath,
     claudeArgsPrefix: options.claudeCommand === undefined ? [fixture.harnessScript] : [],
     validationSandboxProcessRunner: options.validationSandboxProcessRunner ?? new StrictMockValidationSandboxRunner(),
+    validationWorkspaceParentDir: options.validationWorkspaceParentDir,
   })
 }
 
