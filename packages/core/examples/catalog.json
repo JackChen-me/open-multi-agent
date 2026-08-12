@@ -684,6 +684,16 @@
       "level": "beginner"
     },
     {
+      "id": "orcarouter",
+      "path": "providers/orcarouter.ts",
+      "title": "OrcaRouter",
+      "description": "Run the standard three-agent team through OrcaRouter's OpenAI-compatible aggregation gateway.",
+      "section": "models-providers",
+      "capabilities": ["provider-adapter", "openai-compatible"],
+      "format": "script",
+      "level": "beginner"
+    },
+    {
       "id": "qwen",
       "path": "providers/qwen.ts",
       "title": "Qwen",

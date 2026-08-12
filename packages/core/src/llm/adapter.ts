@@ -45,7 +45,7 @@ import {
  * directly and bypassing this factory, or via {@link AISdkAdapter} from
  * `@open-multi-agent/core/ai-sdk` (optional peer `ai`).
  */
-export type SupportedProvider = 'anthropic' | 'azure-openai' | 'bedrock' | 'copilot' | 'deepseek' | 'doubao' | 'grok' | 'hunyuan' | 'minimax' | 'mimo' | 'openai' | 'gemini' | 'qiniu'
+export type SupportedProvider = 'anthropic' | 'azure-openai' | 'bedrock' | 'copilot' | 'deepseek' | 'doubao' | 'grok' | 'hunyuan' | 'minimax' | 'mimo' | 'openai' | 'gemini' | 'qiniu' | 'orcarouter'
 
 const PROVIDER_DEFAULT_BASE_URLS: Partial<Record<SupportedProvider, string>> = {
   anthropic: 'https://api.anthropic.com',
@@ -56,6 +56,7 @@ const PROVIDER_DEFAULT_BASE_URLS: Partial<Record<SupportedProvider, string>> = {
   minimax: 'https://api.minimax.io/v1',
   mimo: 'https://api.xiaomimimo.com/v1',
   openai: 'https://api.openai.com/v1',
+  orcarouter: 'https://api.orcarouter.ai/v1',
   qiniu: 'https://api.qnaigc.com/v1',
 }
 
@@ -144,6 +145,7 @@ function prepareProviderBaseURL(
  * - `hunyuan`      → `HUNYUAN_API_KEY`, optional `HUNYUAN_BASE_URL`
  *                     (defaults to the Tencent MaaS / TokenHub endpoint)
  * - `qiniu`        → `QINIU_API_KEY`
+ * - `orcarouter`   → `ORCAROUTER_API_KEY`
  * - `bedrock`      → no API key; credentials via AWS SDK default provider chain
  *                     (env vars, shared config, IAM role). Pass `region` (4th arg)
  *                     or set `AWS_REGION`; falls back to `'us-east-1'`.
@@ -216,6 +218,10 @@ export async function createAdapter(
     case 'qiniu': {
       const { QiniuAdapter } = await import('./qiniu.js')
       return new QiniuAdapter(apiKey, policyBaseURL, policy)
+    }
+    case 'orcarouter': {
+      const { OrcaRouterAdapter } = await import('./orcarouter.js')
+      return new OrcaRouterAdapter(apiKey, policyBaseURL, policy)
     }
     case 'azure-openai': {
       // For azure-openai, the `baseURL` parameter serves as the Azure endpoint URL.

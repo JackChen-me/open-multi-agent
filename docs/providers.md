@@ -44,6 +44,7 @@ The framework ships a wired-in provider name for each of these. Set `provider` a
 | MiniMax (China) | `provider: 'minimax'` + `MINIMAX_BASE_URL` | `MINIMAX_API_KEY` | `MiniMax-M3` | Set `MINIMAX_BASE_URL=https://api.minimaxi.com/v1`. |
 | MiMo | `provider: 'mimo'` | `MIMO_API_KEY` (+ optional `MIMO_BASE_URL`) | `mimo-v2.5-pro` | OpenAI-compatible. Defaults to pay-as-you-go endpoint `https://api.xiaomimimo.com/v1`; Token Plan keys (`tp-...`) require the cluster base URL from your subscription page, such as `https://token-plan-cn.xiaomimimo.com/v1`. Supports reasoning/tool-call loops through the built-in MiMo adapter. See [`providers/mimo`](../packages/core/examples/providers/mimo.ts). |
 | Qiniu | `provider: 'qiniu'` | `QINIU_API_KEY` | `deepseek-v3` | OpenAI-compatible. Endpoint `https://api.qnaigc.com/v1`; multiple model families, see [Qiniu AI docs](https://developer.qiniu.com/aitokenapi/12882/ai-inference-api). |
+| OrcaRouter | `provider: 'orcarouter'` | `ORCAROUTER_API_KEY` | `anthropic/claude-haiku-4.5` | OpenAI-compatible. Aggregation gateway over 190+ models behind a single endpoint `https://api.orcarouter.ai/v1` and key. Model names use the `provider/model` namespace (e.g. `anthropic/claude-haiku-4.5`, `orcarouter/auto`). See [`providers/orcarouter`](../packages/core/examples/providers/orcarouter.ts). |
 | AWS Bedrock | `provider: 'bedrock'` | none (AWS SDK credential chain) | `anthropic.claude-3-5-haiku-20241022-v1:0` | No API key. Set `AWS_REGION` or pass `region` as the 4th arg to `createAdapter`. Credentials come from env vars, shared config, or IAM role. Newer Claude models can require a cross-region inference profile prefix such as `us.`. Also supports Llama, Mistral, and Cohere. See [`providers/bedrock`](../packages/core/examples/providers/bedrock.ts). Requires `npm install @aws-sdk/client-bedrock-runtime`. |
 
 ## OpenAI-Compatible Providers
@@ -57,6 +58,7 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 | LM Studio (local) | `provider: 'openai'` + `baseURL` | none | server-loaded | |
 | llama.cpp server (local) | `provider: 'openai'` + `baseURL` | none | server-loaded | |
 | OpenRouter | `provider: 'openai'` + `baseURL: 'https://openrouter.ai/api/v1'` + `apiKey` | `OPENROUTER_API_KEY` | `openai/gpt-4o-mini` | |
+| OrcaRouter | `provider: 'openai'` + `baseURL: 'https://api.orcarouter.ai/v1'` + `apiKey` | `ORCAROUTER_API_KEY` | `anthropic/claude-haiku-4.5` | Prefer the built-in `orcarouter` provider when using the OrcaRouter gateway. |
 | Groq | `provider: 'openai'` + `baseURL: 'https://api.groq.com/openai/v1'` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
 | Mistral | `provider: 'openai'` + `baseURL: 'https://api.mistral.ai/v1'` | `MISTRAL_API_KEY` | `mistral-large-latest` | See [`providers/mistral`](../packages/core/examples/providers/mistral.ts). |
 | MiMo | `provider: 'openai'` + `baseURL: 'https://api.xiaomimimo.com/v1'` | `MIMO_API_KEY` | `mimo-v2.5-pro` | Prefer the built-in `mimo` provider when using tool-calling agent loops. Token Plan users should set their `token-plan-*.xiaomimimo.com/v1` base URL. |
