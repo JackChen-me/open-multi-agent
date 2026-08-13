@@ -26,6 +26,73 @@ describe('GitHub event to deterministic ControlPlaneRequest', () => {
     expect(evaluateAdmission(request)).toMatchObject({ status: 'AGENT_READY', mayDevelop: true })
   })
 
+  it('builds the #501 request without treating packaged filenames or non-goals as manual risk', async () => {
+    const body = `## Problem
+
+\`packages/otel/README.md\` uses repository-relative paths for two resources outside the OTel package directory. Those links work while browsing the monorepo, but they are not portable with the README shipped in the npm package.
+
+## Current behavior
+
+The README links to:
+
+- \`../../docs/egress-policy.md#enforcement-matrix\`
+- \`../core/examples/integrations/observability-v2/otel-provider.ts\`
+
+The \`@open-multi-agent/otel\` package publishes \`dist\`, \`README.md\`, and \`LICENSE\`; neither the repository-level \`docs/\` directory nor the sibling core workspace is included. A reader viewing the packaged README therefore cannot resolve these paths against the package contents.
+
+## To reproduce
+
+1. Inspect the two relative links in \`packages/otel/README.md\`.
+2. Inspect the \`files\` allowlist in \`packages/otel/package.json\`, or run \`npm pack --dry-run --ignore-scripts -w @open-multi-agent/otel\` from the repository root.
+3. Observe that the linked repository-level document and core example are not part of the OTel package artifact.
+
+## Expected behavior
+
+Cross-workspace and repository-level links in the OTel package README use canonical repository URLs that work both on GitHub and when the README is rendered from the published package.
+
+## Acceptance criteria
+
+- Replace the egress enforcement matrix link with a canonical URL to the current file and anchor in \`open-multi-agent/open-multi-agent\`.
+- Replace the \`otel-provider.ts\` example link with a canonical URL to the current example in \`open-multi-agent/open-multi-agent\`.
+- Both target URLs return the intended repository resources.
+- No other README wording or links are changed unless required for the two replacements.
+- \`git diff --check\` passes.
+
+## Target paths
+
+- \`packages/otel/README.md\`
+
+## Out of scope
+
+- Changes to the linked core documentation or example.
+- Other workspaces or files.
+- Runtime behavior, architecture, public APIs, dependencies, CI, release, publication, security, permissions, or privacy.
+- Adding files to the published package artifact.
+`
+    const title = '[Docs] Make OTel README cross-workspace links portable'
+    const labels = [{ name: 'agent-ready' }]
+    const github = new FakeGitHub()
+    github.issue = { ...github.issue, title, body, labels }
+    const original = labelEvent()
+    const event = labelEvent({ issue: { ...original.issue, title, body, labels } })
+    const request = await build(github, event)
+    expect(request.issue.riskFlags).toEqual([])
+    expect(evaluateAdmission(request)).toMatchObject({ status: 'AGENT_READY', mayDevelop: true })
+  })
+
+  it('includes acceptance criteria in deterministic risk scanning', async () => {
+    const body = ISSUE_BODY.replace(
+      '- The focused runtime test passes without an ambient OMA_MODEL.',
+      '- Change privacy permissions before publication.',
+    )
+    const github = new FakeGitHub()
+    github.issue.body = body
+    const original = labelEvent()
+    const request = await build(github, labelEvent({ issue: { ...original.issue, body } }))
+    expect(request.issue.riskFlags).toEqual(expect.arrayContaining(['permissions', 'privacy', 'release']))
+    expect(evaluateAdmission(request).status).toBe('MANUAL_ONLY')
+  })
+
   it('accounts for one deleted non-authoritative bootstrap status without weakening material revision checks', async () => {
     const github = new FakeGitHub()
     const event = labelEvent({ issue: { ...labelEvent().issue, comments: 1 } })

@@ -165,9 +165,17 @@ Architecture design, major public API changes, breaking changes, broad
 cross-workspace refactors, security, permissions, privacy, licenses, CI,
 release/publication, dependency upgrades without fixed compatibility targets,
 trackers/discussions/questions, and work without deterministic validation are
-`MANUAL_ONLY`. `riskFlags` are structured control-plane evidence reviewed by
-the maintainer before granting `agent-ready`; a model may suggest risk but
-cannot issue or renew authorization.
+`MANUAL_ONLY`. Deterministic risk scanning covers the title, labels, and parsed
+in-scope problem, current behavior, expected behavior, and acceptance criteria.
+Only descriptive problem/current-behavior inventory clauses that list another
+ordinary artifact alongside `LICENSE` or `SECURITY.md`, plus explicit local
+link/reference phrases, treat those names as file references. The rule does not
+cross sentence, semicolon, or line boundaries; expected behavior, acceptance
+criteria, unknown syntax, modal/negative phrasing, and other Markdown quoting
+remain fully scanned. Sensitive target paths are classified independently of
+prose. `riskFlags` are structured control-plane evidence reviewed by the
+maintainer before granting `agent-ready`; a model may suggest risk but cannot
+issue or renew authorization.
 
 The issue revision hashes material issue fields, comments, confirmed scope,
 acceptance criteria, linked work, and blockers. Editing that material after

@@ -7,6 +7,24 @@ import {
 import { productionPolicySchema } from '../src/schema.js'
 import { productionPolicy } from './helpers.js'
 
+function riskInput(
+  policy: Awaited<ReturnType<typeof productionPolicy>>,
+  overrides: Partial<Parameters<typeof deriveRiskFlags>[0]> = {},
+): Parameters<typeof deriveRiskFlags>[0] {
+  return {
+    policy,
+    targetPaths: ['packages/otel/README.md'],
+    targetWorkspaces: ['@open-multi-agent/otel'],
+    title: 'Fix documentation wording',
+    problem: 'The wording is unclear.',
+    currentBehavior: 'Readers see unclear wording.',
+    expectedBehavior: 'The wording is precise.',
+    acceptanceCriteria: ['The wording is updated.'],
+    labels: [],
+    ...overrides,
+  }
+}
+
 describe('trusted production policy and command registry', () => {
   it('accepts #488 as an exact create-oma-app file scope with trusted ambient and clean validations', async () => {
     const policy = await productionPolicy()
@@ -47,30 +65,87 @@ describe('trusted production policy and command registry', () => {
 
   it('routes workflow, permission, public-entry, and cross-workspace requests to manual risks', async () => {
     const policy = await productionPolicy()
-    expect(deriveRiskFlags({
-      policy,
+    expect(deriveRiskFlags(riskInput(policy, {
       targetPaths: ['.github/workflows/ci.yml'],
       targetWorkspaces: ['repository-control-plane'],
-      title: 'Update CI', body: 'Change CI behavior.', labels: [],
-    })).toContain('ci')
-    expect(deriveRiskFlags({
-      policy,
+      title: 'Update CI', problem: 'Change CI behavior.',
+    }))).toContain('ci')
+    expect(deriveRiskFlags(riskInput(policy, {
       targetPaths: ['packages/core/src/index.ts'],
       targetWorkspaces: ['@open-multi-agent/core'],
-      title: 'Change exports', body: 'Change an export.', labels: [],
-    })).toContain('public-api-major')
-    expect(deriveRiskFlags({
-      policy,
+      title: 'Change exports', problem: 'Change an export.',
+    }))).toContain('public-api-major')
+    expect(deriveRiskFlags(riskInput(policy, {
       targetPaths: ['packages/core/tests/a.test.ts', 'packages/otel/tests/b.test.ts'],
       targetWorkspaces: ['@open-multi-agent/core', '@open-multi-agent/otel'],
-      title: 'Refactor tests', body: 'Refactor tests.', labels: [],
-    })).toContain('cross-workspace-refactor')
-    expect(deriveRiskFlags({
-      policy,
+      title: 'Refactor tests', problem: 'Refactor tests.',
+    }))).toContain('cross-workspace-refactor')
+    expect(deriveRiskFlags(riskInput(policy, {
       targetPaths: ['.git/config'],
       targetWorkspaces: ['repository-control-plane'],
-      title: 'Change local repository config', body: 'Change the file.', labels: [],
-    })).toContain('permissions')
+      title: 'Change local repository config', problem: 'Change the file.',
+    }))).toContain('permissions')
+  })
+
+  it('does not infer manual risk from ordinary sensitive-file references', async () => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, {
+      problem: 'The package publishes `dist`, `README.md`, and `LICENSE`.',
+      currentBehavior: 'The README links to `SECURITY.md`.',
+      expectedBehavior: 'Use canonical repository links.',
+    }))).toEqual([])
+  })
+
+  it.each([
+    ['request in the next sentence', 'The package contains README.md. Amend LICENSE.'],
+    ['request after a semicolon', 'The package publishes README.md; relicense under MIT.'],
+    ['sensitive-only inventory', 'The package ships LICENSE.'],
+    ['modal inventory', 'The package should ship `README.md` and `LICENSE`.'],
+    ['unknown inventory suffix', 'The package ships `README.md` and `LICENSE` changes.'],
+  ])('keeps %s license-sensitive', async (_case, problem) => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, { problem }))).toContain('license')
+  })
+
+  it.each([
+    ['expected', { expectedBehavior: 'The package ships LICENSE.' }],
+    ['acceptance', { acceptanceCriteria: ['The artifact contains `README.md` and `LICENSE`.'] }],
+  ] as const)('does not apply inventory masking to %s intent', async (_case, overrides) => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, overrides))).toContain('license')
+  })
+
+  it.each([
+    ['title', { title: 'Update the license' }, 'license'],
+    ['problem', { problem: 'Change security authorization behavior.' }, 'security'],
+    ['expected', { expectedBehavior: 'Personal data privacy handling changes.' }, 'privacy'],
+    ['acceptance', { acceptanceCriteria: ['Publishing requires release deployment.'] }, 'release'],
+    ['label', { labels: ['permissions'] }, 'permissions'],
+  ] as const)('keeps real %s intent manual-only', async (_source, overrides, expected) => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, overrides))).toContain(expected)
+  })
+
+  it.each([
+    ['inline code request', 'Change `LICENSE`.', ['license']],
+    ['inline filename plus permission request', 'Update `SECURITY.md` permissions.', ['permissions', 'security']],
+    ['fenced request', '```text\nChange LICENSE, permissions, and security.\n```', ['license', 'permissions', 'security']],
+    ['request after a fence', '```text\nordinary example\n```\nChange privacy before release.', ['privacy', 'release']],
+  ] as const)('does not let %s bypass risk scanning', async (_case, problem, expected) => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, { problem }))).toEqual(expect.arrayContaining(expected))
+  })
+
+  it.each([
+    ['LICENSE', 'license'],
+    ['SECURITY.md', 'security'],
+    ['.github/workflows/ci.yml', 'ci'],
+  ] as const)('preserves the hard risk for target path %s', async (targetPath, expected) => {
+    const policy = await productionPolicy()
+    expect(deriveRiskFlags(riskInput(policy, {
+      targetPaths: [targetPath],
+      targetWorkspaces: ['repository-control-plane'],
+    }))).toContain(expected)
   })
 
   it('rejects paths that trusted repository policy never permits', async () => {

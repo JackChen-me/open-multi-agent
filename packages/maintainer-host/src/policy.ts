@@ -116,11 +116,23 @@ export function deriveRiskFlags(input: {
   readonly targetPaths: readonly string[]
   readonly targetWorkspaces: readonly string[]
   readonly title: string
-  readonly body: string
+  readonly problem: string
+  readonly currentBehavior: string
+  readonly expectedBehavior: string
+  readonly acceptanceCriteria: readonly string[]
   readonly labels: readonly string[]
 }): IssueRiskFlag[] {
   const flags = new Set<IssueRiskFlag>()
-  const text = `${input.title}\n${input.body}\n${input.labels.join(' ')}`.toLowerCase()
+  const text = [...new Set([
+    input.title,
+    maskDescriptiveFileInventory(input.problem),
+    maskDescriptiveFileInventory(input.currentBehavior),
+    input.expectedBehavior,
+    ...input.acceptanceCriteria,
+    ...input.labels,
+  ])]
+    .join('\n')
+    .toLowerCase()
   const sensitivePaths = input.targetPaths.filter(path =>
     input.policy.manualOnlyPaths.some(manualPath => pathWithin(path, manualPath))
     || input.policy.protectedPaths.some(protectedPath => pathWithin(path, protectedPath)))
@@ -138,13 +150,39 @@ export function deriveRiskFlags(input: {
   if (/\bsecurity\b|\bvulnerabilit(?:y|ies)\b|\bcve-\d+/i.test(text)) flags.add('security')
   if (/\bpermissions?\b|\bauthori[sz]ation\b|\brbac\b/i.test(text)) flags.add('permissions')
   if (/\bprivacy\b|\bpersonal data\b|\bpii\b/i.test(text)) flags.add('privacy')
-  if (/\blicen[cs]e\b|\bcopyright\b/i.test(text)) flags.add('license')
-  if (/\brelease\b|\bpublish(?:ing)?\b|\bdeploy(?:ment)?\b/i.test(text)) flags.add('release')
+  if (/\blicen[cs]e\b|\brelicen[cs](?:e|ed|ing)\b|\bcopyright\b/i.test(text)) flags.add('license')
+  if (/\brelease\b|\bpublish(?:ing)?\b|\bpublication\b|\bdeploy(?:ment)?\b/i.test(text)) flags.add('release')
   if (/\bbreaking change\b/i.test(text)) flags.add('breaking-change')
   if (/\bmajor public api\b|\bpublic api redesign\b/i.test(text)) flags.add('public-api-major')
   if (/\barchitecture decision\b|\bchoose (?:an? )?architecture\b/i.test(text)) flags.add('architecture')
   if (input.targetWorkspaces.length > 1) flags.add('cross-workspace-refactor')
   return [...flags].sort()
+}
+
+function maskDescriptiveFileInventory(text: string): string {
+  return text
+    .split(/([.!?][ \t]+|[;\n]+)/)
+    .map(clause => {
+      const maskFile = (value: string) => value.replace(/`(?:LICENSE|SECURITY\.md)`/gi, '`[referenced-file]`')
+      if (/^\s*(?:the\s+)?(?:readme|documentation|document|file|page)\s+(?:links?|references?|points?)\s+to\s+`(?:LICENSE|SECURITY\.md)`\s*\.?\s*$/i.test(clause)) {
+        return maskFile(clause)
+      }
+      const inventory = /^\s*(?:the\s+)?(?:`[^`\n]+`\s+)?(?:package|artifact)\s+(?:contains?|includes?|publishes?|ships?)\s+(.+?)\s*\.?\s*$/i.exec(clause)
+      if (inventory === null) return clause
+      const list = inventory[1]!
+      const references = [...list.matchAll(/`([^`\n]+)`/g)].map(match => match[1]!)
+      const residue = list
+        .replace(/`[^`\n]+`/g, '')
+        .replace(/\band\b/gi, '')
+        .replace(/[\s,]/g, '')
+      if (residue.length > 0) return clause
+      const hasSensitiveFile = references.some(reference => /^(?:LICENSE|SECURITY\.md)$/i.test(reference))
+      const hasOrdinaryArtifact = references.some(reference =>
+        !/^(?:LICENSE|SECURITY\.md)$/i.test(reference)
+        && (reference === 'dist' || /^(?:[\w@.-]+\/)*[\w@.-]+\.[a-z0-9]+$/i.test(reference)))
+      return hasSensitiveFile && hasOrdinaryArtifact ? maskFile(clause) : clause
+    })
+    .join('')
 }
 
 export function deterministicBranchName(
