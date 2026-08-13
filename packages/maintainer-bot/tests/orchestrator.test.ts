@@ -7,6 +7,7 @@ import type {
   LLMStreamOptions,
   StreamEvent,
 } from '@open-multi-agent/core'
+import { computeIssueRevision } from '../src/admission.js'
 import { hashJson, sha256 } from '../src/hash.js'
 import {
   runFreshReview,
@@ -14,10 +15,19 @@ import {
   runPlanningImplementationDag,
   runRepair,
 } from '../src/orchestrator.js'
-import { contextManifestSchema } from '../src/schema.js'
+import { contextManifestSchema, type MaintainerIssue } from '../src/schema.js'
 import { reviewBundleSchema } from '../src/review-bundle.js'
 import { serializeModelRequest } from '../src/model-budget.js'
 import { authorizedRequest, testConfig } from './helpers.js'
+
+const PRODUCTION_ACCEPTANCE_CRITERIA = [
+  'Replace the egress enforcement matrix link with the exact canonical repository URL.',
+  'Replace the otel-provider.ts example link with the exact canonical repository URL.',
+  'Verify both repository files and the exact H2 heading from the pinned checkout.',
+  'No network, HTTP availability, or rendered-anchor check is required.',
+  'No other README wording or links are changed.',
+  'git diff --check passes.',
+]
 
 function manifest() {
   const request = authorizedRequest()
@@ -57,6 +67,92 @@ function manifest() {
     sufficiency: { sufficient: true, errors: [], warnings: [] },
   }
   return contextManifestSchema.parse({ ...partial, manifestHash: hashJson(partial) })
+}
+
+function productionPolicySizedManifest() {
+  const base = manifest()
+  const issueSource = base.sources.find(source => source.kind === 'issue')!
+  const issueEnvelope = JSON.parse(issueSource.content) as {
+    issue: Record<string, unknown>
+    confirmedAcceptanceCriteria: string[]
+    issueRevision: string
+    baseSha: string
+  }
+  const productionIssue = {
+    ...issueEnvelope.issue,
+    number: 501,
+    title: '[Docs] Make OTel README cross-workspace links portable',
+    kind: 'docs',
+    problem: 'Repository-relative links outside the published OTel workspace are not portable.',
+    reproductionSteps: [
+      'Inspect the two relative links in packages/otel/README.md.',
+      'Inspect the package files allowlist.',
+      'Observe that linked repository-level resources are absent from the package artifact.',
+    ],
+    currentBehavior: 'The packaged README cannot resolve repository-level and sibling-workspace paths.',
+    expectedBehavior: 'Cross-workspace links use exact canonical repository URLs.',
+    acceptanceCriteria: PRODUCTION_ACCEPTANCE_CRITERIA,
+    targetWorkspaces: ['@open-multi-agent/otel'],
+    targetPaths: ['packages/otel/README.md'],
+    outOfScope: [
+      'Changes to linked documentation or examples.',
+      'Other workspaces or files.',
+      'Runtime behavior, architecture, APIs, dependencies, CI, release, publication, security, permissions, or privacy.',
+      'Network, HTTP availability, or rendered-anchor verification.',
+    ],
+  }
+  const productionIssueRevision = computeIssueRevision(productionIssue as MaintainerIssue)
+  const issueContent = JSON.stringify({
+    issue: productionIssue,
+    confirmedAcceptanceCriteria: PRODUCTION_ACCEPTANCE_CRITERIA,
+    issueRevision: productionIssueRevision,
+    baseSha: issueEnvelope.baseSha,
+  })
+  const sources = base.sources.map(source => source.kind === 'issue'
+    ? {
+        ...source,
+        locator: 'open-multi-agent/open-multi-agent#501',
+        content: issueContent,
+        contentHash: sha256(issueContent),
+        byteLength: Buffer.byteLength(issueContent),
+        originalByteLength: Buffer.byteLength(issueContent),
+      }
+    : source)
+  const partial = {
+    ...base,
+    issueNumber: 501,
+    issueRevision: productionIssueRevision,
+    targetWorkspaces: ['@open-multi-agent/otel'],
+    targetPaths: ['packages/otel/README.md'],
+    allowedPaths: [
+      'README.md', 'docs', 'packages/core/src', 'packages/core/tests', 'packages/core/examples',
+      'packages/otel/README.md', 'packages/otel/src', 'packages/otel/tests',
+      'packages/create-oma-app/src', 'packages/create-oma-app/tests',
+      'packages/create-oma-app/template', 'packages/create-oma-app/templates',
+      'packages/maintainer-bot/src', 'packages/maintainer-bot/tests',
+      'packages/maintainer-bot/fixtures', 'packages/maintainer-bot/README.md',
+    ],
+    approvedEditScopes: [{ path: 'packages/otel/README.md', kind: 'file' as const }],
+    protectedPaths: [
+      '.git', '.github', '.env', '.npmrc', 'AGENTS.md', 'LICENSE', 'SECURITY.md',
+      'package.json', 'package-lock.json', 'docs/durable-approvals.md', 'docs/egress-policy.md',
+      'packages/core/src/index.ts', 'packages/core/src/acp.ts', 'packages/core/src/ai-sdk.ts',
+      'packages/core/src/classifiers.ts', 'packages/core/src/mcp.ts', 'packages/core/src/process.ts',
+      'packages/core/src/shell.ts', 'packages/maintainer-bot/config', 'packages/maintainer-host',
+    ],
+    validationCommands: Array.from({ length: 16 }, (_, index) => ({
+      id: `production-check-${index}`,
+      command: 'npm',
+      args: ['test'],
+      cwd: '.',
+      timeoutMs: 10_000,
+      env: {},
+      unsetEnv: [],
+    })),
+    sources,
+  }
+  const { manifestHash: _manifestHash, ...withoutHash } = partial
+  return contextManifestSchema.parse({ ...withoutHash, manifestHash: hashJson(withoutHash) })
 }
 
 function bundle() {
@@ -111,6 +207,7 @@ describe('fixed OMA maintainer DAG', () => {
     expect(triage.tokenUsage.input_tokens).toBeGreaterThan(0)
     expect(result.tokenUsage.input_tokens).toBeGreaterThan(triage.tokenUsage.input_tokens)
     expect(adapter.serializedRequestChars.every(size => size > 0)).toBe(true)
+    expect(adapter.thinkingModes).toEqual([false, true, true])
   })
 
   it('fails closed when an evidence role skips the immutable context tool', async () => {
@@ -144,6 +241,34 @@ describe('fixed OMA maintainer DAG', () => {
     })).rejects.toThrow(/task group failed: status=budget_exhausted; usage=\d+\+\d+; tasks=/)
   })
 
+  it('keeps production-policy triage within its unchanged 24k phase budget', async () => {
+    const productionManifest = productionPolicySizedManifest()
+    const adapter = new MaintainerScriptAdapter(
+      '',
+      1,
+      38_000,
+      PRODUCTION_ACCEPTANCE_CRITERIA,
+      productionManifest.issueRevision,
+    )
+    const triage = await runMaintainerTriage({
+      config: testConfig({ limits: {
+        maxTokenBudget: 24_000,
+        maxCostUsd: 5,
+        runTimeoutMs: 60_000,
+        maxRepairLoops: 2,
+      } }),
+      manifest: productionManifest,
+      adapter,
+      maxTokenBudget: 24_000,
+    })
+    expect(triage.triage.verdict).toBe('proceed')
+    expect(adapter.roles).toEqual(['issue-triage', 'issue-triage'])
+    expect(adapter.serializedRequestChars).toHaveLength(2)
+    expect(adapter.serializedRequestChars[1]).toBeLessThan(60_000)
+    expect(adapter.thinkingModes).toEqual([false, false])
+    expect(triage.triage.confirmedAcceptanceCriteria).toEqual(PRODUCTION_ACCEPTANCE_CRITERIA)
+  })
+
   it('creates a fresh reviewer that sees no implementer reasoning transcript', async () => {
     const adapter = new MaintainerScriptAdapter('PRIVATE_IMPLEMENTER_REASONING')
     const result = await runFreshReview({
@@ -154,6 +279,7 @@ describe('fixed OMA maintainer DAG', () => {
     })
     expect(result.review.verdict).toBe('approve')
     expect(adapter.roles).toEqual(['fresh-reviewer'])
+    expect(adapter.thinkingModes).toEqual([true])
     expect(adapter.messageTexts[0]).not.toContain('PRIVATE_IMPLEMENTER_REASONING')
     expect(adapter.toolSets[0]).toEqual([
       'read_final_review_summary', 'list_review_sources', 'search_review', 'read_review_source',
@@ -179,11 +305,15 @@ class MaintainerScriptAdapter implements LLMAdapter {
   readonly toolSets: string[][] = []
   readonly messageTexts: string[] = []
   readonly serializedRequestChars: number[] = []
+  readonly thinkingModes: Array<boolean | undefined> = []
   private sequence = 0
 
   constructor(
     private readonly hiddenReasoning = '',
     private readonly evidenceReads = 0,
+    private readonly toolCallReasoningChars = 0,
+    private readonly triageAcceptanceCriteria?: readonly string[],
+    private readonly triageIssueRevision?: string,
   ) {}
 
   async chat(messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
@@ -191,6 +321,7 @@ class MaintainerScriptAdapter implements LLMAdapter {
     this.roles.push(role)
     this.toolSets.push((options.tools ?? []).map(tool => tool.name))
     this.messageTexts.push(JSON.stringify(messages))
+    this.thinkingModes.push(options.thinking?.enabled)
     const requestChars = serializeModelRequest(messages, options).length
     this.serializedRequestChars.push(requestChars)
     this.sequence += 1
@@ -205,15 +336,31 @@ class MaintainerScriptAdapter implements LLMAdapter {
           : toolName.startsWith('list_')
             ? { offset: 0, limit: 30 }
             : {}
+      const reasoningText = options.thinking?.enabled === true
+        ? 'r'.repeat(this.toolCallReasoningChars)
+        : ''
       return {
         id: `tool-${this.sequence}`,
-        content: [{ type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input }],
+        content: [
+          ...(reasoningText.length === 0
+            ? []
+            : [{ type: 'reasoning' as const, text: reasoningText, provenance: this.name }]),
+          { type: 'tool_use', id: `call-${this.sequence}`, name: toolName, input },
+        ],
         model: options.model,
         stop_reason: 'tool_use',
-        usage: { input_tokens: Math.ceil(requestChars / 4), output_tokens: 12 },
+        usage: {
+          input_tokens: Math.ceil(requestChars / 4),
+          output_tokens: Math.min(options.maxTokens ?? 4_096, 12 + Math.ceil(reasoningText.length / 8)),
+        },
       }
     }
-    const output = JSON.stringify(responseFor(role, this.hiddenReasoning))
+    const output = JSON.stringify(responseFor(
+      role,
+      this.hiddenReasoning,
+      this.triageAcceptanceCriteria,
+      this.triageIssueRevision,
+    ))
     return {
       id: `script-${this.sequence}`,
       content: [{ type: 'text', text: output }],
@@ -245,14 +392,19 @@ function identifyRole(prompt: string): string {
   throw new Error(`unknown role: ${prompt.slice(0, 100)}`)
 }
 
-function responseFor(role: string, hiddenReasoning: string): unknown {
+function responseFor(
+  role: string,
+  hiddenReasoning: string,
+  triageAcceptanceCriteria?: readonly string[],
+  triageIssueRevision?: string,
+): unknown {
   const request = authorizedRequest()
   switch (role) {
     case 'issue-triage':
       return {
         verdict: 'proceed',
-        confirmedIssueRevision: request.authorization!.issueRevision,
-        confirmedAcceptanceCriteria: request.issue.acceptanceCriteria,
+        confirmedIssueRevision: triageIssueRevision ?? request.authorization!.issueRevision,
+        confirmedAcceptanceCriteria: triageAcceptanceCriteria ?? request.issue.acceptanceCriteria,
         uncertainties: [],
         manualRiskSignals: [],
       }

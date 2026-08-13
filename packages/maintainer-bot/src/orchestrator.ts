@@ -143,6 +143,11 @@ export async function runMaintainerTriage(options: TriageDagOptions): Promise<Tr
     outputSchema: modelTriageSchema,
     maxTurns: 4,
     maxTokens: 4_000,
+    // Triage is a deterministic schema-bound admission check. DeepSeek
+    // thinking-mode tool calls require their complete reasoning_content to be
+    // replayed on the next request, which can consume this phase's bounded
+    // budget before the compact admission evidence is evaluated.
+    thinking: { enabled: false },
     systemPrompt: `${COMMON_GUARDRAILS}
 You are a read-only issue triage verifier. Call read_admission_evidence before deciding. It contains compact issue, authorization, scope, sufficiency, and policy evidence but no repository source files.
 The deterministic admission gate has already checked authorization; you cannot grant or renew it.

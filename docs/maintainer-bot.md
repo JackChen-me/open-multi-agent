@@ -94,6 +94,10 @@ backend never falls through to the other backend.
 2. The deterministic context builder verifies a clean isolated worktree at the
    fixed base SHA and writes a versioned, hash-bound context manifest.
 3. One explicit OMA `runTasks()` task performs schema-bound, read-only triage.
+   Triage uses DeepSeek non-thinking mode because it is a deterministic
+   admission classification over compact evidence; this avoids replaying
+   provider reasoning across its required evidence-tool round trip. Coding and
+   independent review keep their configured reasoning behavior.
    The deterministic host starts no planner or implementer unless triage says
    `proceed`, reports no uncertainty or manual-risk blocker, and exactly echoes
    the authorized issue revision and acceptance criteria.
