@@ -11,6 +11,10 @@ validation, durable claims, credential isolation, status, and deterministic
 Draft PR writes. `@open-multi-agent/maintainer-bot` remains the real OMA
 execution kernel.
 
+The final production responsibility split, threat model, and backend migration
+contract are defined in
+[`maintainer-bot-architecture.md`](maintainer-bot-architecture.md).
+
 The local engine never creates a branch, commits, pushes, comments, labels,
 opens a pull request, marks one ready, approves, merges, closes an issue,
 publishes, tags, releases, or deploys. Its strongest successful output is
@@ -77,6 +81,13 @@ and [GitHub App installation authentication](https://docs.github.com/en/apps/cre
 
 ## Fixed execution flow
 
+The trusted production policy selects exactly one execution backend for the
+entire run. `legacy` preserves the existing custom planner/implementer/repair
+path only as a migration rollback. `claude-code` schedules Claude Code through
+OMA as the sole coding worker, then performs deterministic scope/diff checks,
+registered validation, and an independent fresh OMA review. A failed selected
+backend never falls through to the other backend.
+
 1. Deterministic admission computes the material issue revision and enforces
    Definition of Ready, manual-only classes, write-authorized `agent-ready`
    evidence, exact revision, and exact base SHA.
@@ -86,19 +97,23 @@ and [GitHub App installation authentication](https://docs.github.com/en/apps/cre
    The deterministic host starts no planner or implementer unless triage says
    `proceed`, reports no uncertainty or manual-risk blocker, and exactly echoes
    the authorized issue revision and acceptance criteria.
-4. Only after that host check, a second explicit OMA `runTasks()` DAG executes
+4. On the legacy rollback path only, a second explicit OMA `runTasks()` DAG executes
    read-only repository planning followed by a schema-bound implementation
    proposal. A rejected triage therefore spends no planner/implementer tokens
    and cannot reach an edit capability.
-5. The host applies compare-and-swap full-content edits through the restricted
+5. On the legacy rollback path, the host applies compare-and-swap full-content edits through the restricted
    edit capability. The model has no filesystem or shell tool.
-6. The host runs every preregistered validation command as argv with
-   `shell: false` and a credential-stripped environment.
+6. Legacy runs execute every preregistered validation command as argv with
+   `shell: false` and a credential-stripped environment. Claude runs pass the
+   already scope-checked candidate to the shared canary validation CLI, which
+   rebuilds base plus the exact patch in a disposable snapshot and executes all
+   trusted commands only through fail-closed `/usr/bin/bwrap`, with no host
+   fallback.
 7. A new OMA team and agent perform fresh-context review using only confirmed
    requirements, acceptance criteria, the final diff, validation evidence,
    bounded current-file snapshots, and relevant context. Implementer reasoning
    and conversation history are not passed to the reviewer.
-8. A rejected but bounded and repairable result may run at most two repair
+8. On the legacy rollback path, a rejected but bounded and repairable result may run at most two repair
    loops. Repairs use `currentFiles[].contentHash` from the fresh review bundle
    for compare-and-swap, then repeat deterministic validation and fresh review.
 9. Deterministic TypeScript emits a Draft PR proposal only when context is
@@ -106,14 +121,23 @@ and [GitHub App installation authentication](https://docs.github.com/en/apps/cre
    criterion passes fresh review, all paths remain in scope, and each proposed
    `afterHash` still equals the content reviewed after validation.
 
+The Claude path does not use or extend the legacy manifest planner, full-content
+editor, or repair loop. Claude reads and edits through the extracted canary
+harness; deterministic code checks the resulting worktree before validation.
+
 All model outputs use Zod schemas. A single OMA structured-output correction is
 still available inside a role; task retries are disabled. The 160k production
 token ceiling is split into explicit phase caps: triage receives at most 15%
 (24k), planning plus implementation 52% (82k), and each fresh review or repair
 18% (28k). A repair additionally reserves 12% for the required next fresh
 review. Each provider request reserves that role's configured maximum output
-before it is sent. Cumulative token, configured price-based cost, wall-clock,
-edit-size, diff-size, context-size, and repair-loop limits fail closed.
+before it is sent. Cumulative token and configured price-based cost cover the
+OMA LLM calls and fail closed with the wall-clock, edit-size, diff-size,
+context-size, and repair-loop limits. They do not claim exact accounting for
+the generic process backend: it currently reports zero token usage for the
+Claude coding worker, which means not reported rather than zero consumption.
+Claude coding is bounded by max turns, wall clock, process-output,
+changed-path/file, file-size, and diff-size limits.
 
 ## Admission and state
 
@@ -287,7 +311,11 @@ the 160k total.
 
 The model process refuses to start when known GitHub/npm write credentials,
 including credential names with host-specific prefixes, are present. Launch
-the custom engine with `DEEPSEEK_API_KEY` only. In particular,
+the custom engine with the provider credential on its dedicated inherited file
+descriptor; the maintainer-bot environment does not contain the key. Only the
+selected Claude coding child receives it transiently, and the production
+adapter removes it before spawning Claude Code. Validation starts later in a
+separate credential-free process. In particular,
 `MAINTAINER_BOT_APP_TOKEN` and the App private key never enter model or
 validation environments. Validation
 subprocesses receive an environment with token/key/secret/password/cookie and
@@ -298,7 +326,9 @@ best effort.
 Validation commands come only from trusted configuration. Issue or model text
 cannot choose an executable, argv, cwd, or timeout. All registered commands
 run, results and skipped checks are recorded, and failed or truncated evidence
-blocks proposal eligibility. The current-file repair snapshots are non-symlink
+blocks proposal eligibility. On the Claude path, the actual candidate checkout
+is never mounted as the validation workspace, and validation-created tracked or
+ignored side effects cannot flow back into it. The current-file repair snapshots are non-symlink
 regular files, path checked, per-file bounded, and capped at 180 KB total.
 
 DeepSeek inference is remote. The minimum relevant public-repository context —

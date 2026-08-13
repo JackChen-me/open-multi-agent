@@ -326,18 +326,63 @@ jobs:
         if: steps.started.outcome == 'success'
         run: test "$(npm --version)" = "10.9.8"
 
+      - name: Select the single configured execution backend
+        id: backend
+        if: steps.started.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend="$(node -e "const p=require('./packages/maintainer-host/config/production-policy.json'); if (!['legacy','claude-code'].includes(p.executionBackend)) process.exit(2); process.stdout.write(p.executionBackend)")"
+          echo "name=$backend" >> "$GITHUB_OUTPUT"
+
+      - name: Install Claude Code sandbox runtime dependencies
+        if: steps.backend.outputs.name == 'claude-code'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
+          sudo install --owner=root --group=root --mode=0644 \
+            packages/maintainer-harness-canary/config/bwrap.apparmor \
+            /etc/apparmor.d/bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/bwrap
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
+
       - name: Install locked dependencies
         if: steps.started.outcome == 'success'
         run: npm ci
+
+      - name: Install pinned Claude Code
+        if: steps.backend.outputs.name == 'claude-code'
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-cache
+        run: |
+          set -euo pipefail
+          npm install --global @anthropic-ai/claude-code@2.1.220
+          claude --version | grep -F '2.1.220'
 
       - name: Build the deterministic host and OMA engine
         id: build
         if: steps.started.outcome == 'success'
         run: npm run build -w @open-multi-agent/maintainer-host
 
+      - name: Build and preflight the production Claude Code harness
+        id: harness
+        if: steps.backend.outputs.name == 'claude-code' && steps.build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build -w @open-multi-agent/maintainer-harness-canary
+          node packages/maintainer-harness-canary/dist/cli.js sandbox-preflight \
+            --repo "$GITHUB_WORKSPACE"
+
       - name: Re-fetch, authorize, and claim the candidate run
         id: prepare
-        if: steps.started.outcome == 'success' && steps.build.outcome == 'success'
+        if: >-
+          steps.started.outcome == 'success' &&
+          steps.build.outcome == 'success' &&
+          (steps.backend.outputs.name == 'legacy' || steps.harness.outcome == 'success')
         env:
           MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           OMA_CLAIM_ID: ${{ steps.started.outputs.claim_id }}
@@ -375,20 +420,34 @@ jobs:
           --app-installation-id "$OMA_ACTUAL_APP_INSTALLATION_ID"
           --activation-out "$RUNNER_TEMP/oma-maintainer/activation.json"
 
-      - name: Run OMA and DeepSeek in a credential-isolated child process
+      - name: Run the selected OMA backend in a credential-isolated child process
         id: engine
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: >-
-          node packages/maintainer-host/dist/cli.js run-engine
-          --activation "$RUNNER_TEMP/oma-maintainer/activation.json"
-          --result-out "$RUNNER_TEMP/oma-maintainer/engine-result.json"
-          --state-dir "$RUNNER_TEMP/oma-maintainer/state"
-          --artifact-dir "$RUNNER_TEMP/oma-maintainer/artifacts"
-          --maintainer-bot-cli packages/maintainer-bot/dist/cli.js
-          --repo "$GITHUB_WORKSPACE"
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec 3<<<"${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}"
+          unset DEEPSEEK_API_KEY
+          exec env -i \
+            PATH="$PATH" \
+            HOME="$HOME" \
+            LANG="${LANG:-C.UTF-8}" \
+            CI=1 \
+            TMPDIR="$RUNNER_TEMP" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            npm_config_cache="$RUNNER_TEMP/npm-cache" \
+            node packages/maintainer-host/dist/cli.js run-engine \
+            --provider-key-fd 3 \
+            --activation "$RUNNER_TEMP/oma-maintainer/activation.json" \
+            --result-out "$RUNNER_TEMP/oma-maintainer/engine-result.json" \
+            --state-dir "$RUNNER_TEMP/oma-maintainer/state" \
+            --artifact-dir "$RUNNER_TEMP/oma-maintainer/artifacts" \
+            --maintainer-bot-cli packages/maintainer-bot/dist/cli.js \
+            --claude-code-harness-cli packages/maintainer-harness-canary/dist/cli.js \
+            --repo "$GITHUB_WORKSPACE"
 
       - name: Revalidate with the App and create at most one Draft PR
         id: finalize

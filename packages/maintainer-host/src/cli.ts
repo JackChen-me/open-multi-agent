@@ -2,7 +2,7 @@
 
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { NodeCommandRunner } from '@open-multi-agent/maintainer-bot'
+import { NodeCommandRunner, readProviderKeyFromFd } from '@open-multi-agent/maintainer-bot'
 import { finalizeActivation, prepareActivation, renderActionsSummary } from './activation.js'
 import { runIsolatedEngine } from './engine.js'
 import { GitHubRestClient } from './github.js'
@@ -70,8 +70,7 @@ async function prepare(): Promise<void> {
 }
 
 async function runEngine(): Promise<void> {
-  const deepSeekApiKey = process.env['DEEPSEEK_API_KEY'] ?? ''
-  delete process.env['DEEPSEEK_API_KEY']
+  const deepSeekApiKey = readProviderKeyFromFd(requireFlag('--provider-key-fd'))
   const result = await runIsolatedEngine({
     activationPath: requireFlag('--activation'),
     resultPath: requireFlag('--result-out'),
@@ -79,6 +78,9 @@ async function runEngine(): Promise<void> {
     stateDir: resolve(requireFlag('--state-dir')),
     artifactDir: resolve(requireFlag('--artifact-dir')),
     maintainerBotCli: resolve(requireFlag('--maintainer-bot-cli')),
+    claudeCodeHarnessCli: flag('--claude-code-harness-cli') === undefined
+      ? undefined
+      : resolve(requireFlag('--claude-code-harness-cli')),
     deepSeekApiKey,
     sourceEnvironment: process.env,
   })

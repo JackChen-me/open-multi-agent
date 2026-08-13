@@ -30,7 +30,9 @@ The production policy is
 [`config/production-policy.json`](config/production-policy.json). It is not an
 Issue-controlled config and is separate from the maintainer-bot fixture
 configuration. Operational behavior and activation steps are documented in
-[`docs/maintainer-bot.md`](../../docs/maintainer-bot.md).
+[`docs/maintainer-bot.md`](../../docs/maintainer-bot.md), with the final
+control/execution/write-plane split and rollback semantics in
+[`docs/maintainer-bot-architecture.md`](../../docs/maintainer-bot-architecture.md).
 
 All host tests use a fake GitHub implementation and scripted OMA adapter. They
 perform no network write and require neither `GITHUB_TOKEN` nor

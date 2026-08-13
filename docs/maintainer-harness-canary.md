@@ -1,6 +1,11 @@
 # Maintainer harness canary
 
-The `OMA Maintainer Harness Canary` is a manual, read-only GitHub Actions experiment. It evaluates whether a mature coding harness can replace the Maintainer Bot's model-facing repository manifest, planner/implementer context assembly, and custom search/read/edit loop. It does not replace or modify the active Maintainer Bot path.
+The `OMA Maintainer Harness Canary` is a manual, read-only GitHub Actions experiment. Its restricted Claude CLI environment, permissions, limits, and stream parser are also reused by the production OMA process adapter. The canary workflow itself remains evidence-only and never grants production authorization or invokes the writer.
+
+Production activation and rollback are documented in
+[`maintainer-bot-architecture.md`](maintainer-bot-architecture.md). Canary
+artifacts remain non-formal evidence and are never accepted as a production
+proposal.
 
 ## Boundary
 

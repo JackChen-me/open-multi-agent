@@ -2,11 +2,17 @@ import { mkdir, open, rename } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { LLMAdapter, OrchestratorEvent } from '@open-multi-agent/core'
 import { evaluateAdmission } from './admission.js'
-import { assertModelCredentialIsolation, type CommandRunner } from './command.js'
+import {
+  assertModelCredentialIsolation,
+  redactSensitiveText,
+  sanitizedChildEnvironment,
+  type CommandRunner,
+} from './command.js'
 import { buildContextManifest } from './context.js'
 import { assertApprovedEditPath } from './paths.js'
 import {
   runFreshReview,
+  runClaudeCodeCodingDag,
   runMaintainerTriage,
   runPlanningImplementationDag,
   runRepair,
@@ -27,6 +33,7 @@ import {
   type ModelTriage,
   type ReviewOutput,
   type ValidationResult,
+  validationResultSchema,
 } from './schema.js'
 import { computeRunKey, type RunRecord, type RunStateStore } from './state.js'
 import { allValidationsPassed, runRegisteredValidations } from './validation.js'
@@ -42,6 +49,9 @@ export interface RunMaintainerBotOptions {
   readonly runId: string
   readonly adapter?: LLMAdapter
   readonly apiKey?: string
+  readonly claudeCodeHarnessCli?: string
+  /** Test-only executable seam. The production host never sets this option. */
+  readonly claudeCommand?: string
   readonly dryRun?: boolean
   readonly env?: NodeJS.ProcessEnv
   readonly now?: () => Date
@@ -189,6 +199,7 @@ export async function runMaintainerBot(
   let implementationSummary = ''
   let risks: string[] = []
   let latestBundle: ReviewBundle | undefined
+  let claudeCandidateBundle: ReviewBundle | undefined
 
   try {
     const triage = await runMaintainerTriage({
@@ -205,41 +216,104 @@ export async function runMaintainerBot(
     cost = assertBudgets(config, usage, deadline)
     validateTriageOutput(request, manifest, triage.triage)
 
-    const initial = await runPlanningImplementationDag({
-      config,
-      manifest,
-      triage: triage.triage,
-      adapter: input.adapter,
-      apiKey: input.apiKey,
-      abortSignal,
-      maxTokenBudget: phaseTokenBudget(config, usage, 'planning-implementation'),
-      requireEvidenceToolCalls: input.requireEvidenceToolCalls,
-      onProgress: input.onProgress,
-    })
-    usage = addUsage(usage, initial.tokenUsage)
-    cost = assertBudgets(config, usage, deadline)
-    validatePlanningImplementationOutputs(
-      request,
-      config,
-      manifest,
-      initial.plan,
-      initial.implementation,
-    )
-    implementationSummary = initial.implementation.summary
-    risks = [...initial.plan.risks, ...initial.implementation.risks]
-    appliedEdits.push(...await applyRestrictedEdits({
-      repoRoot: input.repoRoot,
-      implementation: initial.implementation,
-      config,
-      approvedEditScopes: manifest.approvedEditScopes,
-    }))
+    let legacyPlanPaths: readonly string[] = []
+    if (config.executionBackend === 'legacy') {
+      const initial = await runPlanningImplementationDag({
+        config,
+        manifest,
+        triage: triage.triage,
+        adapter: input.adapter,
+        apiKey: input.apiKey,
+        abortSignal,
+        maxTokenBudget: phaseTokenBudget(config, usage, 'planning-implementation'),
+        requireEvidenceToolCalls: input.requireEvidenceToolCalls,
+        onProgress: input.onProgress,
+      })
+      usage = addUsage(usage, initial.tokenUsage)
+      cost = assertBudgets(config, usage, deadline)
+      validatePlanningImplementationOutputs(
+        request,
+        config,
+        manifest,
+        initial.plan,
+        initial.implementation,
+      )
+      legacyPlanPaths = initial.plan.files.map(file => file.path)
+      implementationSummary = initial.implementation.summary
+      risks = [...initial.plan.risks, ...initial.implementation.risks]
+      appliedEdits.push(...await applyRestrictedEdits({
+        repoRoot: input.repoRoot,
+        implementation: initial.implementation,
+        config,
+        approvedEditScopes: manifest.approvedEditScopes,
+      }))
+    } else {
+      if (input.claudeCodeHarnessCli === undefined) {
+        throw new Error('Claude Code execution backend requires the production harness CLI.')
+      }
+      const contractPath = resolve(input.artifactDir, `${runKey}.claude-code-contract.json`)
+      await writeArtifact(input.artifactDir, `${runKey}.claude-code-contract.json`, {
+        schemaVersion: 1,
+        contract: 'oma-maintainer-claude-code-backend-v1',
+        baseSha: request.baseSha,
+        allowedPaths: manifest.approvedEditScopes.map(scope => scope.path),
+        protectedPaths: config.protectedPaths,
+        model: config.model,
+        claudeCodeVersion: config.claudeCode.version,
+        limits: {
+          timeoutMs: config.limits.runTimeoutMs,
+          maxTurns: config.claudeCode.maxTurns,
+          maxProcessOutputBytes: config.claudeCode.maxProcessOutputBytes,
+        },
+      })
+      const coding = await runClaudeCodeCodingDag({
+        config,
+        request,
+        repoRoot: input.repoRoot,
+        harnessCli: resolve(input.claudeCodeHarnessCli),
+        contractPath,
+        claudeCommand: input.claudeCommand,
+        apiKey: input.apiKey,
+        abortSignal,
+        maxTokenBudget: remainingTokens(config, usage),
+        onProgress: input.onProgress,
+      })
+      usage = addUsage(usage, coding.tokenUsage)
+      cost = assertBudgets(config, usage, deadline)
+      const boundedDiff = await collectReviewBundle({
+        repoRoot: input.repoRoot,
+        request,
+        config,
+        manifest,
+        validationResults: [],
+        runner: input.runner,
+      })
+      if (boundedDiff.changedPaths.length > config.edits.maxFiles) {
+        throw new Error(`Claude Code changed more than the configured ${config.edits.maxFiles} file limit.`)
+      }
+      claudeCandidateBundle = boundedDiff
+      appliedEdits.push(...appliedEditsFromClaudeCode(manifest, boundedDiff))
+      implementationSummary = `Claude Code completed the bounded coding task in ${coding.turns} turns.`
+    }
 
-    let validationResults = await runRegisteredValidations({
-      repoRoot: input.repoRoot,
-      config,
-      runner: input.runner,
-      env: input.env,
-    })
+    let validationResults = config.executionBackend === 'legacy'
+      ? await runRegisteredValidations({
+          repoRoot: input.repoRoot,
+          config,
+          runner: input.runner,
+          env: input.env,
+        })
+      : await runClaudeCodeSandboxValidations({
+          repoRoot: input.repoRoot,
+          artifactDir: input.artifactDir,
+          runKey,
+          baseSha: request.baseSha,
+          harnessCli: input.claudeCodeHarnessCli!,
+          candidate: claudeCandidateBundle!,
+          config,
+          runner: input.runner,
+          env: input.env,
+        })
     latestBundle = await collectReviewBundle({
       repoRoot: input.repoRoot,
       request,
@@ -263,7 +337,8 @@ export async function runMaintainerBot(
     let review = reviewed.review
 
     for (let repairRound = 1;
-      shouldRepair(review, validationResults, repairRound, config.limits.maxRepairLoops);
+      config.executionBackend === 'legacy'
+      && shouldRepair(review, validationResults, repairRound, config.limits.maxRepairLoops);
       repairRound += 1) {
       const repair = await runRepair({
         config,
@@ -281,7 +356,7 @@ export async function runMaintainerBot(
       cost = assertBudgets(config, usage, deadline)
       validateRepairOutput(
         repair.implementation,
-        initial.plan.files.map(file => file.path),
+        legacyPlanPaths,
         manifest,
       )
       if (repair.implementation.edits.length === 0) break
@@ -486,6 +561,84 @@ function assertModelPathScope(path: string, manifest: ContextManifest): void {
   }
 }
 
+function appliedEditsFromClaudeCode(
+  manifest: ContextManifest,
+  bundle: ReviewBundle,
+): AppliedEdit[] {
+  const beforeHashes = new Map(
+    manifest.sources
+      .filter(source => source.kind === 'repository-file')
+      .map(source => [source.locator, source.contentHash]),
+  )
+  return bundle.currentFiles.map(file => ({
+    path: file.path,
+    reason: 'Claude Code production coding backend edit.',
+    beforeHash: beforeHashes.get(file.path) ?? null,
+    afterHash: file.contentHash,
+    bytes: file.byteLength,
+    created: !beforeHashes.has(file.path),
+  }))
+}
+
+async function runClaudeCodeSandboxValidations(options: {
+  readonly repoRoot: string
+  readonly artifactDir: string
+  readonly runKey: string
+  readonly baseSha: string
+  readonly harnessCli: string
+  readonly candidate: ReviewBundle
+  readonly config: MaintainerConfig
+  readonly runner: CommandRunner
+  readonly env?: NodeJS.ProcessEnv
+}): Promise<ValidationResult[]> {
+  const contractName = `${options.runKey}.sandbox-validation-contract.json`
+  const contractPath = resolve(options.artifactDir, contractName)
+  await writeArtifact(options.artifactDir, contractName, {
+    schemaVersion: 1,
+    contract: 'oma-maintainer-sandbox-validation-v1',
+    baseSha: options.baseSha,
+    changedFiles: options.candidate.currentFiles.map(file => ({
+      path: file.path,
+      contentHash: file.contentHash,
+    })),
+    candidateDiff: options.candidate.diff,
+    validationCommands: options.config.validationCommands,
+    limits: {
+      maxFileBytes: options.config.edits.maxBytesPerFile,
+      maxValidationOutputBytes: 100_000,
+    },
+  })
+  const result = await options.runner.run(
+    process.execPath,
+    [
+      resolve(options.harnessCli),
+      'run-production-validation',
+      '--contract', contractPath,
+      '--repo', resolve(options.repoRoot),
+    ],
+    {
+      cwd: options.repoRoot,
+      env: sanitizedChildEnvironment(options.env),
+      timeoutMs: options.config.limits.runTimeoutMs,
+      maxOutputChars: 5_000_000,
+    },
+  )
+  if (result.stdout.includes('[output truncated]')) {
+    throw new Error('Sandbox validation contract output was truncated.')
+  }
+  let output: unknown
+  try {
+    output = JSON.parse(result.stdout)
+  } catch {
+    throw new Error('Sandbox validation contract returned invalid output.')
+  }
+  const record = output as { status?: unknown; validationResults?: unknown }
+  if (record.status !== 'VALIDATION_COMPLETED') {
+    throw new Error('Sandbox validation contract returned an unexpected status.')
+  }
+  return validationResultSchema.array().min(1).parse(record.validationResults)
+}
+
 function shouldRepair(
   review: ReviewOutput,
   validations: readonly ValidationResult[],
@@ -596,7 +749,8 @@ function mergeAbortSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
 
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return message.replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,})\b/g, '[REDACTED]')
+  const redacted = redactSensitiveText(message)
+  return redacted.length <= 8_000 ? redacted : `${redacted.slice(0, 7_980)} [truncated]`
 }
 
 class NeedsHumanError extends Error {

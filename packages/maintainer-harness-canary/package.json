@@ -2,7 +2,7 @@
   "name": "@open-multi-agent/maintainer-harness-canary",
   "version": "0.0.0",
   "private": true,
-  "description": "Read-only GitHub-hosted Claude Code harness canary for OMA Maintainer Bot evaluation.",
+  "description": "Restricted Claude Code harness shared by OMA Maintainer Bot production execution and its read-only canary.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

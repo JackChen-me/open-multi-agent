@@ -22,7 +22,10 @@ import {
   prepareCanaryRequest,
   preflightValidationSandbox,
   readProviderKeyFromFd,
+  runProductionClaudeCodeBackend,
+  runProductionSandboxValidation,
   runHarnessCanary,
+  takeProductionProviderKey,
   verifyArtifactHash,
   type CanaryPolicy,
   type CanaryRequest,
@@ -325,7 +328,114 @@ describe('one-shot provider key fd', () => {
   })
 })
 
+describe('production OMA Claude Code backend', () => {
+  it('reuses the canary settings and stream parser for one bounded coding run', async () => {
+    const fixture = await repoFixture('success')
+    const contractPath = join(fixture.harnessDir, 'production-contract.json')
+    await writeFile(contractPath, JSON.stringify({
+      schemaVersion: 1,
+      contract: 'oma-maintainer-claude-code-backend-v1',
+      baseSha: fixture.baseSha,
+      allowedPaths: [BASE_FILE],
+      protectedPaths: ['.git', '.github', 'AGENTS.md'],
+      model: 'deepseek-v4-flash',
+      claudeCodeVersion: '2.1.220',
+      limits: { timeoutMs: 5_000, maxTurns: 20, maxProcessOutputBytes: 100_000 },
+    }))
+    const prompt = JSON.stringify({
+      issueNumber: 491,
+      title: 'Cover executable subpath exports',
+      problem: 'The smoke test misses source barrels.',
+      currentBehavior: 'Missing barrels are not imported.',
+      expectedBehavior: 'Every executable barrel is covered.',
+      reproductionSteps: ['Run the focused subpath export test.'],
+      acceptanceCriteria: ['The focused test covers every executable barrel.'],
+      targetPaths: [BASE_FILE],
+      outOfScope: ['Public API changes.'],
+    })
+    const result = await runProductionClaudeCodeBackend({
+      contractPath,
+      repoRoot: fixture.root,
+      prompt,
+      deepSeekApiKey: FAKE_KEY,
+      sourceEnvironment: { PATH: process.env['PATH'] },
+      claudeCommand: process.execPath,
+      claudeArgsPrefix: [fixture.harnessScript],
+    })
+    expect(result).toEqual({ turns: 4, terminationReason: 'success', safeEventCount: 3 })
+    const capture = JSON.parse(await readFile(fixture.capturePath, 'utf8'))
+    expect(capture.settings.permissions.allow.some((value: string) => value.endsWith(`${fixture.root}/${BASE_FILE})`))).toBe(true)
+    expect(capture.settings.permissions.deny).toEqual(expect.arrayContaining(['Bash', 'WebFetch', 'Task']))
+    expect(capture.scrub).toBe('1')
+    expect(JSON.parse(capture.prompt)).toMatchObject({
+      title: 'Cover executable subpath exports',
+      reproductionSteps: ['Run the focused subpath export test.'],
+    })
+  })
+
+  it('removes the production provider credential from the adapter process environment', () => {
+    const environment = { DEEPSEEK_API_KEY: FAKE_KEY, PATH: '/bin' }
+    expect(takeProductionProviderKey(environment)).toBe(FAKE_KEY)
+    expect(environment).not.toHaveProperty('DEEPSEEK_API_KEY')
+  })
+})
+
 describe('fail-closed deterministic validation sandbox', () => {
+  it('runs the production validation contract only through a disposable fixed Bubblewrap invocation', async () => {
+    const fixture = await repoFixture('success')
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
+    await writeFile(join(fixture.root, BASE_FILE), candidate)
+    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const runner = new StrictMockValidationSandboxRunner()
+    const results = await runProductionSandboxValidation({
+      contract: productionValidationContract(fixture.baseSha, candidate, diff),
+      repoRoot: fixture.root,
+      sandboxProcessRunner: runner,
+      sourceEnvironment: { PATH: process.env['PATH'] },
+    })
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({ id: 'focused-subpath-test', success: true })
+    expect(runner.invocations).toHaveLength(1)
+    expect(runner.invocations[0]).toMatchObject({ command: '/usr/bin/bwrap', options: { env: {} } })
+    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
+  })
+
+  it('fails closed without host fallback and cannot return sandbox pollution to the source checkout', async () => {
+    const fixture = await repoFixture('success')
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
+    await writeFile(join(fixture.root, BASE_FILE), candidate)
+    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const contract = productionValidationContract(fixture.baseSha, candidate, diff)
+    await expect(runProductionSandboxValidation({
+      contract,
+      repoRoot: fixture.root,
+      sandboxProcessRunner: new StrictMockValidationSandboxRunner(true),
+      sourceEnvironment: { PATH: process.env['PATH'] },
+    })).rejects.toThrow(/Bubblewrap/)
+    await expect(runProductionSandboxValidation({
+      contract,
+      repoRoot: fixture.root,
+      sandboxProcessRunner: new StrictMockValidationSandboxRunner(false, undefined, undefined, async workspace => {
+        await mkdir(join(workspace, 'dist'), { recursive: true })
+        await writeFile(join(workspace, 'dist/host-pollution.txt'), 'blocked\n')
+      }),
+      sourceEnvironment: { PATH: process.env['PATH'] },
+    })).rejects.toThrow(/disposable workspace/)
+    expect(await fileExists(join(fixture.root, 'dist/host-pollution.txt'))).toBe(false)
+    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
+  })
+
+  it('refuses to start production validation when a provider credential is present in its process environment', async () => {
+    const fixture = await repoFixture('success')
+    await expect(runProductionSandboxValidation({
+      contract: {},
+      repoRoot: fixture.root,
+      sourceEnvironment: { PATH: '/usr/bin', DEEPSEEK_API_KEY: 'must-not-leak' },
+    })).rejects.toThrow(/forbidden credentials/)
+  })
+
   it('kills a multibyte output flood at the combined hard byte cap without retaining hostile output', async () => {
     const runner = new BoundedProcessRunner()
     const marker = '界'.repeat(512)
@@ -947,6 +1057,21 @@ describe('Issue #491 mock success path and artifact integrity', () => {
   })
 })
 
+function productionValidationContract(baseSha: string, candidate: string, candidateDiff: string) {
+  return {
+    schemaVersion: 1,
+    contract: 'oma-maintainer-sandbox-validation-v1',
+    baseSha,
+    changedFiles: [{
+      path: BASE_FILE,
+      contentHash: createHash('sha256').update(candidate).digest('hex'),
+    }],
+    candidateDiff,
+    validationCommands: prepareCanaryRequest({ ...snapshot(), baseSha }, policy()).validationCommands,
+    limits: { maxFileBytes: 20_000, maxValidationOutputBytes: 100_000 },
+  }
+}
+
 async function repoFixture(mode: string, terminalEvents?: readonly Record<string, unknown>[]) {
   const root = await mkdtemp(join(tmpdir(), 'oma-harness-test-'))
   const artifactDir = await mkdtemp(join(tmpdir(), 'oma-harness-artifact-'))
@@ -992,8 +1117,8 @@ const target = resolve(${JSON.stringify(BASE_FILE)})
 globalThis.__attackSource = ${JSON.stringify(sandboxAttackSource({ sentinelPath: '/host/sentinel', artifactDir }))}
 const settingsIndex = process.argv.indexOf('--settings')
 const settings = settingsIndex >= 0 ? JSON.parse(await readFile(process.argv[settingsIndex + 1], 'utf8')) : null
-await writeFile(${JSON.stringify(capturePath)}, JSON.stringify({ argv: process.argv.slice(2), settings, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB }))
-await new Promise(resolvePromise => { let value = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => value += chunk); process.stdin.on('end', () => resolvePromise(value)) })
+const prompt = await new Promise(resolvePromise => { let value = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => value += chunk); process.stdin.on('end', () => resolvePromise(value)) })
+await writeFile(${JSON.stringify(capturePath)}, JSON.stringify({ argv: process.argv.slice(2), settings, prompt, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB }))
 if (process.argv.some(value => value.includes(${JSON.stringify(INJECTION)}))) process.exit(8)
 if (process.env.GITHUB_TOKEN || process.env.ACTIONS_RUNTIME_TOKEN || process.env.NPM_TOKEN || process.env.SSH_AUTH_SOCK) process.exit(7)
 ${operations[mode] ?? operations.success}

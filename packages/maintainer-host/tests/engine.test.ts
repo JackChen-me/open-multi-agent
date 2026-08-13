@@ -6,7 +6,7 @@ import { assertNoHostCredentials, buildIsolatedModelEnvironment, runIsolatedEngi
 import { APP_IDENTITY } from './helpers.js'
 
 describe('credential-isolated model process environment', () => {
-  it('allows only DeepSeek plus the minimal non-secret runtime environment', () => {
+  it('keeps the provider key out of the child environment and allows only minimal non-secret runtime values', () => {
     const isolated = buildIsolatedModelEnvironment({
       PATH: '/usr/bin',
       HOME: '/home/runner',
@@ -26,21 +26,21 @@ describe('credential-isolated model process environment', () => {
     }, 'deepseek-only')
     expect(isolated).toMatchObject({
       PATH: '/usr/bin', HOME: '/home/runner', RUNNER_TEMP: '/tmp/runner', CI: 'true',
-      DEEPSEEK_API_KEY: 'deepseek-only',
     })
     for (const name of [
       'GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
       'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'CODEX_GITHUB_PERSONAL_ACCESS_TOKEN', 'SAFE_BUT_UNNEEDED',
       'MAINTAINER_BOT_APP_TOKEN', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY',
+      'DEEPSEEK_API_KEY',
     ]) expect(isolated).not.toHaveProperty(name)
     expect(() => assertNoHostCredentials(isolated)).not.toThrow()
   })
 
   it('fails closed if any GitHub, npm, or Actions credential is added', () => {
     expect(() => assertNoHostCredentials({
-      DEEPSEEK_API_KEY: 'allowed',
+      DEEPSEEK_API_KEY: 'forbidden-in-environment',
       ACTIONS_RUNTIME_TOKEN: 'forbidden',
-    })).toThrow(/ACTIONS_RUNTIME_TOKEN/)
+    })).toThrow(/ACTIONS_RUNTIME_TOKEN|DEEPSEEK_API_KEY/)
   })
 
   it('does not invoke the model process for a non-runnable policy terminal', async () => {

@@ -88,4 +88,13 @@ describe('trusted production policy and command registry', () => {
     expect(() => productionPolicySchema.parse({ ...policy, allowedPaths: ['packages/core', 'packages/core'] }))
       .toThrow(/allowed paths must be unique/)
   })
+
+  it('uses one mutually exclusive backend selector and can roll back to the legacy engine', async () => {
+    const policy = await productionPolicy()
+    const path = 'packages/core/tests/subpath-exports.test.ts'
+    expect(buildProductionConfig(policy, [path]).executionBackend).toBe('legacy')
+    const claudePolicy = productionPolicySchema.parse({ ...policy, executionBackend: 'claude-code' })
+    expect(buildProductionConfig(claudePolicy, [path]).executionBackend).toBe('claude-code')
+    expect(() => productionPolicySchema.parse({ ...policy, executionBackend: 'both' })).toThrow()
+  })
 })

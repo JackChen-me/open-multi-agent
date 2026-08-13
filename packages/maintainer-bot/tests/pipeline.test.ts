@@ -38,6 +38,25 @@ async function fixtureRepo(): Promise<string> {
   return root
 }
 
+async function scriptedClaudeHarness(options: {
+  readonly fail?: boolean
+} = {}): Promise<{ cli: string; countPath: string; promptPath: string }> {
+  const root = await mkdtemp(join(tmpdir(), 'oma-scripted-claude-backend-'))
+  const cli = join(root, 'backend.mjs')
+  const countPath = join(root, 'count.txt')
+  const promptPath = join(root, 'prompt.txt')
+  const body = options.fail === true
+    ? `process.stdin.resume(); process.stdin.on('end', () => { console.error('token=ghp_abcdefghijklmnopqrstuvwxyz'); process.exitCode = 7 })\n`
+    : `import { readFile, writeFile } from 'node:fs/promises'\n` +
+      `const values = process.argv.slice(2); const repoIndex = values.indexOf('--repo'); const repo = values[repoIndex + 1]\n` +
+      `const countPath = ${JSON.stringify(countPath)}\n` +
+      `let count = 0; try { count = Number(await readFile(countPath, 'utf8')) } catch {}\n` +
+      `await writeFile(countPath, String(count + 1))\n` +
+      `const chunks = []; process.stdin.on('data', chunk => chunks.push(Buffer.from(chunk))); process.stdin.on('end', async () => { await writeFile(${JSON.stringify(promptPath)}, Buffer.concat(chunks)); await writeFile(repo + '/packages/demo/src/greeting.ts', ${JSON.stringify(FIXED)}); console.log(JSON.stringify({ status: 'CODING_COMPLETED', turns: 3, terminationReason: 'success', safeEventCount: 4 })) })\n`
+  await writeFile(cli, body)
+  return { cli, countPath, promptPath }
+}
+
 function repositoryRunner(
   root: string,
   validationExitCode = 0,
@@ -66,6 +85,26 @@ function repositoryRunner(
         stdout: validationExitCode === 0 ? '1 test passed\n' : '',
         stderr: validationExitCode === 0 ? '' : '1 test failed\n',
         exitCode: validationExitCode,
+      }
+    }
+    if (command === process.execPath && args.includes('run-production-validation')) {
+      return {
+        stdout: JSON.stringify({
+          status: 'VALIDATION_COMPLETED',
+          validationResults: [{
+            id: 'fixture-test',
+            command: '"npm" "test"',
+            success: validationExitCode === 0,
+            exitCode: validationExitCode,
+            durationMs: 1,
+            stdout: validationExitCode === 0 ? '1 test passed\n' : '',
+            stderr: validationExitCode === 0 ? '' : '1 test failed\n',
+            truncated: false,
+            environment: { set: [], unset: [] },
+          }],
+        }),
+        stderr: '',
+        exitCode: 0,
       }
     }
     throw new Error(`unexpected command: ${command} ${args.join(' ')}`)
@@ -121,6 +160,68 @@ describe('maintainer-bot vertical pipeline', () => {
     expect(await readFile(join(repoRoot, 'packages/demo/src/greeting.ts'), 'utf8')).toBe(FIXED)
     expect(adapter.roles).toEqual(['triage', 'planner', 'implementer', 'reviewer'])
     expect(result.proposal.validationResults.every(validation => validation.success)).toBe(true)
+  })
+
+  it('selects Claude Code as the sole coding engine while OMA runs coding and independent review', async () => {
+    const repoRoot = await fixtureRepo()
+    const scripted = await scriptedClaudeHarness()
+    const adapter = new PipelineAdapter('approve')
+    const runner = repositoryRunner(repoRoot)
+    const progress: string[] = []
+    const result = await runMaintainerBot({
+      repoRoot,
+      artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
+      request: authorizedRequest(),
+      config: testConfig({ executionBackend: 'claude-code' }),
+      runner,
+      stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
+      runId: 'run-claude-code-success',
+      adapter,
+      apiKey: 'scripted-provider-key',
+      claudeCodeHarnessCli: scripted.cli,
+      env: { PATH: process.env['PATH'] ?? '/usr/bin' },
+      requireEvidenceToolCalls: false,
+      onProgress: event => progress.push(`${event.type}:${event.agent ?? event.task ?? ''}`),
+    })
+    expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
+    expect(adapter.roles).toEqual(['triage', 'reviewer'])
+    expect(await readFile(scripted.countPath, 'utf8')).toBe('1')
+    const codingPrompt = await readFile(scripted.promptPath, 'utf8')
+    expect(codingPrompt).toContain('"title":"Fix deterministic greeting output"')
+    expect(codingPrompt).toContain('"reproductionSteps":["Call greeting(\\"Ada\\") and compare the returned string."]')
+    expect(progress.some(value => value.includes('claude-code-coder'))).toBe(true)
+    expect(progress.some(value => value.includes('fresh-reviewer'))).toBe(true)
+    const firstValidation = runner.calls.findIndex(call => call.args.includes('run-production-validation'))
+    const scopeChecksBeforeValidation = runner.calls
+      .map((call, index) => ({ call, index }))
+      .filter(({ call, index }) => call.command === 'git' && call.args[0] === 'status' && index < firstValidation)
+    expect(scopeChecksBeforeValidation.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('fails closed with bounded redacted diagnostics when the Claude Code backend fails', async () => {
+    const repoRoot = await fixtureRepo()
+    const scripted = await scriptedClaudeHarness({ fail: true })
+    const adapter = new PipelineAdapter('approve')
+    const result = await runMaintainerBot({
+      repoRoot,
+      artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
+      request: authorizedRequest(),
+      config: testConfig({ executionBackend: 'claude-code' }),
+      runner: repositoryRunner(repoRoot),
+      stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
+      runId: 'run-claude-code-failure',
+      adapter,
+      apiKey: 'scripted-provider-key',
+      claudeCodeHarnessCli: scripted.cli,
+      env: { PATH: process.env['PATH'] ?? '/usr/bin' },
+      requireEvidenceToolCalls: false,
+    })
+    expect(result.status).toBe('FAILED')
+    expect(result).not.toHaveProperty('proposal')
+    expect(result.detail).toMatch(/\[redacted\]/i)
+    expect(result.detail).not.toContain('ghp_')
+    expect(result.detail.length).toBeLessThanOrEqual(8_000)
+    expect(adapter.roles).toEqual(['triage'])
   })
 
   it('does not call a model or modify files without agent-ready authorization', async () => {

@@ -40,7 +40,7 @@ import {
   type TurnCountDiagnostic,
 } from './schema.js'
 
-interface HarnessSummary {
+export interface HarnessSummary {
   readonly events: string
   readonly safeEvents: SafeEvent[]
   readonly turns: number
@@ -407,7 +407,7 @@ export function buildHarnessArgs(options: {
   readonly settingsPath: string
   readonly repoRoot: string
   readonly allowedPaths: readonly string[]
-  readonly policy: CanaryPolicy
+  readonly policy: Pick<CanaryPolicy, 'model' | 'limits'>
 }): string[] {
   const readRule = `Read(${permissionAbsolute(options.repoRoot)}/**)`
   const editRules = options.allowedPaths.map(path => `Edit(${permissionAbsolute(resolve(options.repoRoot, path))})`)
@@ -501,7 +501,7 @@ function buildHarnessPrompt(request: CanaryRequest): string {
     `<untrusted_issue_json>\n${JSON.stringify(evidence, null, 2)}\n</untrusted_issue_json>\n`
 }
 
-async function spawnHarness(options: {
+export async function spawnHarness(options: {
   readonly command: string
   readonly args: readonly string[]
   readonly cwd: string

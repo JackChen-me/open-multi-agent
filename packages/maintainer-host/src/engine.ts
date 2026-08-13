@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import type { Writable } from 'node:stream'
 import { z } from 'zod'
 import {
   activationContextSchema,
@@ -32,7 +33,7 @@ export function buildIsolatedModelEnvironment(
   deepSeekApiKey: string,
 ): NodeJS.ProcessEnv {
   if (!deepSeekApiKey) throw new Error('DEEPSEEK_API_KEY is required for an eligible engine run.')
-  const environment: NodeJS.ProcessEnv = { DEEPSEEK_API_KEY: deepSeekApiKey, CI: '1' }
+  const environment: NodeJS.ProcessEnv = { CI: '1' }
   for (const name of SAFE_ENVIRONMENT_NAMES) {
     const value = source[name]
     if (value !== undefined) environment[name] = value
@@ -45,7 +46,7 @@ export function assertNoHostCredentials(environment: NodeJS.ProcessEnv): void {
   const forbidden = Object.keys(environment).filter(name =>
     /^(?:GITHUB|GH_|ACTIONS_|RUNNER_TRACKING_ID|NPM_TOKEN|NODE_AUTH_TOKEN)/i.test(name)
     || /(?:TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|AUTH_SOCK)/i.test(name)
-      && name !== 'DEEPSEEK_API_KEY')
+    )
   if (forbidden.length > 0) {
     throw new Error(`Isolated model environment contains forbidden host credentials: ${forbidden.sort().join(', ')}`)
   }
@@ -58,6 +59,7 @@ export async function runIsolatedEngine(options: {
   readonly stateDir: string
   readonly artifactDir: string
   readonly maintainerBotCli: string
+  readonly claudeCodeHarnessCli?: string
   readonly deepSeekApiKey?: string
   readonly sourceEnvironment?: NodeJS.ProcessEnv
   readonly nodeExecutable?: string
@@ -87,6 +89,9 @@ export async function runIsolatedEngine(options: {
     atomicWriteJson(requestPath, activation.request),
     atomicWriteJson(configPath, activation.config),
   ])
+  if (activation.config.executionBackend === 'claude-code' && options.claudeCodeHarnessCli === undefined) {
+    throw new Error('Claude Code backend requires a harness CLI path.')
+  }
   const child = await spawnCaptured(
     options.nodeExecutable ?? process.execPath,
     [
@@ -98,8 +103,13 @@ export async function runIsolatedEngine(options: {
       '--artifact-dir', resolve(options.artifactDir),
       '--repo', resolve(options.repoRoot),
       '--run-id', activation.claimId,
+      '--provider-key-fd', '3',
+      ...(activation.config.executionBackend === 'claude-code'
+        ? ['--claude-code-harness-cli', resolve(options.claudeCodeHarnessCli!)]
+        : []),
     ],
     environment,
+    deepSeekApiKey,
   )
   let parsed: z.infer<typeof engineOutputSchema> | undefined
   try {
@@ -125,23 +135,32 @@ async function spawnCaptured(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
+  providerKey: string,
 ): Promise<{ stdout: string; exitCode: number }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, [...args], {
       shell: false,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     })
+    const providerPipe = child.stdio[3] as Writable | null | undefined
+    if (providerPipe === null || providerPipe === undefined) {
+      child.kill('SIGTERM')
+      reject(new Error('Could not create the provider credential pipe.'))
+      return
+    }
+    providerPipe.on('error', reject)
+    providerPipe.end(`${providerKey}\n`)
     const stdout: Buffer[] = []
     let stdoutBytes = 0
     let stderrBytes = 0
-    child.stdout.on('data', chunk => {
+    child.stdout!.on('data', chunk => {
       const buffer = Buffer.from(chunk)
       stdoutBytes += buffer.byteLength
       if (stdoutBytes <= 5_000_000) stdout.push(buffer)
       else child.kill('SIGTERM')
     })
-    child.stderr.on('data', chunk => {
+    child.stderr!.on('data', chunk => {
       stderrBytes += Buffer.byteLength(chunk)
       if (stderrBytes > 1_000_000) child.kill('SIGTERM')
     })

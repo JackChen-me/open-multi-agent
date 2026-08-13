@@ -6,7 +6,9 @@ import {
   type OrchestratorEvent,
   type RunTaskSpec,
 } from '@open-multi-agent/core'
+import { z } from 'zod'
 import { PreflightBudgetAdapter } from './model-budget.js'
+import { redactSensitiveText } from './command.js'
 import {
   createAdmissionEvidenceTool,
   createContextEvidenceTools,
@@ -94,6 +96,41 @@ export interface RepairResult {
   readonly implementation: ImplementationOutput
   readonly tokenUsage: TokenUsage
 }
+
+export interface ClaudeCodeCodingOptions extends CommonModelOptions {
+  readonly request: {
+    readonly issue: {
+      readonly number: number
+      readonly title: string
+      readonly problem: string
+      readonly currentBehavior: string
+      readonly expectedBehavior: string
+      readonly reproductionSteps: readonly string[]
+      readonly acceptanceCriteria: readonly string[]
+      readonly targetPaths: readonly string[]
+      readonly outOfScope: readonly string[]
+    }
+  }
+  readonly repoRoot: string
+  readonly harnessCli: string
+  readonly contractPath: string
+  readonly nodeExecutable?: string
+  readonly claudeCommand?: string
+}
+
+export interface ClaudeCodeCodingResult {
+  readonly turns: number
+  readonly terminationReason: string
+  readonly safeEventCount: number
+  readonly tokenUsage: TokenUsage
+}
+
+const claudeCodeCodingResultSchema = z.object({
+  status: z.literal('CODING_COMPLETED'),
+  turns: z.number().int().nonnegative(),
+  terminationReason: z.string().min(1).max(200),
+  safeEventCount: z.number().int().nonnegative(),
+})
 
 export async function runMaintainerTriage(options: TriageDagOptions): Promise<TriageDagResult> {
   const admissionTool = createAdmissionEvidenceTool(options.manifest)
@@ -197,6 +234,65 @@ Do not request or simulate shell commands. The host will run every preregistered
   }
 }
 
+export async function runClaudeCodeCodingDag(
+  options: ClaudeCodeCodingOptions,
+): Promise<ClaudeCodeCodingResult> {
+  if (!options.apiKey) throw new Error('Claude Code coding worker requires an in-memory provider credential.')
+  const agent: AgentConfig = {
+    name: 'claude-code-coder',
+    description: 'Repository coding worker running Claude Code with DeepSeek inside the proven restricted harness.',
+    backend: {
+      kind: 'process',
+      command: options.nodeExecutable ?? process.execPath,
+      args: [
+        options.harnessCli,
+        'run-production-backend',
+        '--contract', options.contractPath,
+        '--repo', options.repoRoot,
+        ...(options.claudeCommand === undefined ? [] : ['--claude-command', options.claudeCommand]),
+      ],
+      cwd: options.repoRoot,
+      input: 'stdin',
+      env: {
+        DEEPSEEK_API_KEY: options.apiKey,
+      },
+    },
+    systemPrompt: `${COMMON_GUARDRAILS}
+You are the sole coding worker for this run. Read every applicable AGENTS.md and .github/CONTRIBUTING.md, then inspect the repository dynamically with Claude Code's bounded Read, Glob, and Grep tools.
+Edit only the exact maintainer-authorized target paths. Bash, network, delegation, GitHub lifecycle actions, commits, branches, pushes, deletion, rename, and scope widening are forbidden.
+Do not claim validation passed: the deterministic host runs the registered validation commands after you return.`,
+    permissionBoundary: 'maintainer-claude-code-no-host-credentials',
+  }
+  const tasks: RunTaskSpec[] = [{
+    title: 'Implement the admitted issue with Claude Code',
+    description: JSON.stringify({
+      issueNumber: options.request.issue.number,
+      title: options.request.issue.title,
+      problem: options.request.issue.problem,
+      currentBehavior: options.request.issue.currentBehavior,
+      expectedBehavior: options.request.issue.expectedBehavior,
+      reproductionSteps: options.request.issue.reproductionSteps,
+      acceptanceCriteria: options.request.issue.acceptanceCriteria,
+      targetPaths: options.request.issue.targetPaths,
+      outOfScope: options.request.issue.outOfScope,
+    }),
+    assignee: agent.name,
+    role: 'repository-coding',
+    priority: 'critical',
+    maxRetries: 0,
+  }]
+  const result = await runTasks('oma-maintainer-claude-code-coding', [agent], tasks, options)
+  const output = result.agentResults.get(agent.name)?.output
+  if (output === undefined) throw new Error('Claude Code coding worker returned no bounded completion result.')
+  let parsed: z.infer<typeof claudeCodeCodingResultSchema>
+  try {
+    parsed = claudeCodeCodingResultSchema.parse(JSON.parse(output))
+  } catch {
+    throw new Error('Claude Code coding worker returned an invalid bounded completion result.')
+  }
+  return { ...parsed, tokenUsage: result.totalTokenUsage }
+}
+
 export async function runFreshReview(options: ReviewOptions): Promise<ReviewResult> {
   const reviewTools = createReviewEvidenceTools(options.bundle)
   const agent: AgentConfig = {
@@ -283,14 +379,13 @@ async function runTasks(
   options: CommonModelOptions,
 ): Promise<TeamResult> {
   const maxTokenBudget = options.maxTokenBudget ?? options.config.limits.maxTokenBudget
-  const baseAdapter = options.adapter ?? await createAdapter('deepseek', options.apiKey)
-  const adapter = new PreflightBudgetAdapter(baseAdapter, maxTokenBudget)
-  const guardedAgents = agents.map(agent => ({
-    ...agent,
-    adapter,
-    provider: undefined,
-    apiKey: undefined,
-  }))
+  const needsLlmAdapter = agents.some(agent => agent.backend === undefined)
+  const adapter = needsLlmAdapter
+    ? new PreflightBudgetAdapter(options.adapter ?? await createAdapter('deepseek', options.apiKey), maxTokenBudget)
+    : undefined
+  const guardedAgents = agents.map(agent => agent.backend === undefined
+    ? { ...agent, adapter, provider: undefined, apiKey: undefined }
+    : agent)
   const orchestrator = new OpenMultiAgent({
     defaultModel: options.config.model,
     maxConcurrency: 1,
@@ -305,12 +400,18 @@ async function runTasks(
   if (!result.success) {
     const failures = [...result.agentResults.entries()]
       .filter(([, value]) => !value.success)
-      .map(([name, value]) => [
-        name,
-        value.status?.code ?? 'error',
-        value.errorInfo?.kind ?? 'unknown',
-        value.errorInfo?.code,
-      ].filter(Boolean).join('/'))
+      .map(([name, value]) => {
+        const message = value.error instanceof Error
+          ? redactSensitiveText(value.error.message).slice(0, 500)
+          : undefined
+        return [
+          name,
+          value.status?.code ?? 'error',
+          value.errorInfo?.kind ?? 'unknown',
+          value.errorInfo?.code,
+          message,
+        ].filter(Boolean).join('/')
+      })
     const taskStates = result.tasks?.map(task => `${task.title}=${task.status}`) ?? []
     const diagnostics = [
       `status=${result.status?.code ?? 'error'}`,

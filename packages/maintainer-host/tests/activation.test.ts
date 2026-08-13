@@ -37,6 +37,36 @@ const ORIGINAL = 'export const isolated = false\n'
 const FIXED = 'export const isolated = true\n'
 
 describe('mocked GitHub + scripted OMA activation path', () => {
+  it('runs the agent-ready Claude backend through OMA, sandbox contract, fresh review, and the deterministic Draft PR writer', async () => {
+    const fixture = await runClaudeToProposal()
+    const final = await finalizeActivation({
+      activation: fixture.activation,
+      engineResult: {
+        schemaVersion: 1, attempted: true, exitCode: 0,
+        status: 'DRAFT_PR_PROPOSAL_READY', detail: 'Proposal ready.',
+      },
+      originalEvent: fixture.event,
+      github: fixture.github,
+      runner: fixture.runner,
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
+      repoRoot: fixture.repoRoot,
+      policy: fixture.policy,
+      stateDir: fixture.stateDir,
+      artifactDir: fixture.artifactDir,
+      finalizedAt: '2026-08-10T18:00:00Z',
+    })
+    expect(final.status).toBe('DRAFT_PR_CREATED')
+    expect(fixture.github.createdPullRequests).toBe(1)
+    expect(fixture.github.pulls[0]).toMatchObject({ draft: true, state: 'open' })
+    expect(await readFile(fixture.backendCountPath, 'utf8')).toBe('1')
+    expect(fixture.adapter.roles).toEqual(['triage', 'reviewer'])
+    const sandboxCalls = fixture.runner.calls.filter(call => call.args.includes('run-production-validation'))
+    expect(sandboxCalls).toHaveLength(1)
+    expect(sandboxCalls[0]?.options.env).not.toHaveProperty('DEEPSEEK_API_KEY')
+    expect(fixture.runner.calls.filter(call => call.args[0] === 'push')).toHaveLength(1)
+  })
+
   it('creates one and only one Draft PR after the final actual-worktree safe-output gate', async () => {
     const fixture = await runToProposal()
     const final = await finalizeActivation({
@@ -420,6 +450,53 @@ async function runToProposal(localGitConfigKeys?: readonly string[]) {
   return { repoRoot, runner, github, policy, event, activation, stateDir, artifactDir }
 }
 
+async function runClaudeToProposal() {
+  const repoRoot = await fixtureRepo()
+  const runner = repositoryRunner(repoRoot)
+  const github = new FakeGitHub()
+  const policy = { ...await productionPolicy(), executionBackend: 'claude-code' as const }
+  const event = labelEvent()
+  const activation = await prepareActivation({
+    event, github, runner, repoRoot, policy,
+    eventId: '100.2', receivedAt: '2026-08-10T17:43:00Z', claimId: '100.2', actionsRunId: 100,
+    runUrl: `https://github.com/${REPOSITORY}/actions/runs/100`, baseShaHint: BASE_SHA,
+    eventSnapshotMatched: true, writerContract: APP_CONTRACT, removedBootstrapCommentCount: 0,
+  })
+  if (!activation.shouldRun || activation.request === null || activation.config === null) {
+    throw new Error(`expected runnable activation: ${activation.detail}`)
+  }
+  const harnessRoot = await mkdtemp(join(tmpdir(), 'oma-host-production-harness-'))
+  const harnessCli = join(harnessRoot, 'harness.mjs')
+  const backendCountPath = join(harnessRoot, 'backend-count.txt')
+  await writeFile(harnessCli, `
+import { readFile, writeFile } from 'node:fs/promises'
+const args = process.argv.slice(2)
+const repo = args[args.indexOf('--repo') + 1]
+let count = 0
+try { count = Number(await readFile(${JSON.stringify(backendCountPath)}, 'utf8')) } catch {}
+await writeFile(${JSON.stringify(backendCountPath)}, String(count + 1))
+await new Promise(resolve => { process.stdin.resume(); process.stdin.on('end', resolve) })
+await writeFile(repo + '/' + ${JSON.stringify(TARGET)}, ${JSON.stringify(FIXED)})
+console.log(JSON.stringify({ status: 'CODING_COMPLETED', turns: 2, terminationReason: 'success', safeEventCount: 3 }))
+`)
+  const stateDir = await mkdtemp(join(tmpdir(), 'oma-host-state-'))
+  const artifactDir = await mkdtemp(join(tmpdir(), 'oma-host-artifacts-'))
+  const adapter = new ActivationAdapter(
+    activation.admission!.issueRevision,
+    activation.request.issue.acceptanceCriteria,
+    activation.config.validationCommands.map(command => command.id),
+  )
+  const result = await runMaintainerBot({
+    repoRoot, artifactDir, request: activation.request, config: activation.config, runner,
+    stateStore: new FileRunStateStore(stateDir), runId: activation.claimId, adapter,
+    apiKey: 'scripted-provider-key', claudeCodeHarnessCli: harnessCli,
+    env: { PATH: process.env['PATH'] ?? '/usr/bin', HOME: '/tmp/oma-host-home' },
+    requireEvidenceToolCalls: false, now: () => new Date('2026-08-10T17:50:00Z'),
+  })
+  expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
+  return { repoRoot, runner, github, policy, event, activation, stateDir, artifactDir, adapter, backendCountPath }
+}
+
 async function fixtureRepo(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'oma-maintainer-host-repo-'))
   await mkdir(join(root, '.github'), { recursive: true })
@@ -464,6 +541,21 @@ function repositoryRunner(
     }
     if (command === 'git' && ['switch', 'add', 'push'].includes(args[0] ?? '')) return ok('')
     if (command === 'npm') return ok('validation passed\n')
+    if (command === process.execPath && args.includes('run-production-validation')) {
+      const contractPath = args[args.indexOf('--contract') + 1]!
+      const contract = JSON.parse(await readFile(contractPath, 'utf8')) as {
+        validationCommands: Array<{ id: string; command: string; args: string[]; env: Record<string, string>; unsetEnv: string[] }>
+      }
+      return ok(JSON.stringify({
+        status: 'VALIDATION_COMPLETED',
+        validationResults: contract.validationCommands.map(command => ({
+          id: command.id,
+          command: [command.command, ...command.args].map(value => JSON.stringify(value)).join(' '),
+          success: true, exitCode: 0, durationMs: 1, stdout: 'sandbox validation passed\n', stderr: '', truncated: false,
+          environment: { set: Object.entries(command.env).map(([name, value]) => ({ name, value })), unset: command.unsetEnv },
+        })),
+      }))
+    }
     throw new Error(`unexpected command: ${command} ${args.join(' ')}`)
   })
 }

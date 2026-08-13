@@ -205,7 +205,13 @@ export const maintainerConfigSchema = z.object({
   schemaVersion: z.literal(1),
   policyVersion: z.string().min(1).max(100),
   promptVersion: z.string().min(1).max(100),
+  executionBackend: z.enum(['legacy', 'claude-code']).default('legacy'),
   model: z.string().min(1).max(200).default('deepseek-v4-flash'),
+  claudeCode: z.object({
+    version: z.literal('2.1.220').default('2.1.220'),
+    maxTurns: z.number().int().positive().max(50).default(20),
+    maxProcessOutputBytes: z.number().int().positive().max(10_000_000).default(5_000_000),
+  }).default({}),
   agentReadyLabel: z.literal('agent-ready').default('agent-ready'),
   allowedPaths: z.array(repoPath).min(1).max(100),
   protectedPaths: z.array(repoPath).max(100).default([

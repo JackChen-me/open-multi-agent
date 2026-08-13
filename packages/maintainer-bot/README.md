@@ -14,7 +14,9 @@ engine neither receives that token nor decides App identity, permissions, or
 write authorization.
 
 The behavior, operations, and threat boundary are documented in
-[`docs/maintainer-bot.md`](../../docs/maintainer-bot.md).
+[`docs/maintainer-bot.md`](../../docs/maintainer-bot.md). The final production
+backend split and rollback contract are in
+[`docs/maintainer-bot-architecture.md`](../../docs/maintainer-bot-architecture.md).
 
 ## Read-only fixture
 

@@ -62,15 +62,21 @@ describe('GitHub Actions activation workflow', () => {
     expect(tokenStep).not.toContain('owner:')
     expect(tokenStep).not.toContain('repositories:')
 
-    const prepare = workflow.slice(workflow.indexOf('- name: Re-fetch, authorize'), workflow.indexOf('- name: Run OMA'))
+    const prepare = workflow.slice(
+      workflow.indexOf('- name: Re-fetch, authorize'),
+      workflow.indexOf('- name: Run the selected OMA backend'),
+    )
     expect(prepare).toContain('MAINTAINER_BOT_APP_TOKEN')
     expect(prepare).toContain('OMA_EXPECTED_APP_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_ID }}')
     expect(prepare).toContain('OMA_ACTUAL_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}')
     expect(prepare).toContain('OMA_ACTUAL_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}')
     expect(prepare).not.toContain('secrets.GITHUB_TOKEN')
     expect(prepare).not.toContain('DEEPSEEK_API_KEY')
-    const engine = workflow.slice(workflow.indexOf('- name: Run OMA'), workflow.indexOf('- name: Revalidate'))
+    const engine = workflow.slice(workflow.indexOf('- name: Run the selected OMA backend'), workflow.indexOf('- name: Revalidate'))
     expect(engine).toContain('DEEPSEEK_API_KEY')
+    expect(engine).toContain('--provider-key-fd 3')
+    expect(engine).toContain('exec env -i')
+    expect(engine).toContain('--claude-code-harness-cli')
     expect(engine).not.toContain('MAINTAINER_BOT_APP_TOKEN')
     expect(engine).not.toContain('GITHUB_TOKEN')
     expect(engine).not.toContain('NPM_TOKEN')
@@ -89,5 +95,9 @@ describe('GitHub Actions activation workflow', () => {
     expect(workflow).toContain('oma-maintainer-bot-status:v2')
     expect(workflow).toContain("comment.user?.login === 'github-actions[bot]'")
     expect(workflow).not.toContain('ready_for_review')
+    expect(workflow).toContain('Select the single configured execution backend')
+    expect(workflow).toContain("['legacy','claude-code']")
+    expect(workflow).toContain('@anthropic-ai/claude-code@2.1.220')
+    expect(workflow).toContain('sandbox-preflight')
   })
 })

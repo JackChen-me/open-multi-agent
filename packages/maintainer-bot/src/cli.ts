@@ -12,6 +12,7 @@ import {
   type ControlPlaneRequest,
 } from './schema.js'
 import { FileRunStateStore } from './state.js'
+import { readProviderKeyFromFd } from './provider-key.js'
 
 const command = process.argv[2] ?? 'help'
 const runner = new NodeCommandRunner()
@@ -68,7 +69,8 @@ async function execute(dryRun: boolean): Promise<void> {
     runId,
     dryRun,
     env: process.env,
-    apiKey: dryRun ? undefined : requireEnv('DEEPSEEK_API_KEY'),
+    apiKey: dryRun ? undefined : readProviderKeyFromFd(requireFlag('--provider-key-fd')),
+    claudeCodeHarnessCli: flag('--claude-code-harness-cli'),
     onProgress: event => {
       if (event.type === 'task_start' || event.type === 'task_complete' || event.type === 'error') {
         console.error(`[OMA] ${event.type}: ${event.agent ?? event.task ?? 'task'}`)
@@ -133,12 +135,6 @@ function requireFlag(name: string): string {
   return value
 }
 
-function requireEnv(name: string): string {
-  const value = process.env[name]
-  if (!value) throw new Error(`Required environment variable ${name} is not set.`)
-  return value
-}
-
 function redact(value: string): string {
   return value.replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,})\b/g, '[REDACTED]')
 }
@@ -149,9 +145,9 @@ function printHelp(): void {
 Usage:
   oma-maintainer-bot admit --request request.json [--repo PATH]
   oma-maintainer-bot dry-run --request request.json --config config.json [--repo PATH]
-  oma-maintainer-bot run --request request.json --config config.json --state-dir PATH --artifact-dir PATH [--repo PATH] [--run-id ID]
+  oma-maintainer-bot run --request request.json --config config.json --state-dir PATH --artifact-dir PATH --provider-key-fd FD [--repo PATH] [--run-id ID]
 
-admit and dry-run are read-only. run requires DEEPSEEK_API_KEY and refuses to
+admit and dry-run are read-only. run receives the provider credential through a dedicated file descriptor and refuses to
 start if GitHub/npm write credentials are present in the model process. It may
 edit only an already-isolated clean worktree and produces a local Draft PR
 proposal; it never calls GitHub, creates a branch, commits, pushes, or opens a PR.`)

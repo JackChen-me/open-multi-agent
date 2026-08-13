@@ -6,7 +6,13 @@
   "agentReadyLabel": "agent-ready",
   "policyVersion": "maintainer-activation-v1",
   "promptVersion": "maintainer-prompts-v1",
+  "executionBackend": "legacy",
   "model": "deepseek-v4-flash",
+  "claudeCode": {
+    "version": "2.1.220",
+    "maxTurns": 20,
+    "maxProcessOutputBytes": 5000000
+  },
   "allowedPaths": [
     "README.md",
     "docs",
