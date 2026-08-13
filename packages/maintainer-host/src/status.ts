@@ -10,6 +10,8 @@ import { sanitizePublicLine } from './public-output.js'
 
 export const STATUS_MARKER = 'oma-maintainer-bot-status:v2'
 export const BOOTSTRAP_STATUS_MARKER = 'oma-maintainer-bot-bootstrap-status:v1'
+export const BOOTSTRAP_BOT_USER_ID = 41_898_282
+export const BOOTSTRAP_BOT_LOGIN = 'github-actions[bot]'
 
 export type ClaimDecision =
   | { readonly kind: 'claimed' }
@@ -20,9 +22,10 @@ export type ClaimDecision =
 export function renderStatusComment(metadataInput: StatusMetadata, detail: string): string {
   const metadata = statusMetadataSchema.parse(metadataInput)
   const safeDetail = sanitizePublicLine(detail)
+  const publicStatus = publicActivationStatus(metadata.status)
   const rows = [
     `<!-- ${STATUS_MARKER} ${JSON.stringify(metadata)} -->`,
-    `## OMA Maintainer Bot — ${metadata.status}`,
+    `## OMA Maintainer Bot — ${publicStatus}`,
     '',
     `- Actions run: [${metadata.actionsRunId}](${metadata.runUrl})`,
     `- Base SHA: \`${metadata.baseSha}\``,
@@ -30,8 +33,49 @@ export function renderStatusComment(metadataInput: StatusMetadata, detail: strin
   ]
   if (metadata.branch !== null) rows.push(`- Branch: \`${metadata.branch}\``)
   if (metadata.pullRequestUrl !== null) rows.push(`- Draft PR: ${metadata.pullRequestUrl}`)
+  if (metadata.headSha !== null) rows.push(`- Head SHA: \`${metadata.headSha}\``)
   rows.push('', safeDetail, '', '_This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._')
   return `${rows.join('\n')}\n`
+}
+
+export function renderStartedStatusComment(
+  metadataInput: StatusMetadata,
+  detail: string,
+  current?: { readonly actionsRunId: number; readonly runUrl: string; readonly baseSha: string },
+): string {
+  const metadata = statusMetadataSchema.parse(metadataInput)
+  const display = current ?? metadata
+  return `${[
+    `<!-- ${STATUS_MARKER} ${JSON.stringify(metadata)} -->`,
+    '## OMA Maintainer Bot — STARTED',
+    '',
+    `- Actions run: [${display.actionsRunId}](${display.runUrl})`,
+    `- Base SHA: \`${display.baseSha}\``,
+    '- Issue revision: `pending`',
+    ...(metadata.status === 'STARTED' ? [] : [`- Previous durable status: \`${publicActivationStatus(metadata.status)}\``]),
+    '',
+    sanitizePublicLine(detail),
+    '',
+    '_This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._',
+  ].join('\n')}\n`
+}
+
+export function publicActivationStatus(status: StatusMetadata['status']):
+  'STARTED' | 'NEEDS_CLARIFICATION' | 'MANUAL_ONLY' | 'FAILED' | 'DRAFT_PR_CREATED' {
+  switch (status) {
+    case 'STARTED':
+    case 'RUNNING':
+      return 'STARTED'
+    case 'NEEDS_CLARIFICATION':
+      return 'NEEDS_CLARIFICATION'
+    case 'MANUAL_ONLY':
+      return 'MANUAL_ONLY'
+    case 'DRAFT_PR_CREATED':
+      return 'DRAFT_PR_CREATED'
+    case 'NEEDS_HUMAN':
+    case 'FAILED':
+      return 'FAILED'
+  }
 }
 
 export function parseStatusComment(body: string): StatusMetadata | null {
@@ -152,7 +196,7 @@ export async function upsertStatusComment(input: {
   return comment
 }
 
-async function assertTrustedStatusCommentAuthorship(
+export async function assertTrustedStatusCommentAuthorship(
   github: GitHubClient,
   comment: GitHubComment,
   identity: GitHubAppWriterIdentity,
@@ -167,6 +211,26 @@ async function assertTrustedStatusCommentAuthorship(
     || authorship.editor !== null && !isExpectedGraphQlAppBotActor(authorship.editor, identity)
   ) {
     throw new Error('Maintainer Bot status comment authorship or editor provenance is not the expected GitHub App.')
+  }
+}
+
+export async function assertBootstrapStatusCommentAuthorship(
+  github: GitHubClient,
+  comment: GitHubComment,
+): Promise<void> {
+  if (
+    comment.user.id !== BOOTSTRAP_BOT_USER_ID
+    || comment.user.login !== BOOTSTRAP_BOT_LOGIN
+    || comment.user.type !== 'Bot'
+  ) {
+    throw new Error('Bootstrap status comment is not attributed to the repository token bot.')
+  }
+  const authorship = await github.getIssueCommentAuthorship(comment.node_id)
+  const expected = (actor: GitHubIssueCommentActor | null) => actor?.databaseId === BOOTSTRAP_BOT_USER_ID
+    && actor.type === 'Bot'
+    && (actor.login === 'github-actions' || actor.login === BOOTSTRAP_BOT_LOGIN)
+  if (!expected(authorship.author) || authorship.createdViaEmail || authorship.editor !== null && !expected(authorship.editor)) {
+    throw new Error('Bootstrap status comment authorship or editor provenance is not the repository token bot.')
   }
 }
 
@@ -213,6 +277,7 @@ function toStatusClaim(metadata: StatusMetadata): StatusClaim {
     runKey: metadata.runKey,
     branch: metadata.branch,
     pullRequestUrl: metadata.pullRequestUrl,
+    headSha: metadata.headSha,
     updatedAt: metadata.updatedAt,
   }
 }

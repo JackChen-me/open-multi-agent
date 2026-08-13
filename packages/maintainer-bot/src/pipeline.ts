@@ -19,7 +19,13 @@ import {
   type TokenUsage,
 } from './orchestrator.js'
 import { buildDraftPrProposal } from './proposal.js'
+import { PipelineTraceWriter, type PipelineTraceStage } from './pipeline-trace.js'
 import { collectReviewBundle, type ReviewBundle } from './review-bundle.js'
+import {
+  maintainerRuntimeCodingContractSchema,
+  maintainerRuntimeValidationContractSchema,
+  maintainerRuntimeValidationResultSchema,
+} from './runtime-contract.js'
 import {
   controlPlaneRequestSchema,
   maintainerConfigSchema,
@@ -33,7 +39,6 @@ import {
   type ModelTriage,
   type ReviewOutput,
   type ValidationResult,
-  validationResultSchema,
 } from './schema.js'
 import { computeRunKey, type RunRecord, type RunStateStore } from './state.js'
 import { allValidationsPassed, runRegisteredValidations } from './validation.js'
@@ -49,7 +54,7 @@ export interface RunMaintainerBotOptions {
   readonly runId: string
   readonly adapter?: LLMAdapter
   readonly apiKey?: string
-  readonly claudeCodeHarnessCli?: string
+  readonly maintainerRuntimeCli?: string
   /** Test-only executable seam. The production host never sets this option. */
   readonly claudeCommand?: string
   readonly dryRun?: boolean
@@ -104,6 +109,7 @@ export async function runMaintainerBot(
 ): Promise<MaintainerBotResult> {
   const request = controlPlaneRequestSchema.parse(input.request)
   const config = maintainerConfigSchema.parse(input.config)
+  const now = input.now ?? (() => new Date())
   const admission = evaluateAdmission(request)
   const zeroUsage = { input_tokens: 0, output_tokens: 0 }
   if (!admission.mayDevelop) {
@@ -169,9 +175,27 @@ export async function runMaintainerBot(
     issueRevision: admission.issueRevision,
     baseSha: request.baseSha,
   })
+  const trace = new PipelineTraceWriter({
+    artifactDir: input.artifactDir,
+    runKey,
+    issueNumber: request.issue.number,
+    baseSha: request.baseSha,
+    claudeCodeTokenUsage: config.executionBackend === 'claude-code' ? 'not_reported' : 'not_applicable',
+  })
+  let activeTraceStage: PipelineTraceStage | undefined
+  const traceStage = async (stage: PipelineTraceStage, status: 'start' | 'complete' | 'failure') => {
+    try {
+      await trace.record(stage, status, now)
+    } catch {
+      // Telemetry is best-effort and must never change the authoritative pipeline result.
+    }
+    activeTraceStage = status === 'start' ? stage : undefined
+  }
+  await traceStage('admission', 'start')
   let record = await input.stateStore.attachContext(input.runId, runKey, manifest.manifestHash)
   await writeArtifact(input.artifactDir, `${runKey}.context.json`, manifest)
   if (!manifest.sufficiency.sufficient) {
+    await traceStage('admission', 'failure')
     record = await input.stateStore.transition(
       input.runId,
       runKey,
@@ -188,7 +212,6 @@ export async function runMaintainerBot(
       estimatedCostUsd: 0,
     }
   }
-
   const deadline = AbortSignal.timeout(config.limits.runTimeoutMs)
   const abortSignal = input.abortSignal === undefined
     ? deadline
@@ -200,6 +223,7 @@ export async function runMaintainerBot(
   let risks: string[] = []
   let latestBundle: ReviewBundle | undefined
   let claudeCandidateBundle: ReviewBundle | undefined
+  let frozenValidationCandidate: ReviewBundle | undefined
 
   try {
     const triage = await runMaintainerTriage({
@@ -208,13 +232,14 @@ export async function runMaintainerBot(
       adapter: input.adapter,
       apiKey: input.apiKey,
       abortSignal,
-      maxTokenBudget: phaseTokenBudget(config, usage, 'triage'),
       requireEvidenceToolCalls: input.requireEvidenceToolCalls,
       onProgress: input.onProgress,
     })
     usage = addUsage(usage, triage.tokenUsage)
-    cost = assertBudgets(config, usage, deadline)
+    cost = observeCost(config, usage, deadline)
     validateTriageOutput(request, manifest, triage.triage)
+    await traceStage('admission', 'complete')
+    await traceStage('coding', 'start')
 
     let legacyPlanPaths: readonly string[] = []
     if (config.executionBackend === 'legacy') {
@@ -225,12 +250,11 @@ export async function runMaintainerBot(
         adapter: input.adapter,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: phaseTokenBudget(config, usage, 'planning-implementation'),
         requireEvidenceToolCalls: input.requireEvidenceToolCalls,
         onProgress: input.onProgress,
       })
       usage = addUsage(usage, initial.tokenUsage)
-      cost = assertBudgets(config, usage, deadline)
+      cost = observeCost(config, usage, deadline)
       validatePlanningImplementationOutputs(
         request,
         config,
@@ -248,16 +272,15 @@ export async function runMaintainerBot(
         approvedEditScopes: manifest.approvedEditScopes,
       }))
     } else {
-      if (input.claudeCodeHarnessCli === undefined) {
-        throw new Error('Claude Code execution backend requires the production harness CLI.')
+      if (input.maintainerRuntimeCli === undefined) {
+        throw new Error('Claude Code execution backend requires the Maintainer Runtime CLI.')
       }
       const contractPath = resolve(input.artifactDir, `${runKey}.claude-code-contract.json`)
-      await writeArtifact(input.artifactDir, `${runKey}.claude-code-contract.json`, {
+      await writeArtifact(input.artifactDir, `${runKey}.claude-code-contract.json`, maintainerRuntimeCodingContractSchema.parse({
         schemaVersion: 1,
         contract: 'oma-maintainer-claude-code-backend-v1',
         baseSha: request.baseSha,
-        allowedPaths: manifest.approvedEditScopes.map(scope => scope.path),
-        protectedPaths: config.protectedPaths,
+        allowedScopes: manifest.approvedEditScopes,
         model: config.model,
         claudeCodeVersion: config.claudeCode.version,
         limits: {
@@ -265,21 +288,20 @@ export async function runMaintainerBot(
           maxTurns: config.claudeCode.maxTurns,
           maxProcessOutputBytes: config.claudeCode.maxProcessOutputBytes,
         },
-      })
+      }))
       const coding = await runClaudeCodeCodingDag({
         config,
         request,
         repoRoot: input.repoRoot,
-        harnessCli: resolve(input.claudeCodeHarnessCli),
+        runtimeCli: resolve(input.maintainerRuntimeCli),
         contractPath,
         claudeCommand: input.claudeCommand,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: remainingTokens(config, usage),
         onProgress: input.onProgress,
       })
       usage = addUsage(usage, coding.tokenUsage)
-      cost = assertBudgets(config, usage, deadline)
+      cost = observeCost(config, usage, deadline)
       const boundedDiff = await collectReviewBundle({
         repoRoot: input.repoRoot,
         request,
@@ -292,10 +314,23 @@ export async function runMaintainerBot(
         throw new Error(`Claude Code changed more than the configured ${config.edits.maxFiles} file limit.`)
       }
       claudeCandidateBundle = boundedDiff
+      frozenValidationCandidate = boundedDiff
       appliedEdits.push(...appliedEditsFromClaudeCode(manifest, boundedDiff))
       implementationSummary = `Claude Code completed the bounded coding task in ${coding.turns} turns.`
     }
+    await traceStage('coding', 'complete')
 
+    await traceStage('validation', 'start')
+    if (frozenValidationCandidate === undefined) {
+      frozenValidationCandidate = await collectReviewBundle({
+        repoRoot: input.repoRoot,
+        request,
+        config,
+        manifest,
+        validationResults: [],
+        runner: input.runner,
+      })
+    }
     let validationResults = config.executionBackend === 'legacy'
       ? await runRegisteredValidations({
           repoRoot: input.repoRoot,
@@ -308,7 +343,7 @@ export async function runMaintainerBot(
           artifactDir: input.artifactDir,
           runKey,
           baseSha: request.baseSha,
-          harnessCli: input.claudeCodeHarnessCli!,
+          runtimeCli: input.maintainerRuntimeCli!,
           candidate: claudeCandidateBundle!,
           config,
           runner: input.runner,
@@ -322,18 +357,24 @@ export async function runMaintainerBot(
       validationResults,
       runner: input.runner,
     })
+    assertSameCandidate(
+      latestBundle,
+      frozenValidationCandidate,
+      'Candidate differs from the pre-validation frozen bundle.',
+    )
+    await traceStage('validation', allValidationsPassed(validationResults) ? 'complete' : 'failure')
+    await traceStage('review', 'start')
     let reviewed = await runFreshReview({
       config,
       bundle: latestBundle,
       adapter: input.adapter,
       apiKey: input.apiKey,
       abortSignal,
-      maxTokenBudget: phaseTokenBudget(config, usage, 'review'),
       requireEvidenceToolCalls: input.requireEvidenceToolCalls,
       onProgress: input.onProgress,
     })
     usage = addUsage(usage, reviewed.tokenUsage)
-    cost = assertBudgets(config, usage, deadline)
+    cost = observeCost(config, usage, deadline)
     let review = reviewed.review
 
     for (let repairRound = 1;
@@ -348,12 +389,11 @@ export async function runMaintainerBot(
         adapter: input.adapter,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: phaseTokenBudget(config, usage, 'repair'),
         requireEvidenceToolCalls: input.requireEvidenceToolCalls,
         onProgress: input.onProgress,
       })
       usage = addUsage(usage, repair.tokenUsage)
-      cost = assertBudgets(config, usage, deadline)
+      cost = observeCost(config, usage, deadline)
       validateRepairOutput(
         repair.implementation,
         legacyPlanPaths,
@@ -368,6 +408,14 @@ export async function runMaintainerBot(
       }))
       implementationSummary = repair.implementation.summary
       risks.push(...repair.implementation.risks)
+      const repairedValidationCandidate = await collectReviewBundle({
+        repoRoot: input.repoRoot,
+        request,
+        config,
+        manifest,
+        validationResults: [],
+        runner: input.runner,
+      })
       validationResults = await runRegisteredValidations({
         repoRoot: input.repoRoot,
         config,
@@ -382,22 +430,29 @@ export async function runMaintainerBot(
         validationResults,
         runner: input.runner,
       })
+      assertSameCandidate(
+        latestBundle,
+        repairedValidationCandidate,
+        'Repaired candidate differs from the pre-validation frozen bundle.',
+      )
       reviewed = await runFreshReview({
         config,
         bundle: latestBundle,
         adapter: input.adapter,
         apiKey: input.apiKey,
         abortSignal,
-        maxTokenBudget: phaseTokenBudget(config, usage, 'review'),
         requireEvidenceToolCalls: input.requireEvidenceToolCalls,
         onProgress: input.onProgress,
       })
       usage = addUsage(usage, reviewed.tokenUsage)
-      cost = assertBudgets(config, usage, deadline)
+      cost = observeCost(config, usage, deadline)
       review = reviewed.review
     }
+    await traceStage('review', 'complete')
 
     if (!allValidationsPassed(validationResults) || review.verdict !== 'approve') {
+      await traceStage('proposal', 'start')
+      await traceStage('proposal', 'failure')
       const detail = failureDetail(validationResults, review)
       record = await input.stateStore.transition(input.runId, runKey, 'NEEDS_HUMAN', detail)
       return {
@@ -412,6 +467,7 @@ export async function runMaintainerBot(
     }
     if (latestBundle === undefined) throw new Error('Approved review is missing its deterministic evidence bundle.')
 
+    await traceStage('proposal', 'start')
     const proposal = buildDraftPrProposal({
       request,
       config,
@@ -433,6 +489,7 @@ export async function runMaintainerBot(
       'A deterministic host may create a Draft PR after revalidating the request.',
       proposal.proposalHash,
     )
+    await traceStage('proposal', 'complete')
     return {
       status: 'DRAFT_PR_PROPOSAL_READY',
       admission,
@@ -444,6 +501,7 @@ export async function runMaintainerBot(
       estimatedCostUsd: cost,
     }
   } catch (error) {
+    if (activeTraceStage !== undefined) await traceStage(activeTraceStage, 'failure')
     const detail = safeErrorMessage(error)
     const failureState = error instanceof NeedsHumanError ? 'NEEDS_HUMAN' : 'FAILED'
     try {
@@ -585,7 +643,7 @@ async function runClaudeCodeSandboxValidations(options: {
   readonly artifactDir: string
   readonly runKey: string
   readonly baseSha: string
-  readonly harnessCli: string
+  readonly runtimeCli: string
   readonly candidate: ReviewBundle
   readonly config: MaintainerConfig
   readonly runner: CommandRunner
@@ -593,7 +651,7 @@ async function runClaudeCodeSandboxValidations(options: {
 }): Promise<ValidationResult[]> {
   const contractName = `${options.runKey}.sandbox-validation-contract.json`
   const contractPath = resolve(options.artifactDir, contractName)
-  await writeArtifact(options.artifactDir, contractName, {
+  await writeArtifact(options.artifactDir, contractName, maintainerRuntimeValidationContractSchema.parse({
     schemaVersion: 1,
     contract: 'oma-maintainer-sandbox-validation-v1',
     baseSha: options.baseSha,
@@ -607,11 +665,11 @@ async function runClaudeCodeSandboxValidations(options: {
       maxFileBytes: options.config.edits.maxBytesPerFile,
       maxValidationOutputBytes: 100_000,
     },
-  })
+  }))
   const result = await options.runner.run(
     process.execPath,
     [
-      resolve(options.harnessCli),
+      resolve(options.runtimeCli),
       'run-production-validation',
       '--contract', contractPath,
       '--repo', resolve(options.repoRoot),
@@ -632,11 +690,11 @@ async function runClaudeCodeSandboxValidations(options: {
   } catch {
     throw new Error('Sandbox validation contract returned invalid output.')
   }
-  const record = output as { status?: unknown; validationResults?: unknown }
-  if (record.status !== 'VALIDATION_COMPLETED') {
+  const parsed = maintainerRuntimeValidationResultSchema.safeParse(output)
+  if (!parsed.success) {
     throw new Error('Sandbox validation contract returned an unexpected status.')
   }
-  return validationResultSchema.array().min(1).parse(record.validationResults)
+  return parsed.data.validationResults
 }
 
 function shouldRepair(
@@ -660,6 +718,16 @@ function failureDetail(validations: readonly ValidationResult[], review: ReviewO
   return parts.join(' ') || 'Pipeline did not satisfy the safe-output gate.'
 }
 
+function assertSameCandidate(
+  actual: ReviewBundle,
+  expected: ReviewBundle,
+  message: string,
+): void {
+  if (actual.diffHash !== expected.diffHash || actual.diff !== expected.diff) {
+    throw new Error(message)
+  }
+}
+
 function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     input_tokens: a.input_tokens + b.input_tokens,
@@ -667,47 +735,11 @@ function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   }
 }
 
-function remainingTokens(config: MaintainerConfig, usage: TokenUsage): number {
-  const used = usage.input_tokens + usage.output_tokens
-  const remaining = config.limits.maxTokenBudget - used
-  if (remaining <= 0) throw new NeedsHumanError('Maintainer-bot token budget exhausted.')
-  return remaining
-}
-
-function phaseTokenBudget(
-  config: MaintainerConfig,
-  usage: TokenUsage,
-  phase: 'triage' | 'planning-implementation' | 'review' | 'repair',
-): number {
-  const total = config.limits.maxTokenBudget
-  const phaseCaps = {
-    triage: Math.min(24_000, Math.max(1, Math.floor(total * 0.15))),
-    'planning-implementation': Math.min(82_000, Math.max(1, Math.floor(total * 0.52))),
-    review: Math.min(28_000, Math.max(1, Math.floor(total * 0.18))),
-    repair: Math.min(28_000, Math.max(1, Math.floor(total * 0.18))),
-  } as const
-  const remaining = remainingTokens(config, usage)
-  if (phase === 'repair') {
-    const nextReviewReserve = Math.min(phaseCaps.review, Math.max(1, Math.floor(total * 0.12)))
-    if (remaining <= nextReviewReserve) {
-      throw new NeedsHumanError('Maintainer-bot lacks the reserved token budget for a repair plus fresh review.')
-    }
-    return Math.min(phaseCaps.repair, remaining - nextReviewReserve)
-  }
-  return Math.min(phaseCaps[phase], remaining)
-}
-
-function assertBudgets(config: MaintainerConfig, usage: TokenUsage, deadline: AbortSignal): number {
-  if (usage.input_tokens + usage.output_tokens > config.limits.maxTokenBudget) {
-    throw new NeedsHumanError('Maintainer-bot cumulative token budget exceeded.')
-  }
+function observeCost(config: MaintainerConfig, usage: TokenUsage, deadline: AbortSignal): number {
   const cost = (
     usage.input_tokens * config.modelPricing.inputPerMillionUsd
     + usage.output_tokens * config.modelPricing.outputPerMillionUsd
   ) / 1_000_000
-  if (cost > config.limits.maxCostUsd) {
-    throw new NeedsHumanError('Maintainer-bot estimated model cost exceeded the configured USD limit.')
-  }
   if (deadline.aborted) throw new NeedsHumanError('Maintainer-bot global wall-clock deadline exceeded.')
   return cost
 }

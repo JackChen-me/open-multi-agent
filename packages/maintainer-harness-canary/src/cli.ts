@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { readProviderKeyFromFd } from '@open-multi-agent/maintainer-runtime'
 import { prepareCanaryRequestFile, loadCanaryPolicy } from './request.js'
 import { runHarnessCanary } from './runner.js'
-import { readProviderKeyFromFd } from './provider-key.js'
-import { runProductionClaudeCodeBackend, takeProductionProviderKey } from './production-backend.js'
-import { runProductionSandboxValidation } from './production-validation.js'
-import {
-  preflightValidationSandbox,
-  ValidationSandboxPreflightError,
-} from './validation-sandbox.js'
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2)
@@ -47,53 +41,7 @@ async function main(): Promise<void> {
     })}\n`)
     return
   }
-  if (command === 'run-production-backend') {
-    const options = parseArgs(args, ['contract', 'repo'])
-    const deepSeekApiKey = takeProductionProviderKey(process.env)
-    const prompt = await readStdin(200_000)
-    const result = await runProductionClaudeCodeBackend({
-      contractPath: resolve(options['contract']!),
-      repoRoot: resolve(options['repo']!),
-      prompt,
-      deepSeekApiKey,
-      sourceEnvironment: process.env,
-      claudeCommand: options['claude-command'],
-    })
-    process.stdout.write(`${JSON.stringify({ status: 'CODING_COMPLETED', ...result })}\n`)
-    return
-  }
-  if (command === 'run-production-validation') {
-    const options = parseArgs(args, ['contract', 'repo'])
-    const contract = await readFile(resolve(options['contract']!), 'utf8').then(value => JSON.parse(value) as unknown)
-    const validationResults = await runProductionSandboxValidation({
-      contract,
-      repoRoot: resolve(options['repo']!),
-      sourceEnvironment: process.env,
-    })
-    process.stdout.write(`${JSON.stringify({ status: 'VALIDATION_COMPLETED', validationResults })}\n`)
-    return
-  }
-  if (command === 'sandbox-preflight') {
-    const options = parseArgs(args, ['repo'])
-    await preflightValidationSandbox({ repoRoot: resolve(options['repo']!) })
-    process.stdout.write(`${JSON.stringify({ status: 'SANDBOX_READY' })}\n`)
-    return
-  }
-  throw new Error('Usage: oma-maintainer-harness-canary <prepare|sandbox-preflight|run|run-production-backend|run-production-validation> [options]')
-}
-
-async function readStdin(maxBytes: number): Promise<string> {
-  const chunks: Buffer[] = []
-  let bytes = 0
-  for await (const chunk of process.stdin) {
-    const buffer = Buffer.from(chunk)
-    bytes += buffer.byteLength
-    if (bytes > maxBytes) throw new Error('Production backend stdin exceeded the byte limit.')
-    chunks.push(buffer)
-  }
-  const value = Buffer.concat(chunks).toString('utf8')
-  if (value.trim().length === 0) throw new Error('Production backend stdin was empty.')
-  return value
+  throw new Error('Usage: oma-maintainer-harness-canary <prepare|run> [options]')
 }
 
 function parseArgs(args: readonly string[], required: readonly string[]): Record<string, string> {
@@ -109,9 +57,6 @@ function parseArgs(args: readonly string[], required: readonly string[]): Record
 }
 
 main().catch(error => {
-  const evidence = error instanceof ValidationSandboxPreflightError
-    ? JSON.stringify(error.diagnostic)
-    : error instanceof Error ? error.message : String(error)
-  process.stderr.write(`${evidence}\n`)
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
   process.exitCode = 1
 })

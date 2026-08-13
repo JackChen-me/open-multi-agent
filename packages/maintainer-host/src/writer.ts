@@ -1,5 +1,7 @@
 import {
+  canonicalGitDiffArgs,
   revalidateDraftPrSafeOutput,
+  sha256,
   type CommandRunner,
   type ContextManifest,
   type ControlPlaneRequest,
@@ -18,7 +20,6 @@ export const PR_MARKER = 'oma-maintainer-bot-pr:v1'
 export interface DraftPrWriteResult {
   readonly pullRequest: GitHubPullRequest
   readonly branch: string
-  readonly idempotent: boolean
 }
 
 export async function writeDraftPullRequest(options: {
@@ -52,17 +53,7 @@ export async function writeDraftPullRequest(options: {
   const runKey = options.record.runKey
   const existingPulls = await options.github.listPullRequestsForHead(proposal.repository, branch)
   if (existingPulls.length > 0) {
-    if (existingPulls.length !== 1 || !isMatchingBotDraftPullRequest(
-      existingPulls[0]!,
-      runKey,
-      options.defaultBranch,
-      proposal.baseSha,
-      branch,
-      options.writerIdentity,
-    )) {
-      throw new Error('The deterministic head branch is already associated with conflicting pull request state.')
-    }
-    return { pullRequest: existingPulls[0]!, branch, idempotent: true }
+    throw new Error('The deterministic head branch is already associated with pull request state not bound by this writer invocation.')
   }
   if (await options.github.getBranchSha(proposal.repository, branch) !== null) {
     throw new Error('The deterministic remote branch already exists without a matching open Draft PR.')
@@ -108,6 +99,14 @@ export async function writeDraftPullRequest(options: {
   if (unstaged.length > 0 || untracked.length > 0) {
     throw new Error('Unreviewed unstaged or untracked files remain after deterministic staging.')
   }
+  await assertFrozenCandidateDiff({
+    runner: options.runner,
+    repoRoot: options.repoRoot,
+    paths,
+    mode: 'cached',
+    expectedHash: proposal.validatedCandidateDiffHash,
+    driftMessage: 'Staged candidate diff differs from the validated and reviewed proposal.',
+  })
   await options.runner.run(
     'git',
     ['commit', '-m', commitMessage(options.request)],
@@ -117,6 +116,15 @@ export async function writeDraftPullRequest(options: {
   if (!/^[0-9a-f]{40}$/.test(headSha) || headSha === proposal.baseSha) {
     throw new Error('Deterministic commit did not produce a valid new head SHA.')
   }
+  await assertFrozenCandidateDiff({
+    runner: options.runner,
+    repoRoot: options.repoRoot,
+    paths,
+    mode: 'committed',
+    baseSha: proposal.baseSha,
+    expectedHash: proposal.validatedCandidateDiffHash,
+    driftMessage: 'Committed candidate diff differs from the validated and reviewed proposal.',
+  })
   await assertSafeLocalGitConfiguration(options.runner, options.repoRoot, nonSecretGitEnvironment)
   await options.runner.run(
     'git',
@@ -131,6 +139,7 @@ export async function writeDraftPullRequest(options: {
       proposal,
       runKey,
       runUrl: options.runUrl,
+      headSha,
     }),
     head: branch,
     base: options.defaultBranch,
@@ -143,12 +152,13 @@ export async function writeDraftPullRequest(options: {
       proposal.baseSha,
       branch,
       options.writerIdentity,
+      headSha,
     )
     || pullRequest.head.sha !== headSha
   ) {
     throw new Error('GitHub did not return the expected trusted open Draft PR after creation.')
   }
-  return { pullRequest, branch, idempotent: false }
+  return { pullRequest, branch }
 }
 
 export function renderDraftPrBody(options: {
@@ -156,6 +166,7 @@ export function renderDraftPrBody(options: {
   readonly proposal: DraftPrProposal
   readonly runKey: string
   readonly runUrl: string
+  readonly headSha: string
 }): string {
   const issueUrl = `https://github.com/${options.request.issue.repository}/issues/${options.request.issue.number}`
   const files = options.proposal.changedFiles.map(file => `- \`${file.path}\` — ${sanitizePublicLine(file.reason)}`)
@@ -164,6 +175,9 @@ export function renderDraftPrBody(options: {
   const risks = options.proposal.risks.length === 0
     ? ['- No additional model-reported risk after deterministic gates.']
     : options.proposal.risks.map(risk => `- ${sanitizePublicLine(risk)}`)
+  const claudeCodeTokenUsage = options.proposal.claudeCodeTokenUsage === 'not_reported'
+    ? 'unknown (not reported)'
+    : 'not applicable'
   return `<!-- ${PR_MARKER} run-key:${options.runKey} -->
 ## Summary
 
@@ -177,6 +191,8 @@ Related Issue: [#${options.request.issue.number}](${issueUrl})
 - Base SHA: \`${options.proposal.baseSha}\`
 - Issue revision: \`${options.proposal.issueRevision}\`
 - Run key: \`${options.runKey}\`
+- Head SHA: \`${options.headSha}\`
+- Claude Code token usage: ${claudeCodeTokenUsage}
 
 ## Reviewed files
 
@@ -205,6 +221,7 @@ export function isMatchingBotDraftPullRequest(
   baseSha: string,
   head: string,
   writerIdentity: GitHubAppWriterIdentity,
+  expectedHeadSha: string,
 ): boolean {
   return pull.state === 'open'
     && pull.draft === true
@@ -212,6 +229,7 @@ export function isMatchingBotDraftPullRequest(
     && pull.base.ref === base
     && pull.base.sha === baseSha
     && pull.head.ref === head
+    && pull.head.sha === expectedHeadSha
     && (pull.body ?? '').includes(`<!-- ${PR_MARKER} run-key:${runKey} -->`)
 }
 
@@ -281,4 +299,36 @@ async function assertSafeLocalGitConfiguration(
 
 function assertSamePaths(actual: readonly string[], expected: readonly string[], message: string): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(message)
+}
+
+export async function assertFrozenCandidateDiff(options: {
+  readonly runner: CommandRunner
+  readonly repoRoot: string
+  readonly paths: readonly string[]
+  readonly mode: 'cached' | 'committed'
+  readonly baseSha?: string
+  readonly expectedHash: string
+  readonly driftMessage: string
+}): Promise<void> {
+  let diff = ''
+  for (const path of [...options.paths].sort()) {
+    const [command, ...canonicalArgs] = canonicalGitDiffArgs({
+      baseSha: options.mode === 'committed' ? options.baseSha! : 'HEAD',
+      paths: [path],
+    })
+    if (command !== 'diff') throw new Error('Canonical writer diff command is invalid.')
+    const args = options.mode === 'cached'
+      ? ['diff', '--cached', ...canonicalArgs]
+      : ['diff', ...canonicalArgs.slice(0, canonicalArgs.indexOf('--')), 'HEAD', ...canonicalArgs.slice(canonicalArgs.indexOf('--'))]
+    const result = await options.runner.run('git', args, {
+      cwd: options.repoRoot,
+      maxOutputChars: 300_001,
+    })
+    if (result.stdout.includes('[output truncated]')) {
+      throw new Error('Draft PR writer candidate diff output was truncated.')
+    }
+    diff += result.stdout
+    if (diff.length > 300_000) throw new Error('Draft PR writer candidate diff exceeds the safe limit.')
+  }
+  if (sha256(diff) !== options.expectedHash) throw new Error(options.driftMessage)
 }

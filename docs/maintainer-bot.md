@@ -30,14 +30,25 @@ a long-running server.
 
 ## GitHub Actions activation flow
 
-1. A pinned `actions/create-github-app-token` commit requests a short-lived
-   installation token for the current repository only. Before checkout or
-   model work, deterministic preflight verifies operator enablement, token
+1. The job first checks out exact `github.workflow_sha` with read-only
+   `GITHUB_TOKEN`, installs the lockfile with lifecycle scripts disabled, and
+   builds the typed host. Failure in this pre-App window is visible in the
+   Actions run only; it cannot write an Issue status because no trusted control
+   CLI or verified App identity exists yet. A pinned
+   `actions/create-github-app-token` commit then requests a short-lived
+   installation token for the current repository only. Before model work,
+   deterministic preflight verifies operator enablement, token
    viewer, App ID/client ID/slug, installation ID, bot user ID, and exact
    single-repository scope. The verified App then publishes or updates one BOT
    status comment with `STARTED`, Actions run URL/ID, and a freshly resolved
-   base SHA. If App preflight cannot run, the limited repository token may
-   publish one explicitly non-authoritative bootstrap failure notice; it can
+   base SHA. A typed start failure records a bounded stage and public-safe
+   detail. When App identity is valid, `recover-start` revalidates the App,
+   event/run binding, current Issue/base, and authoritative comment without
+   depending on the start artifact; it closes a newly written non-durable
+   `STARTED` or preserves an earlier terminal/claim ledger. Only token mint,
+   App-identity, or App-recovery failure falls back to the limited repository
+   token, which may publish one accurately staged, explicitly
+   non-authoritative bootstrap notice; it can
    never create a durable claim, branch, push, or PR. If an earlier App-owned
    durable comment exists, the bootstrap notice is a temporary second comment
    so configuration failure is never silent; the next verified App run removes
@@ -60,11 +71,20 @@ a long-running server.
 6. The writer stages exactly the reviewed files, rejects extra/untracked/
    deleted/renamed/symlinked/out-of-scope content and unsafe local Git hook,
    proxy, credential, include, filter, or URL-rewrite configuration. Writer Git
-   processes disable hooks plus global/system credential configuration, use a
-   deterministic branch and canonical HTTPS destination, and create at most one
-   Draft PR. Every App-authenticated terminal path updates the authoritative
-   status comment and Actions summary; only an App-preflight failure uses the
-   temporary non-authoritative bootstrap notice described above.
+   processes disable hooks plus global/system credential configuration. After
+   `git add`, the writer rebuilds the canonical cached diff for every reviewed
+   path and checks the frozen validated-candidate hash; after commit, it repeats
+   the same check over `base..HEAD` before any push. This binds file content and
+   Git modes across revalidation, staging, commit, and the eventual pushed tree.
+   The writer then uses a deterministic branch and canonical HTTPS destination,
+   and creates at most one Draft PR. The App-owned terminal status records the
+   created PR's head SHA; a retry reuses that PR only while its current head,
+   branch, base, URL, run key, and App authorship still match. Every
+   App-authenticated terminal path updates the authoritative
+   status comment and Actions summary; only an unavailable/unverifiable App or
+   failed App-authenticated start recovery uses the temporary non-authoritative
+   bootstrap notice described above. Event snapshot, base, local checkout, or
+   status preflight failures are not misreported as App configuration failures.
 
 GitHub only triggers an `issues` workflow when its workflow file exists on the
 default branch. Activation v1 deliberately leaves organization and repository
@@ -109,7 +129,7 @@ backend never falls through to the other backend.
    edit capability. The model has no filesystem or shell tool.
 6. Legacy runs execute every preregistered validation command as argv with
    `shell: false` and a credential-stripped environment. Claude runs pass the
-   already scope-checked candidate to the shared canary validation runtime.
+   already scope-checked candidate to the dedicated Maintainer Runtime.
    For each trusted command, the runtime creates a new disposable snapshot,
    rebuilds the pinned base plus the exact frozen patch, executes that one
    command only through fail-closed `/usr/bin/bwrap`, rechecks the tracked
@@ -134,22 +154,20 @@ editor, or repair loop. Claude reads and edits through the extracted canary
 harness; deterministic code checks the resulting worktree before validation.
 
 All model outputs use Zod schemas. A single OMA structured-output correction is
-still available inside a role; task retries are disabled. The 160k production
-token ceiling is split into explicit phase caps: triage receives at most 15%
-(24k), planning plus implementation 52% (82k), and each fresh review or repair
-18% (28k). A repair additionally reserves 12% for the required next fresh
-review. Each provider request reserves that role's configured maximum output
-before it is sent. Cumulative token and configured price-based cost cover the
-OMA LLM calls and fail closed with the wall-clock, edit-size, diff-size,
-context-size, and repair-loop limits. They do not claim exact accounting for
-the generic process backend: it currently reports zero token usage for the
-Claude coding worker, which means not reported rather than zero consumption.
+still available inside a role; task retries are disabled. Token usage and
+configured price-based cost are recorded for the OMA LLM calls, but this
+internal maintainer workflow does not stop a run at a token or dollar ceiling.
+The legacy `maxTokenBudget` and `maxCostUsd` policy fields remain accepted only
+for configuration compatibility; production execution does not enforce them.
+This avoids treating a tokenizer-free estimate as a safety
+boundary. The generic process backend currently reports zero token usage for
+the Claude coding worker, which means not reported rather than zero consumption.
 Claude coding is bounded by max turns, wall clock, process-output,
 changed-path/file, file-size, and diff-size limits.
 
 ## Admission and state
 
-The structured states are:
+The engine and durable-claim internals use these structured states:
 
 - `READY_CANDIDATE`, `NEEDS_CLARIFICATION`, `MANUAL_ONLY`, `BLOCKED`
 - `AGENT_READY`, `RUNNING`
@@ -158,7 +176,7 @@ The structured states are:
 
 `DRAFT_PR_PROPOSAL_READY` is intentionally separate from
 `DRAFT_PR_CREATED`. The latter requires a matching host acknowledgment and
-proposal hash.
+proposal hash. These engine states are not the public Issue status contract.
 
 Definition of Ready requires a clear problem, current and expected behavior,
 verifiable acceptance criteria, target workspace and paths, explicit
@@ -205,7 +223,7 @@ Because GitHub-hosted runners are ephemeral, `$RUNNER_TEMP` is never the
 cross-run authority. Activation v1 instead uses one status comment owned by
 the precisely verified dedicated App bot, containing a bounded
 machine-readable claim ledger, Actions run status, and deterministic branch/PR
-metadata. The token viewer and REST actor ID/login/type must match the verified
+metadata including the trusted PR head SHA. The token viewer and REST actor ID/login/type must match the verified
 App bot. GraphQL author/editor actors must independently match that Bot's
 database ID and type; their login may use GitHub's App slug form or the REST
 `[bot]` form, and email-created comments are rejected. Ordinary users and
@@ -432,16 +450,29 @@ fork gh-aw and has not been run end-to-end against a live gh-aw version.
 ## Status and operations
 
 The Issue's authoritative App-owned BOT comment and Actions job summary use
-these public states. The temporary repository-token bootstrap comment can only
-report pre-model `NEEDS_HUMAN`; it is not part of the durable state machine.
+exactly these five public states. Legacy v2 comments containing `RUNNING` or
+`NEEDS_HUMAN` remain readable so durable duplicate and stale-claim protection
+is not weakened, but new public writes normalize them to `STARTED` and `FAILED`.
+The temporary repository-token bootstrap comment can only report pre-model
+`FAILED`; it is not part of the durable state machine.
 
-- `STARTED`: the label delivery is visible and deterministic checks are starting.
-- `RUNNING`: fixed revision/base, permission, DoR, scope, duplicate, and App identity/installation checks passed; the isolated engine is running.
+- `STARTED`: the label delivery is visible and deterministic checks are starting, or the admitted credential-isolated engine is running.
 - `NEEDS_CLARIFICATION`: the Issue content, required format, or acceptance information is incomplete or conflicting, so the Definition of Ready cannot be established.
 - `MANUAL_ONLY`: the task category itself is not eligible for automated development, including architecture, security, permissions, privacy, license, CI/release, broad API/refactor, or uncontrolled dependency work.
-- `NEEDS_HUMAN`: repository policy or authorization must be revised, or the environment, control plane, stale/crashed state, drift, App configuration/identity, conflicting branch/PR, or another safety gate requires maintainer intervention. A production-policy rejection stops before model execution and is not a request for more Issue detail.
-- `FAILED`: infrastructure or engine failure produced no eligible Draft PR.
+- `FAILED`: repository policy, authorization, environment, control-plane, stale/crashed-state, drift, App identity, conflicting branch/PR, infrastructure, model, validation, or writer safety gates stopped the run. Stable internal reason codes and bounded detail preserve the required operator action; a production-policy rejection is not a request for more Issue detail.
 - `DRAFT_PR_CREATED`: exactly one open Draft PR exists; human review remains required.
+
+The Actions workflow contains only environment assembly and typed CLI calls.
+`maintainer-host start` writes a hash-bound, non-durable artifact before the
+runtime preflight; `maintainer-host prepare` verifies the artifact hash before
+creating a durable claim. `maintainer-host recover-start` does not trust that
+artifact: it rebinds the current Actions run and event under the verified App,
+then closes an orphaned `STARTED` or preserves prior terminal/claim metadata.
+App/bootstrap/finalize failure publishing and the terminal exit decision are
+also typed host commands. Checkout, dependency-install, or host-build
+failure before that CLI exists remains visible only in the Actions run; no
+precompiled repository script or external status-writing action is trusted for
+that earlier window.
 
 When an otherwise complete Issue targets a path missing from the production
 allowlist, a maintainer must first merge the narrow policy correction. The
@@ -474,7 +505,7 @@ To configure activation without exposing credential values:
    are reviewed, set `OMA_MAINTAINER_BOT_APP_WRITER_ENABLED` to exact `true`.
    Missing configuration, private-key/token mint failure, an uninstalled or
    under-permissioned App, identity drift, or broader repository scope stops
-   before model execution and publishes a public-safe `NEEDS_HUMAN` bootstrap
+   before model execution and publishes a public-safe `FAILED` bootstrap
    result where the limited repository token can do so.
 5. Keep **Settings → Actions → General → Workflow permissions** at read and
    keep “Allow GitHub Actions to create and approve pull requests” disabled at
@@ -514,6 +545,15 @@ The trusted pre-PR validation registry remains mandatory even though the
 App-created Draft PR triggers ordinary `pull_request` CI. Operators must inspect
 the actual PR checks; the bot never approves or merges based on CI alone.
 
+Each attempted engine run also writes one bounded, run-key-bound JSON trace for
+the fixed `admission`, `coding`, `validation`, `review`, and `proposal` stages.
+The workflow attempts to upload only that trace for seven days on success or
+failure. It contains stage status and timestamps, not prompts, source, diffs,
+model output, tokens, credentials, or error text. Trace persistence is
+best-effort telemetry and never changes the authoritative pipeline result.
+Claude Code process token usage is reported as `unknown (not reported)` rather
+than zero.
+
 ## Verification and first live canary
 
 Unit/integration tests use a mocked GitHub client and scripted OMA adapters and
@@ -534,7 +574,7 @@ A first live canary is a separate, explicitly authorized operation:
 3. Verify the workflow exists on `main`, its action/runtime pins and production
    policy are reviewed, and no conflicting BOT branch/PR/run exists.
 4. Reapply `agent-ready` once with a write/maintain/admin actor and observe
-   STARTED/RUNNING plus run URL, ID, revision, and base SHA.
+   `STARTED` plus run URL, ID, revision, and base SHA.
 5. Verify only `packages/create-oma-app/tests/runtime.test.ts` changed, every
    registered validation passed without truncation, and exactly one Draft PR
    was created and linked.

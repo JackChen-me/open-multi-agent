@@ -262,6 +262,7 @@ export const statusClaimSchema = z.object({
   runKey: sha256.nullable(),
   branch: z.string().max(240).nullable(),
   pullRequestUrl: z.string().url().nullable(),
+  headSha: sha40.nullable().default(null),
   updatedAt: z.string(),
 })
 
@@ -280,6 +281,7 @@ export const statusMetadataSchema = z.object({
   runKey: sha256.nullable(),
   branch: z.string().max(240).nullable(),
   pullRequestUrl: z.string().url().nullable(),
+  headSha: sha40.nullable().default(null),
   updatedAt: z.string(),
   claims: z.array(statusClaimSchema).max(64).default([]),
 }).superRefine((metadata, context) => {
@@ -294,6 +296,45 @@ export const statusMetadataSchema = z.object({
 })
 
 export type StatusMetadata = z.infer<typeof statusMetadataSchema>
+
+export const bootstrapFailureStageSchema = z.enum([
+  'app-token-mint',
+  'app-identity-or-recovery',
+])
+
+export type BootstrapFailureStage = z.infer<typeof bootstrapFailureStageSchema>
+
+export const startFailureStageSchema = z.enum([
+  'event-policy',
+  'app-identity',
+  'repository-metadata',
+  'issue-snapshot',
+  'base-identity',
+  'local-checkout',
+  'status-preflight',
+  'status-write',
+  'artifact-write',
+  'summary-write',
+  'output-write',
+])
+
+export type StartFailureStage = z.infer<typeof startFailureStageSchema>
+
+export const bootstrapStatusMetadataSchema = z.object({
+  version: z.literal(1),
+  repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+  issueNumber: z.number().int().positive(),
+  status: z.literal('FAILED'),
+  stage: bootstrapFailureStageSchema,
+  reason: z.enum(['APP_TOKEN_UNAVAILABLE', 'APP_IDENTITY_OR_RECOVERY_UNVERIFIED']),
+  detail: boundedLine,
+  actionsRunId: z.number().int().positive(),
+  runUrl: z.string().url(),
+  baseSha: sha40,
+  updatedAt: z.string(),
+})
+
+export type BootstrapStatusMetadata = z.infer<typeof bootstrapStatusMetadataSchema>
 
 export const activationContextSchema = z.object({
   schemaVersion: z.literal(1),
@@ -313,6 +354,25 @@ export const activationContextSchema = z.object({
 })
 
 export type ActivationContext = z.infer<typeof activationContextSchema>
+
+export const startContextSchema = z.object({
+  schemaVersion: z.literal(1),
+  repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+  issueNumber: z.number().int().positive(),
+  claimId: z.string().min(1).max(300),
+  actionsRunId: z.number().int().positive(),
+  runUrl: z.string().url(),
+  commentId: z.number().int().positive(),
+  baseSha: sha40,
+  eventSnapshotMatched: z.literal(true),
+  removedBootstrapCommentCount: z.number().int().nonnegative().max(1),
+  executionBackend: maintainerConfigSchema.shape.executionBackend,
+  writerIdentity: githubAppWriterIdentitySchema,
+  startedAt: z.string(),
+  artifactHash: sha256,
+})
+
+export type StartContext = z.infer<typeof startContextSchema>
 
 export const engineResultSchema = z.object({
   schemaVersion: z.literal(1),

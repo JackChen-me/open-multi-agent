@@ -6,10 +6,12 @@ describe('GitHub-hosted harness canary workflow', () => {
   it('is manual, read-only, pinned, credential-isolated, and does not alter the production workflow', async () => {
     const workflow = await readFile(resolve(process.cwd(), '../../.github/workflows/maintainer-harness-canary.yml'), 'utf8')
     const cli = await readFile(resolve(process.cwd(), 'src/cli.ts'), 'utf8')
-    const validationSandbox = await readFile(resolve(process.cwd(), 'src/validation-sandbox.ts'), 'utf8')
-    const validationWorkspace = await readFile(resolve(process.cwd(), 'src/validation-workspace.ts'), 'utf8')
-    const boundedProcess = await readFile(resolve(process.cwd(), 'src/bounded-process.ts'), 'utf8')
-    const appArmorProfile = await readFile(resolve(process.cwd(), 'config/bwrap.apparmor'), 'utf8')
+    const runtimeRoot = resolve(process.cwd(), '../maintainer-runtime')
+    const validationSandbox = await readFile(resolve(runtimeRoot, 'src/validation-sandbox.ts'), 'utf8')
+    const validationWorkspace = await readFile(resolve(runtimeRoot, 'src/validation-workspace.ts'), 'utf8')
+    const boundedProcess = await readFile(resolve(runtimeRoot, 'src/bounded-process.ts'), 'utf8')
+    const runtimeCli = await readFile(resolve(runtimeRoot, 'src/cli.ts'), 'utf8')
+    const appArmorProfile = await readFile(resolve(runtimeRoot, 'config/bwrap.apparmor'), 'utf8')
     const installStep = workflow.match(/      - name: Install repository dependencies and pinned Claude Code[\s\S]*?(?=\n      - name:)/)?.[0]
     const modelStep = workflow.match(/      - name: Run credential-isolated Claude Code and DeepSeek canary[\s\S]*?(?=\n      - name:)/)?.[0]
     expect(installStep).toBeDefined()
@@ -46,7 +48,7 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
 }
 `)
     expect(workflow.indexOf('sandbox-preflight')).toBeLessThan(workflow.indexOf('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}'))
-    expect(workflow).toContain('dist/cli.js sandbox-preflight')
+    expect(workflow).toContain('maintainer-runtime/dist/cli.js sandbox-preflight')
     expect(validationSandbox).toContain("export const BUBBLEWRAP_PATH = '/usr/bin/bwrap'")
     for (const contract of [
       "'--unshare-pid'",
@@ -87,10 +89,12 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
     expect(workflow).toContain('DEEPSEEK_API_KEY')
     expect(workflow).toMatch(/exec 3<<<"\$\{DEEPSEEK_API_KEY:[^\n]+\}"[\s\S]*unset DEEPSEEK_API_KEY[\s\S]*exec env -i[\s\S]*--provider-key-fd 3/)
     expect(cli).toContain('readProviderKeyFromFd')
-    expect(cli).toContain('preflightValidationSandbox')
-    expect(cli).toContain('JSON.stringify(error.diagnostic)')
-    expect(cli).not.toContain('validationSandboxProcessRunner')
-    expect(cli).not.toContain("process.env['DEEPSEEK_API_KEY']")
+    expect(runtimeCli).toContain('preflightValidationSandbox')
+    expect(runtimeCli).toContain('JSON.stringify(error.diagnostic)')
+    expect(runtimeCli).not.toContain('validationSandboxProcessRunner')
+    expect(runtimeCli).not.toContain("process.env['DEEPSEEK_API_KEY']")
+    expect(cli).not.toContain('runProductionClaudeCodeBackend')
+    expect(cli).not.toContain('runProductionSandboxValidation')
     expect(workflow).toContain('materialEvidence: comments.map')
     expect(workflow).toContain('if-no-files-found: warn')
     expect(workflow).not.toContain('OMA_MAINTAINER_BOT_APP_PRIVATE_KEY')

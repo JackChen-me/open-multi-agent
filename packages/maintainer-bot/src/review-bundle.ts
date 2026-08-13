@@ -72,27 +72,14 @@ export async function collectReviewBundle(
     assertApprovedEditPath(path, options.manifest.approvedEditScopes)
   }
   const currentFiles = await collectCurrentFileSnapshots(options.repoRoot, changedPaths, options.config)
-
-  const tracked = await options.runner.run(
-    'git',
-    canonicalGitDiffArgs({
-      baseSha: options.request.baseSha,
-      paths: options.manifest.approvedEditScopes.map(scope => normalizeRepoPath(scope.path)),
-    }),
-    { cwd: options.repoRoot, maxOutputChars: (options.maxDiffChars ?? 300_000) + 1 },
-  )
-  let diff = tracked.stdout
-  if (diff.includes('[output truncated]')) {
-    throw new Error('Final diff command output was truncated before review.')
-  }
-  for (const path of changedPaths.filter(path => statusLineForPath(status.stdout, path)?.startsWith('??'))) {
-    const content = await readFile(resolveInside(options.repoRoot, path), 'utf8')
-    diff += renderNewFileDiff(path, content)
-  }
-  const maxDiffChars = options.maxDiffChars ?? 300_000
-  if (diff.length > maxDiffChars) {
-    throw new Error(`Final diff exceeds reviewer limit (${maxDiffChars} characters).`)
-  }
+  const diff = await collectCanonicalCandidateDiff({
+    repoRoot: options.repoRoot,
+    baseSha: options.request.baseSha,
+    changedPaths,
+    statusOutput: status.stdout,
+    runner: options.runner,
+    maxDiffChars: options.maxDiffChars,
+  })
 
   const relevantContext = options.manifest.sources.filter(source =>
     source.kind === 'system-policy'
@@ -125,6 +112,61 @@ export async function collectReviewBundle(
     throw new Error('Fresh reviewer bundle exceeds its deterministic evidence limit.')
   }
   return bundle
+}
+
+/**
+ * Render the exact candidate identity used by validation, review, and the
+ * credentialed safe-output gate. Git supplies tracked content and mode changes;
+ * untracked regular files use its native no-index 100644 new-file format, which
+ * is byte-identical to the later staged and committed per-path diff.
+ */
+export async function collectCanonicalCandidateDiff(options: {
+  readonly repoRoot: string
+  readonly baseSha: string
+  readonly changedPaths: readonly string[]
+  readonly statusOutput: string
+  readonly runner: CommandRunner
+  readonly maxDiffChars?: number
+}): Promise<string> {
+  const maxDiffChars = options.maxDiffChars ?? 300_000
+  let diff = ''
+  for (const path of [...options.changedPaths].sort()) {
+    const isNew = statusLineForPath(options.statusOutput, path)?.startsWith('??') === true
+    if (isNew) {
+      const info = await lstat(resolveInside(options.repoRoot, path))
+      if ((info.mode & 0o111) !== 0) {
+        throw new Error(`Untracked candidate must have canonical Git mode 100644: ${path}`)
+      }
+    }
+    const result = await options.runner.run(
+      'git',
+      isNew
+        ? canonicalNoIndexDiffArgs(path)
+        : canonicalGitDiffArgs({ baseSha: options.baseSha, paths: [path] }),
+      {
+        cwd: options.repoRoot,
+        maxOutputChars: maxDiffChars + 1,
+        allowFailure: isNew,
+      },
+    )
+    if (isNew && result.exitCode !== 1) {
+      throw new Error(`Canonical new-file diff failed for candidate: ${path}`)
+    }
+    if (result.stdout.includes('[output truncated]')) {
+      throw new Error('Final diff command output was truncated before review.')
+    }
+    diff += result.stdout
+  }
+  if (diff.length > maxDiffChars) {
+    throw new Error(`Final diff exceeds reviewer limit (${maxDiffChars} characters).`)
+  }
+  return diff
+}
+
+function canonicalNoIndexDiffArgs(path: string): string[] {
+  const args = canonicalGitDiffArgs({ paths: ['/dev/null', path] })
+  const separator = args.indexOf('--')
+  return [...args.slice(0, separator), '--no-index', ...args.slice(separator)]
 }
 
 export async function collectCurrentFileSnapshots(
@@ -185,10 +227,4 @@ function unquoteGitPath(value: string): string {
   } catch {
     throw new Error(`Could not parse quoted git path: ${value}`)
   }
-}
-
-function renderNewFileDiff(path: string, content: string): string {
-  const lines = content.split('\n')
-  const normalized = content.endsWith('\n') ? lines.slice(0, -1) : lines
-  return `\ndiff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${normalized.length} @@\n${normalized.map(line => `+${line}`).join('\n')}\n`
 }

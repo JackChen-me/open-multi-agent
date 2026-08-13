@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
@@ -39,9 +39,12 @@ describe('fresh reviewer evidence bundle', () => {
     await mkdir(join(root, 'packages/demo/src'), { recursive: true })
     await writeFile(join(root, 'packages/demo/src/greeting.ts'), 'new\n')
     await writeFile(join(root, 'packages/demo/src/new.ts'), 'export const added = true\n')
-    const runner = new ScriptedCommandRunner((_command, args) => {
+    const runner = new ScriptedCommandRunner((_command, args, options) => {
       if (args[0] === 'status') return { stdout: ' M packages/demo/src/greeting.ts\n?? packages/demo/src/new.ts\n', stderr: '', exitCode: 0 }
-      if (args[0] === 'diff') return { stdout: 'diff --git a/greeting.ts b/greeting.ts\n-old\n+new\n', stderr: '', exitCode: 0 }
+      if (args[0] === 'diff' && args.includes('--no-index')) {
+        return { stdout: 'diff --git a/packages/demo/src/new.ts b/packages/demo/src/new.ts\nnew file mode 100644\n+added\n', stderr: '', exitCode: options?.allowFailure === true ? 1 : 0 }
+      }
+      if (args[0] === 'diff') return { stdout: 'diff --git a/packages/demo/src/greeting.ts b/packages/demo/src/greeting.ts\n-old\n+new\n', stderr: '', exitCode: 0 }
       throw new Error('unexpected command')
     })
     const bundle = await collectReviewBundle({
@@ -62,9 +65,9 @@ describe('fresh reviewer evidence bundle', () => {
       expect.objectContaining({ path: 'packages/demo/src/new.ts', contentHash: sha256('export const added = true\n') }),
     ]))
     expect(bundle.relevantContext.map(source => source.locator)).toContain('AGENTS.md')
-    expect(runner.calls.find(call => call.args[0] === 'diff')?.args).toEqual(canonicalGitDiffArgs({
+    expect(runner.calls.find(call => call.args[0] === 'diff' && !call.args.includes('--no-index'))?.args).toEqual(canonicalGitDiffArgs({
       baseSha: authorizedRequest().baseSha,
-      paths: ['packages/demo'],
+      paths: ['packages/demo/src/greeting.ts'],
     }))
   })
 
@@ -81,6 +84,27 @@ describe('fresh reviewer evidence bundle', () => {
       validationResults: validation,
       runner,
     })).rejects.toThrow(/protected/)
+  })
+
+  it('rejects an executable untracked file instead of describing it as mode 100644', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'oma-review-bundle-mode-'))
+    await mkdir(join(root, 'packages/demo/src'), { recursive: true })
+    const path = join(root, 'packages/demo/src/new.ts')
+    await writeFile(path, 'export const added = true\n')
+    await chmod(path, 0o755)
+    const runner = new ScriptedCommandRunner((_command, args) => {
+      if (args[0] === 'status') return { stdout: '?? packages/demo/src/new.ts\n', stderr: '', exitCode: 0 }
+      if (args[0] === 'diff') return { stdout: '', stderr: '', exitCode: 0 }
+      throw new Error('unexpected command')
+    })
+    await expect(collectReviewBundle({
+      repoRoot: root,
+      request: authorizedRequest(),
+      config: testConfig(),
+      manifest: manifest(),
+      validationResults: validation,
+      runner,
+    })).rejects.toThrow(/mode 100644/)
   })
 
   it('rejects a final diff outside the issue-approved file even within config allowlist', async () => {

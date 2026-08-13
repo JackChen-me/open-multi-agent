@@ -2,7 +2,7 @@
   "name": "@open-multi-agent/maintainer-harness-canary",
   "version": "0.0.0",
   "private": true,
-  "description": "Restricted Claude Code harness shared by OMA Maintainer Bot production execution and its read-only canary.",
+  "description": "Read-only evidence canary for the restricted OMA Maintainer runtime.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,11 +10,11 @@
     "oma-maintainer-harness-canary": "dist/cli.js"
   },
   "scripts": {
-    "prebuild": "npm run build -w @open-multi-agent/maintainer-host",
+    "prebuild": "npm run build -w @open-multi-agent/maintainer-host && npm run build -w @open-multi-agent/maintainer-runtime",
     "build": "tsc",
-    "prelint": "npm run build -w @open-multi-agent/maintainer-host",
+    "prelint": "npm run build -w @open-multi-agent/maintainer-host && npm run build -w @open-multi-agent/maintainer-runtime",
     "lint": "tsc --noEmit",
-    "pretest": "npm run build -w @open-multi-agent/maintainer-host",
+    "pretest": "npm run build -w @open-multi-agent/maintainer-host && npm run build -w @open-multi-agent/maintainer-runtime",
     "test": "vitest run"
   },
   "engines": {
@@ -23,6 +23,7 @@
   "dependencies": {
     "@open-multi-agent/maintainer-bot": "*",
     "@open-multi-agent/maintainer-host": "*",
+    "@open-multi-agent/maintainer-runtime": "*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

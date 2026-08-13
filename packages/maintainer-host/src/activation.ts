@@ -32,6 +32,7 @@ import {
   decideClaim,
   findTrustedStatusComment,
   isActionsRunActive,
+  publicActivationStatus,
   upsertStatusComment,
 } from './status.js'
 import { isMatchingBotDraftPullRequest, writeDraftPullRequest } from './writer.js'
@@ -178,7 +179,13 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   const pulls = await options.github.listPullRequestsForHead(repository, branch)
   if (pulls.length > 0) {
     const repositoryMetadata = await options.github.getRepository(repository)
+    const prior = trusted?.metadata
     const matching = pulls.length === 1
+      && prior?.status === 'DRAFT_PR_CREATED'
+      && prior.runKey === runKey
+      && prior.branch === branch
+      && prior.pullRequestUrl === pulls[0]!.html_url
+      && prior.headSha !== null
       && isMatchingBotDraftPullRequest(
         pulls[0]!,
         runKey,
@@ -186,12 +193,14 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
         request.baseSha,
         branch,
         writerIdentity,
+        prior.headSha,
       )
     if (matching) {
       const metadata = statusMetadataSchema.parse({
         ...runningMetadata,
         status: 'DRAFT_PR_CREATED',
         pullRequestUrl: pulls[0]!.html_url,
+        headSha: pulls[0]!.head.sha,
       })
       const comment = await upsertStatusComment({
         github: options.github,
@@ -476,6 +485,7 @@ export async function finalizeActivation(options: {
       runKey,
       branch: result.branch,
       pullRequestUrl: result.pullRequest.html_url,
+      headSha: result.pullRequest.head.sha,
       updatedAt: options.finalizedAt,
     })
     const comment = await upsertStatusComment({
@@ -485,9 +495,7 @@ export async function finalizeActivation(options: {
       issueNumber: request.issue.number,
       comments: finalComments,
       metadata,
-      detail: result.idempotent
-        ? 'A matching open Draft PR already existed; no duplicate PR was created.'
-        : 'Every deterministic gate passed and the host created one Draft PR. Human review is required.',
+      detail: 'Every deterministic gate passed and the host created one Draft PR. Human review is required.',
     })
     return activationContextSchema.parse({
       ...activation,
@@ -495,7 +503,7 @@ export async function finalizeActivation(options: {
       commentId: comment.id,
       branch: result.branch,
       status: 'DRAFT_PR_CREATED',
-      detail: result.idempotent ? 'Matching Draft PR reused.' : 'Draft PR created.',
+      detail: 'Draft PR created.',
     })
   } catch (error) {
     return updateTerminalActivation(
@@ -604,15 +612,16 @@ async function updateTerminalActivation(
   })
 }
 
-function publicStatusForAdmission(status: string): ActivationStatus {
+export function publicStatusForAdmission(status: string): ActivationStatus {
   switch (status) {
     case 'NEEDS_CLARIFICATION':
-    case 'READY_CANDIDATE':
       return 'NEEDS_CLARIFICATION'
     case 'MANUAL_ONLY':
       return 'MANUAL_ONLY'
     case 'FAILED':
       return 'FAILED'
+    case 'READY_CANDIDATE':
+      return 'NEEDS_HUMAN'
     default:
       return 'NEEDS_HUMAN'
   }
@@ -620,8 +629,9 @@ function publicStatusForAdmission(status: string): ActivationStatus {
 
 export function renderActionsSummary(context: ActivationContext): string {
   const request = context.request
+  const publicStatus = publicActivationStatus(context.status)
   const rows = [
-    `# OMA Maintainer Bot — ${context.status}`,
+    `# OMA Maintainer Bot — ${publicStatus}`,
     '',
     `- Actions run: ${context.runUrl}`,
     `- Issue: ${request === null ? 'from event payload' : `${request.issue.repository}#${request.issue.number}`}`,

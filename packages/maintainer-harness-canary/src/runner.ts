@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, readdir, realpath, rename, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -10,23 +9,28 @@ import {
   hashJson,
   pathWithin,
   redactSensitiveText,
-  renderCommand,
   sha256,
+  type ApprovedEditScope,
+  type ValidationResult,
   type ValidationCommand,
 } from '@open-multi-agent/maintainer-bot'
-import { BoundedProcessError, type SandboxProcessRunner } from './bounded-process.js'
 import {
+  assertNoSymlinksOrOversize,
   assertInitialProcessProviderCredentialAbsent,
   assertProviderCredentialAbsent,
+  BoundedProcessError,
+  buildHarnessArgs,
   buildHarnessEnvironment,
-} from './environment.js'
+  buildHarnessSettings,
+  HarnessRuntimeError,
+  runProductionSandboxValidation,
+  spawnHarness,
+  ValidationSandboxError,
+  type HarnessSummary,
+  type MaintainerRuntimeValidationContract,
+  type SandboxProcessRunner,
+} from '@open-multi-agent/maintainer-runtime'
 import { computeCanarySnapshotRevision, deriveValidationCommands } from './request.js'
-import { runValidationInSandbox, ValidationSandboxError } from './validation-sandbox.js'
-import {
-  assertValidationWorkspaceCandidate,
-  cleanupValidationWorkspace,
-  createValidationWorkspace,
-} from './validation-workspace.js'
 import {
   canaryArtifactSchema,
   canaryPolicySchema,
@@ -36,16 +40,8 @@ import {
   type CanaryPolicy,
   type CanaryRequest,
   type FailedCanaryArtifact,
-  type SafeEvent,
   type TurnCountDiagnostic,
 } from './schema.js'
-
-export interface HarnessSummary {
-  readonly events: string
-  readonly safeEvents: SafeEvent[]
-  readonly turns: number
-  readonly terminationReason: string
-}
 
 type FailureStage = FailedCanaryArtifact['stage']
 type FailureReasonCode = FailedCanaryArtifact['reasonCode']
@@ -62,35 +58,6 @@ class CanaryFailure extends Error {
   }
 }
 
-const SAFE_EVENT_TYPES = new Set([
-  'system',
-  'assistant',
-  'user',
-  'result',
-  'tool_progress',
-  'tool_use_summary',
-  'rate_limit_event',
-])
-
-const SAFE_EVENT_SUBTYPES = new Set([
-  'init',
-  'success',
-  'error',
-  'error_max_turns',
-  'compact_boundary',
-  'hook_response',
-])
-
-class HarnessOutputFailure extends Error {
-  constructor(
-    readonly reasonCode: FailureReasonCode,
-    message: string,
-    readonly turnCountDiagnostic?: TurnCountDiagnostic,
-  ) {
-    super(message)
-    this.name = 'HarnessOutputFailure'
-  }
-}
 
 export interface RunHarnessCanaryOptions {
   readonly repoRoot: string
@@ -115,6 +82,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
   const artifactDir = resolve(options.artifactDir)
   let request: CanaryRequest | undefined
   let policy: CanaryPolicy | undefined
+  let allowedScopes: ApprovedEditScope[] = []
   let summary: HarnessSummary | undefined
   let validationResults: FailedCanaryArtifact['validationResults'] = []
 
@@ -126,6 +94,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
       request = canaryRequestSchema.parse(options.request)
       policy = canaryPolicySchema.parse(options.policy)
       assertRequestConsistency(request, policy)
+      allowedScopes = await resolveCanaryAllowedScopes(repoRoot, request.allowedPaths)
       await assertValidationCwds(request.validationCommands, repoRoot)
     } catch (error) {
       throw asFailure('request_validation', 'REQUEST_INVALID', error)
@@ -152,7 +121,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
     const isolatedHome = join(controlDir, 'home')
     await mkdir(isolatedHome, { mode: 0o700 })
     const settingsPath = join(controlDir, 'trusted-settings.json')
-    const settings = buildHarnessSettings({ repoRoot, artifactDir, controlDir, allowedPaths: request.allowedPaths })
+    const settings = buildHarnessSettings({ repoRoot, artifactDir, controlDir, allowedScopes })
     await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
 
     let environment: NodeJS.ProcessEnv
@@ -174,7 +143,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
         prefix: options.claudeArgsPrefix,
         settingsPath,
         repoRoot,
-        allowedPaths: request.allowedPaths,
+        allowedScopes,
         policy,
       }),
       cwd: repoRoot,
@@ -209,28 +178,36 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
     try {
       assertHostProviderIsolation(options)
       await assertArtifactDirectory(artifactDir, [])
-      validationResults = await runValidations({
-        commands: request.validationCommands,
-        sourceRepoRoot: repoRoot,
+      const validationContract: MaintainerRuntimeValidationContract = {
+        schemaVersion: 1,
+        contract: 'oma-maintainer-sandbox-validation-v1',
         baseSha: request.baseSha,
-        changedPaths,
+        changedFiles: await Promise.all(changedPaths.map(async path => ({
+          path,
+          contentHash: sha256(await readFile(resolve(repoRoot, path))),
+        }))),
         candidateDiff: diff,
-        maxFileBytes: policy.limits.maxFileBytes,
-        workspaceParentDir: options.validationWorkspaceParentDir,
-        maxOutputBytes: policy.limits.maxValidationOutputBytes,
+        validationCommands: request.validationCommands,
+        limits: {
+          maxFileBytes: policy.limits.maxFileBytes,
+          maxValidationOutputBytes: policy.limits.maxValidationOutputBytes,
+        },
+      }
+      const runtimeResults = await runProductionSandboxValidation({
+        contract: validationContract,
+        repoRoot,
         sandboxProcessRunner: options.validationSandboxProcessRunner,
+        workspaceParentDir: options.validationWorkspaceParentDir,
+        sourceEnvironment: options.validationSandboxProcessRunner === undefined ? process.env : {},
       })
+      validationResults = sanitizeRuntimeValidationEvidence(
+        runtimeResults,
+        repoRoot,
+        policy.limits.maxValidationOutputBytes,
+      )
       if (validationResults.some(result => !result.success || result.truncated)) {
         throw new Error('One or more trusted canary validations failed or produced truncated evidence.')
       }
-      const finalHead = (await commandRunner.run('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim()
-      if (finalHead !== request.baseSha) throw new Error('Validation changed HEAD; commits are forbidden in the canary.')
-      const finalStatus = await commandRunner.run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: repoRoot })
-      const finalPaths = parseAndValidateStatus(finalStatus.stdout, request, policy)
-      if (canonicalJson(finalPaths) !== canonicalJson(changedPaths)) throw new Error('Validation changed the candidate path set.')
-      await assertNoSymlinksOrOversize(finalPaths, repoRoot, policy.limits.maxFileBytes)
-      const finalDiff = await commandRunner.run('git', canonicalGitDiffArgs({ paths: finalPaths }), { cwd: repoRoot })
-      if (finalDiff.stdout !== diff) throw new Error('Validation changed the candidate patch.')
       await assertArtifactDirectory(artifactDir, [])
     } catch (error) {
       if (error instanceof CanaryFailure) throw error
@@ -332,96 +309,6 @@ export function verifyArtifactHash(artifactInput: CanaryArtifact): boolean {
   return artifactHash === hashJson(core)
 }
 
-export function buildHarnessSettings(options: {
-  readonly repoRoot: string
-  readonly artifactDir: string
-  readonly controlDir: string
-  readonly allowedPaths: readonly string[]
-}) {
-  const readRule = `Read(${permissionAbsolute(options.repoRoot)}/**)`
-  const editRules = options.allowedPaths.map(path => `Edit(${permissionAbsolute(resolve(options.repoRoot, path))})`)
-  const deniedPaths = [
-    '/proc',
-    options.artifactDir,
-    options.controlDir,
-  ]
-  return {
-    permissions: {
-      defaultMode: 'dontAsk',
-      allow: [readRule, ...editRules],
-      deny: [
-        'Bash', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp__*',
-        ...deniedPaths.flatMap(path => [
-          `Read(${permissionAbsolute(path)}/**)`,
-          `Edit(${permissionAbsolute(path)}/**)`,
-        ]),
-      ],
-      disableBypassPermissionsMode: 'disable',
-      disableAutoMode: 'disable',
-    },
-    sandbox: {
-      enabled: true,
-      failIfUnavailable: true,
-      allowUnsandboxedCommands: false,
-      autoAllowBashIfSandboxed: false,
-      excludedCommands: [],
-      filesystem: {
-        denyRead: deniedPaths,
-        denyWrite: [options.artifactDir, options.controlDir],
-      },
-      network: {
-        allowedDomains: [],
-        strictAllowlist: true,
-        allowLocalBinding: false,
-        allowUnixSockets: [],
-      },
-      credentials: {
-        envVars: [
-          { name: 'ANTHROPIC_AUTH_TOKEN', mode: 'deny' },
-          { name: 'ANTHROPIC_API_KEY', mode: 'deny' },
-          { name: 'DEEPSEEK_API_KEY', mode: 'deny' },
-          { name: 'GITHUB_TOKEN', mode: 'deny' },
-          { name: 'GH_TOKEN', mode: 'deny' },
-          { name: 'NPM_TOKEN', mode: 'deny' },
-          { name: 'NODE_AUTH_TOKEN', mode: 'deny' },
-          { name: 'SSH_AUTH_SOCK', mode: 'deny' },
-          { name: 'ACTIONS_RUNTIME_TOKEN', mode: 'deny' },
-        ],
-      },
-    },
-  }
-}
-
-export function buildHarnessArgs(options: {
-  readonly prefix?: readonly string[]
-  readonly settingsPath: string
-  readonly repoRoot: string
-  readonly allowedPaths: readonly string[]
-  readonly policy: Pick<CanaryPolicy, 'model' | 'limits'>
-}): string[] {
-  const readRule = `Read(${permissionAbsolute(options.repoRoot)}/**)`
-  const editRules = options.allowedPaths.map(path => `Edit(${permissionAbsolute(resolve(options.repoRoot, path))})`)
-  return [
-    ...(options.prefix ?? []),
-    '--bare',
-    '--print',
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--max-turns', String(options.policy.limits.maxTurns),
-    '--no-session-persistence',
-    '--disable-slash-commands',
-    '--setting-sources', '',
-    '--settings', options.settingsPath,
-    '--strict-mcp-config',
-    '--no-chrome',
-    '--model', options.policy.model,
-    '--permission-mode', 'dontAsk',
-    '--tools', 'Read,Edit,Glob,Grep',
-    '--allowedTools', readRule, ...editRules,
-    '--disallowedTools', 'Bash', 'Write', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'NotebookEdit', 'mcp__*',
-  ]
-}
-
 function assertRequestConsistency(request: CanaryRequest, policy: CanaryPolicy): void {
   if (request.repository !== policy.repository) throw new Error('Request repository differs from canary policy.')
   if (!request.issue.labels.includes('agent-ready')) throw new Error('Request no longer records agent-ready.')
@@ -470,6 +357,19 @@ async function resolveValidationCwd(repoRoot: string, cwd: string): Promise<stri
   return realCwd
 }
 
+async function resolveCanaryAllowedScopes(
+  repoRoot: string,
+  allowedPaths: readonly string[],
+): Promise<ApprovedEditScope[]> {
+  return Promise.all(allowedPaths.map(async path => {
+    const info = await lstat(resolve(repoRoot, path))
+    if (info.isSymbolicLink()) throw new Error(`Allowed path is a symlink: ${path}`)
+    if (info.isFile()) return { path, kind: 'file' as const }
+    if (info.isDirectory()) return { path, kind: 'directory' as const }
+    throw new Error(`Allowed path is not a regular file or directory: ${path}`)
+  }))
+}
+
 function buildHarnessPrompt(request: CanaryRequest): string {
   const evidence = {
     repository: request.repository,
@@ -489,185 +389,6 @@ function buildHarnessPrompt(request: CanaryRequest): string {
     `First read every applicable AGENTS.md and .github/CONTRIBUTING.md. Dynamically search the repository and read only the relevant source, tests, and documentation. Do not generate or request a repository manifest.\n` +
     `Make the smallest change satisfying the acceptance criteria. Modify only the exact target paths. The deterministic host runs all registered validation.\n\n` +
     `<untrusted_issue_json>\n${JSON.stringify(evidence, null, 2)}\n</untrusted_issue_json>\n`
-}
-
-export async function spawnHarness(options: {
-  readonly command: string
-  readonly args: readonly string[]
-  readonly cwd: string
-  readonly env: NodeJS.ProcessEnv
-  readonly stdin: string
-  readonly timeoutMs: number
-  readonly maxOutputBytes: number
-  readonly maxTurns: number
-}): Promise<HarnessSummary> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(options.command, [...options.args], {
-      cwd: options.cwd,
-      env: options.env,
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    let stdout = Buffer.alloc(0)
-    let stderrBytes = 0
-    let settled = false
-    let timedOut = false
-    const finishReject = (failure: CanaryFailure) => {
-      if (settled) return
-      settled = true
-      reject(failure)
-    }
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGTERM')
-      setTimeout(() => child.kill('SIGKILL'), 1_000).unref()
-    }, options.timeoutMs)
-    child.stdout.on('data', chunk => {
-      stdout = Buffer.concat([stdout, Buffer.from(chunk)])
-      if (stdout.byteLength > options.maxOutputBytes) child.kill('SIGTERM')
-    })
-    child.stderr.on('data', chunk => {
-      stderrBytes += Buffer.byteLength(chunk)
-      if (stderrBytes > options.maxOutputBytes) child.kill('SIGTERM')
-    })
-    child.on('error', () => {
-      clearTimeout(timer)
-      finishReject(new CanaryFailure('harness_execution', 'CLI_UNAVAILABLE', 'Claude Code CLI could not start.'))
-    })
-    child.on('close', code => {
-      clearTimeout(timer)
-      if (settled) return
-      if (stdout.byteLength > options.maxOutputBytes || stderrBytes > options.maxOutputBytes) {
-        finishReject(new CanaryFailure('harness_output', 'OUTPUT_LIMIT', 'Claude Code output exceeded the canary limit.'))
-        return
-      }
-      if (code !== 0) {
-        finishReject(new CanaryFailure(
-          'harness_execution',
-          timedOut ? 'TIMEOUT' : 'CLI_NONZERO',
-          timedOut ? 'Claude Code exceeded the wall-clock limit.' : 'Claude Code exited non-zero.',
-        ))
-        return
-      }
-      try {
-        const parsed = parseHarnessStream(stdout.toString('utf8'), options.maxTurns)
-        settled = true
-        resolvePromise(parsed)
-      } catch (error) {
-        if (error instanceof HarnessOutputFailure) {
-          finishReject(new CanaryFailure('harness_output', error.reasonCode, error.message, error.turnCountDiagnostic))
-          return
-        }
-        finishReject(asFailure('harness_output', 'MALFORMED_OUTPUT', error))
-      }
-    })
-    child.stdin.end(options.stdin)
-  })
-}
-
-export function parseHarnessStream(value: string, maxTurns: number): HarnessSummary {
-  const lines = value.split(/\r?\n/).filter(line => line.trim().length > 0)
-  if (lines.length === 0) throw new Error('Claude Code returned empty output.')
-  const safeEvents: SafeEvent[] = []
-  let result: Record<string, unknown> | undefined
-  for (let index = 0; index < lines.length; index += 1) {
-    let event: unknown
-    try {
-      event = JSON.parse(lines[index]!)
-    } catch {
-      throw new Error('Claude Code returned malformed stream-json output.')
-    }
-    if (event === null || typeof event !== 'object' || Array.isArray(event)) throw new Error('Claude Code stream event is not an object.')
-    const record = event as Record<string, unknown>
-    const typeCandidate = typeof record['type'] === 'string' ? record['type'] : ''
-    const subtypeCandidate = typeof record['subtype'] === 'string' ? record['subtype'] : ''
-    const type = SAFE_EVENT_TYPES.has(typeCandidate) ? typeCandidate : 'unknown'
-    const subtype = SAFE_EVENT_SUBTYPES.has(subtypeCandidate) ? subtypeCandidate : null
-    safeEvents.push({ sequence: index + 1, type, subtype })
-    if (type === 'result') {
-      if (result !== undefined) throw new Error('Claude Code returned multiple result events.')
-      result = record
-    }
-  }
-  if (result === undefined) throw new Error('Claude Code returned no terminal result event.')
-  const turnCountDiagnostic = classifyTurnCount(result, maxTurns)
-  if (result['subtype'] === 'error_max_turns') {
-    throw new HarnessOutputFailure(
-      'TURN_LIMIT_REACHED',
-      'Claude Code reached the configured maximum turn limit.',
-      turnCountDiagnostic,
-    )
-  }
-  if (result['subtype'] !== 'success' || result['is_error'] === true) throw new Error('Claude Code terminal result was not successful.')
-  if (!turnCountDiagnostic.fieldPresent) {
-    throw new HarnessOutputFailure(
-      'TURN_COUNT_MISSING',
-      'Claude Code terminal result omitted num_turns.',
-      turnCountDiagnostic,
-    )
-  }
-  if (turnCountDiagnostic.jsonType !== 'number') {
-    throw new HarnessOutputFailure(
-      'TURN_COUNT_TYPE_INVALID',
-      'Claude Code terminal result num_turns was not a JSON number.',
-      turnCountDiagnostic,
-    )
-  }
-  const turns = result['num_turns'] as number
-  if (!Number.isSafeInteger(turns)) {
-    throw new HarnessOutputFailure(
-      'TURN_COUNT_NON_INTEGER',
-      'Claude Code terminal result num_turns was not a finite safe integer.',
-      turnCountDiagnostic,
-    )
-  }
-  if (turns < 0) {
-    throw new HarnessOutputFailure(
-      'TURN_COUNT_NEGATIVE',
-      'Claude Code terminal result num_turns was negative.',
-      turnCountDiagnostic,
-    )
-  }
-  if (turns > maxTurns) {
-    throw new HarnessOutputFailure(
-      'TURN_COUNT_LIMIT_EXCEEDED',
-      'Claude Code terminal result num_turns exceeded the configured limit.',
-      turnCountDiagnostic,
-    )
-  }
-  const events = safeEvents.map(event => `${JSON.stringify(event)}\n`).join('')
-  return { events, safeEvents, turns, terminationReason: 'success' }
-}
-
-function classifyTurnCount(result: Record<string, unknown>, maxTurns: number): TurnCountDiagnostic {
-  const fieldPresent = Object.prototype.hasOwnProperty.call(result, 'num_turns')
-  const value = result['num_turns']
-  const valueType = typeof value
-  const jsonType: TurnCountDiagnostic['jsonType'] = !fieldPresent
-    ? 'not_applicable'
-    : value === null
-      ? 'null'
-      : Array.isArray(value)
-        ? 'array'
-        : valueType === 'number' || valueType === 'string' || valueType === 'boolean'
-          ? valueType
-          : valueType === 'object'
-            ? 'object'
-            : 'not_applicable'
-  const numericClass = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value <= maxTurns
-      ? 'within_limit'
-      : value === maxTurns + 1
-        ? 'max_plus_one'
-        : 'above_max_plus_one'
-    : 'not_applicable'
-  return {
-    resultEventSeen: true,
-    fieldPresent,
-    jsonType,
-    numericClass,
-    configuredMaxTurns: maxTurns,
-  }
 }
 
 function parseAndValidateStatus(value: string, request: CanaryRequest, policy: CanaryPolicy): string[] {
@@ -690,61 +411,6 @@ function parseAndValidateStatus(value: string, request: CanaryRequest, policy: C
   const unique = [...new Set(paths)].sort()
   if (unique.length > policy.limits.maxChangedFiles) throw new Error('Harness changed too many files.')
   return unique
-}
-
-async function runValidations(options: {
-  readonly commands: readonly ValidationCommand[]
-  readonly sourceRepoRoot: string
-  readonly baseSha: string
-  readonly changedPaths: readonly string[]
-  readonly candidateDiff: string
-  readonly maxFileBytes: number
-  readonly workspaceParentDir?: string
-  readonly maxOutputBytes: number
-  readonly sandboxProcessRunner?: SandboxProcessRunner
-}) {
-  const results = []
-  for (const command of options.commands) {
-    const workspace = await createValidationWorkspace({
-      sourceRepoRoot: options.sourceRepoRoot,
-      baseSha: options.baseSha,
-      changedPaths: options.changedPaths,
-      candidateDiff: options.candidateDiff,
-      maxFileBytes: options.maxFileBytes,
-      parentDir: options.workspaceParentDir,
-    })
-    try {
-      const startedAt = Date.now()
-      await resolveValidationCwd(workspace.repoRoot, command.cwd)
-      const result = await runValidationInSandbox({
-        workspaceRoot: workspace.repoRoot,
-        dependencyRoot: workspace.dependencyRoot,
-        resolverHostsPath: workspace.resolverHostsPath,
-        resolverNsswitchPath: workspace.resolverNsswitchPath,
-        command,
-        maxOutputBytes: options.maxOutputBytes,
-        runner: options.sandboxProcessRunner,
-      })
-      // Resolve again after execution to defend against future command schema or cwd handling changes.
-      await resolveValidationCwd(workspace.repoRoot, command.cwd)
-      await assertValidationWorkspaceCandidate(workspace, options.maxFileBytes)
-      const stdout = sanitizeEvidence(result.stdout, workspace.repoRoot, options.maxOutputBytes)
-      const stderr = sanitizeEvidence(result.stderr, workspace.repoRoot, options.maxOutputBytes)
-      results.push({
-        id: command.id,
-        command: sanitizeEvidence(renderCommand(command.command, command.args), workspace.repoRoot, options.maxOutputBytes).text,
-        success: result.exitCode === 0,
-        exitCode: result.exitCode,
-        durationMs: Math.max(0, Date.now() - startedAt),
-        stdout: stdout.text,
-        stderr: stderr.text,
-        truncated: stdout.truncated || stderr.truncated,
-      })
-    } finally {
-      await cleanupValidationWorkspace(workspace)
-    }
-  }
-  return results
 }
 
 async function assertArtifactDirectory(artifactDir: string, expectedNames: readonly string[]): Promise<void> {
@@ -781,13 +447,26 @@ function sanitizeEvidence(value: string, repoRoot: string, limit: number): { tex
   return { text: redacted.slice(0, limit), truncated: true }
 }
 
-export async function assertNoSymlinksOrOversize(paths: readonly string[], repoRoot: string, maxBytes: number): Promise<void> {
-  for (const path of paths) {
-    const info = await lstat(resolve(repoRoot, path))
-    if (info.isSymbolicLink()) throw new Error('Symlink changes are forbidden.')
-    if (!info.isFile()) throw new Error('Changed path is not a regular file.')
-    if (info.size > maxBytes) throw new Error('Changed file exceeds the canary size limit.')
-  }
+function sanitizeRuntimeValidationEvidence(
+  results: readonly ValidationResult[],
+  repoRoot: string,
+  limit: number,
+): FailedCanaryArtifact['validationResults'] {
+  return results.map(result => {
+    const command = sanitizeEvidence(result.command, repoRoot, limit)
+    const stdout = sanitizeEvidence(result.stdout, repoRoot, limit)
+    const stderr = sanitizeEvidence(result.stderr, repoRoot, limit)
+    return {
+      id: result.id,
+      command: command.text,
+      success: result.success,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      truncated: result.truncated || stdout.truncated || stderr.truncated,
+    }
+  })
 }
 
 function buildFailureArtifact(options: {
@@ -882,12 +561,10 @@ function containsCredential(secret: string, value: string): boolean {
 
 function asFailure(stage: FailureStage, reasonCode: FailureReasonCode, error: unknown): CanaryFailure {
   if (error instanceof CanaryFailure) return error
+  if (error instanceof HarnessRuntimeError) {
+    return new CanaryFailure(error.stage, error.reasonCode, error.message, error.turnCountDiagnostic)
+  }
   return new CanaryFailure(stage, reasonCode, error instanceof Error ? error.message : 'Canary failed closed.')
-}
-
-function permissionAbsolute(path: string): string {
-  const absolute = resolve(path).replaceAll('\\', '/')
-  return absolute.startsWith('/') ? `/${absolute}` : `//${absolute}`
 }
 
 function safeRepository(value: unknown): string | null {

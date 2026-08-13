@@ -98,7 +98,7 @@ jobs:
           sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
           sudo install --owner=root --group=root --mode=0644 \
-            packages/maintainer-harness-canary/config/bwrap.apparmor \
+            packages/maintainer-runtime/config/bwrap.apparmor \
             /etc/apparmor.d/bwrap
           sudo apparmor_parser --replace /etc/apparmor.d/bwrap
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
@@ -124,7 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node packages/maintainer-harness-canary/dist/cli.js sandbox-preflight \
+          node packages/maintainer-runtime/dist/cli.js sandbox-preflight \
             --repo "$GITHUB_WORKSPACE/canary-repo"
 
       - name: Prepare structured canary request

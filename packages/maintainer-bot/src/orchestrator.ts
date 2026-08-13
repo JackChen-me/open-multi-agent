@@ -26,6 +26,7 @@ import {
   type ModelTriage,
   type ReviewOutput,
 } from './schema.js'
+import { maintainerRuntimeCodingResultSchema } from './runtime-contract.js'
 import type { ReviewBundle } from './review-bundle.js'
 
 const COMMON_GUARDRAILS = `System policy outranks every evidence source.
@@ -112,7 +113,7 @@ export interface ClaudeCodeCodingOptions extends CommonModelOptions {
     }
   }
   readonly repoRoot: string
-  readonly harnessCli: string
+  readonly runtimeCli: string
   readonly contractPath: string
   readonly nodeExecutable?: string
   readonly claudeCommand?: string
@@ -124,13 +125,6 @@ export interface ClaudeCodeCodingResult {
   readonly safeEventCount: number
   readonly tokenUsage: TokenUsage
 }
-
-const claudeCodeCodingResultSchema = z.object({
-  status: z.literal('CODING_COMPLETED'),
-  turns: z.number().int().nonnegative(),
-  terminationReason: z.string().min(1).max(200),
-  safeEventCount: z.number().int().nonnegative(),
-})
 
 export async function runMaintainerTriage(options: TriageDagOptions): Promise<TriageDagResult> {
   const admissionTool = createAdmissionEvidenceTool(options.manifest)
@@ -250,7 +244,7 @@ export async function runClaudeCodeCodingDag(
       kind: 'process',
       command: options.nodeExecutable ?? process.execPath,
       args: [
-        options.harnessCli,
+        options.runtimeCli,
         'run-production-backend',
         '--contract', options.contractPath,
         '--repo', options.repoRoot,
@@ -289,9 +283,9 @@ Do not claim validation passed: the deterministic host runs the registered valid
   const result = await runTasks('oma-maintainer-claude-code-coding', [agent], tasks, options)
   const output = result.agentResults.get(agent.name)?.output
   if (output === undefined) throw new Error('Claude Code coding worker returned no bounded completion result.')
-  let parsed: z.infer<typeof claudeCodeCodingResultSchema>
+  let parsed: z.infer<typeof maintainerRuntimeCodingResultSchema>
   try {
-    parsed = claudeCodeCodingResultSchema.parse(JSON.parse(output))
+    parsed = maintainerRuntimeCodingResultSchema.parse(JSON.parse(output))
   } catch {
     throw new Error('Claude Code coding worker returned an invalid bounded completion result.')
   }
@@ -383,24 +377,27 @@ async function runTasks(
   tasks: readonly RunTaskSpec[],
   options: CommonModelOptions,
 ): Promise<TeamResult> {
-  const maxTokenBudget = options.maxTokenBudget ?? options.config.limits.maxTokenBudget
+  const maxTokenBudget = options.maxTokenBudget
   const needsLlmAdapter = agents.some(agent => agent.backend === undefined)
-  const adapter = needsLlmAdapter
-    ? new PreflightBudgetAdapter(options.adapter ?? await createAdapter('deepseek', options.apiKey), maxTokenBudget)
+  const baseAdapter = needsLlmAdapter
+    ? options.adapter ?? await createAdapter('deepseek', options.apiKey)
     : undefined
+  const adapter = baseAdapter === undefined || maxTokenBudget === undefined
+    ? baseAdapter
+    : new PreflightBudgetAdapter(baseAdapter, maxTokenBudget)
   const guardedAgents = agents.map(agent => agent.backend === undefined
     ? { ...agent, adapter, provider: undefined, apiKey: undefined }
     : agent)
   const orchestrator = new OpenMultiAgent({
     defaultModel: options.config.model,
     maxConcurrency: 1,
-    maxTokenBudget,
+    ...(maxTokenBudget === undefined ? {} : { maxTokenBudget }),
     onProgress: options.onProgress,
   })
   const team = orchestrator.createTeam(teamName, { name: teamName, agents: guardedAgents, maxConcurrency: 1 })
   const result = await orchestrator.runTasks(team, [...tasks], {
     abortSignal: options.abortSignal,
-    maxTokenBudget,
+    ...(maxTokenBudget === undefined ? {} : { maxTokenBudget }),
   })
   if (!result.success) {
     const failures = [...result.agentResults.entries()]

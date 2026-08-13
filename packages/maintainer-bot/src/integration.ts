@@ -2,9 +2,13 @@ import { z } from 'zod'
 import { evaluateAdmission } from './admission.js'
 import type { CommandRunner } from './command.js'
 import { renderCommand } from './command.js'
-import { hashJson } from './hash.js'
+import { hashJson, sha256 } from './hash.js'
 import { assertApprovedEditPath, assertPathPolicy } from './paths.js'
-import { collectCurrentFileSnapshots, parseChangedPaths } from './review-bundle.js'
+import {
+  collectCanonicalCandidateDiff,
+  collectCurrentFileSnapshots,
+  parseChangedPaths,
+} from './review-bundle.js'
 import { computeRunKey, runRecordSchema, type RunRecord } from './state.js'
 import {
   contextManifestSchema,
@@ -24,6 +28,7 @@ export const REQUIRED_SAFE_OUTPUT_REVALIDATIONS = [
   'policyPromptVersions',
   'runRecord',
   'proposalHash',
+  'validatedCandidateDiff',
   'validationResults',
   'changedFiles',
   'worktreeHead',
@@ -123,6 +128,16 @@ export async function revalidateDraftPrSafeOutput(
     if (currentHashes.get(file.path) !== file.afterHash) {
       throw new Error(`Safe output worktree content drifted after review: ${file.path}`)
     }
+  }
+  const candidateDiff = await collectCanonicalCandidateDiff({
+    repoRoot: options.repoRoot,
+    baseSha: proposal.baseSha,
+    changedPaths,
+    statusOutput: status.stdout,
+    runner: options.runner,
+  })
+  if (sha256(candidateDiff) !== proposal.validatedCandidateDiffHash) {
+    throw new Error('Safe output worktree candidate diff drifted after validation and review.')
   }
   return proposal
 }

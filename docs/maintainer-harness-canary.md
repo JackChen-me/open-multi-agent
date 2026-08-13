@@ -1,6 +1,6 @@
 # Maintainer harness canary
 
-The `OMA Maintainer Harness Canary` is a manual, read-only GitHub Actions experiment. Its restricted Claude CLI environment, permissions, limits, and stream parser are also reused by the production OMA process adapter. The canary workflow itself remains evidence-only and never grants production authorization or invokes the writer.
+The `OMA Maintainer Harness Canary` is a manual, read-only GitHub Actions experiment. The production Claude coding worker, stream parser, frozen-candidate gate, disposable-checkout validation, Bubblewrap launcher, and bounded process runner live in `@open-multi-agent/maintainer-runtime`; the canary consumes that runtime behind an evidence-only request and artifact contract. The canary workflow never grants production authorization or invokes the writer.
 
 Production activation and rollback are documented in
 [`maintainer-bot-architecture.md`](maintainer-bot-architecture.md). Canary
@@ -9,7 +9,7 @@ proposal.
 
 ## Boundary
 
-- OMA remains the control/orchestration and independent-review layer. A future deterministic finalizer remains the only component that may receive a repository-scoped GitHub App writer token and create a Draft PR.
+- OMA remains the control/orchestration and independent-review layer. The deterministic Maintainer Host is the only component that may receive a repository-scoped GitHub App writer token and create a Draft PR.
 - Claude Code runs only on a GitHub-hosted ephemeral runner. The workflow's Secret-bearing Bash copies the provider key into inherited file descriptor 3, unsets `DEEPSEEK_API_KEY`, and replaces itself with `exec env -i ... node`; therefore the long-lived host Node and its former Bash process environment do not contain the key. The CLI requires `--provider-key-fd`, reads one bounded single line, immediately closes the descriptor, and never accepts the key through argv, an environment variable, a named file, stdout/stderr, or an artifact.
 - Before the Claude child is spawned and again before deterministic validation, the host asserts that its current environment and any supplied source environment contain neither provider credential names nor the raw provider value. Only the separately constructed Claude child environment receives `ANTHROPIC_AUTH_TOKEN`. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` and sandbox credential denies remove it from every Claude-spawned Bash, hook, and stdio MCP subprocess while leaving it available to Claude Code itself for model API calls.
 - The workflow has only `contents: read` and `issues: read`; checkout uses `persist-credentials: false`. The canary never commits, pushes, comments, changes labels, or creates a PR.

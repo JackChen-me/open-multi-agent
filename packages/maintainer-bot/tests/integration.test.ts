@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -68,6 +68,21 @@ describe('gh-aw custom-engine adapter boundary', () => {
     const fixture = await safeOutputFixture()
     await writeFile(join(fixture.repoRoot, TARGET), 'export const greeting = "drift"\n')
     await expect(revalidateDraftPrSafeOutput(fixture)).rejects.toThrow(/content drifted after review/)
+  })
+
+  it('fails closed when only the reviewed file mode drifts before the host gate', async () => {
+    const fixture = await safeOutputFixture()
+    await chmod(join(fixture.repoRoot, TARGET), 0o755)
+    await expect(revalidateDraftPrSafeOutput(fixture)).rejects.toThrow(/candidate diff drifted/)
+  })
+
+  it('rejects proposal artifacts that do not bind the validated candidate diff', async () => {
+    const fixture = await safeOutputFixture()
+    const { validatedCandidateDiffHash: _omitted, proposalHash: _oldHash, ...legacyPartial } = fixture.proposal
+    expect(() => draftPrProposalSchema.parse({
+      ...legacyPartial,
+      proposalHash: hashJson(legacyPartial),
+    })).toThrow()
   })
 
   it('fails closed on an extra untracked path or changed HEAD', async () => {
@@ -232,6 +247,16 @@ async function safeOutputFixture(overrides: { head?: string; status?: string } =
   const runner = new ScriptedCommandRunner((_command, args) => {
     if (args[0] === 'rev-parse') return { stdout: `${overrides.head ?? request.baseSha}\n`, stderr: '', exitCode: 0 }
     if (args[0] === 'status') return { stdout: overrides.status ?? ` M ${TARGET}\n`, stderr: '', exitCode: 0 }
+    if (args[0] === 'diff') {
+      return stat(join(repoRoot, TARGET)).then(info => ({
+        stdout: (info.mode & 0o111) === 0 ? diff : diff.replace(
+          `diff --git a/${TARGET} b/${TARGET}\n`,
+          `diff --git a/${TARGET} b/${TARGET}\nold mode 100644\nnew mode 100755\n`,
+        ),
+        stderr: '',
+        exitCode: 0,
+      }))
+    }
     throw new Error(`unexpected safe-output command: ${args.join(' ')}`)
   })
   return { repoRoot, runner, request, config, manifest, proposal, record }

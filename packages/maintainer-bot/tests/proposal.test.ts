@@ -113,10 +113,12 @@ describe('safe Draft PR proposal gate', () => {
     expect(proposal).toMatchObject({
       kind: 'draft_pr',
       eligibleForHostWrite: true,
+      validatedCandidateDiffHash: reviewBundle().diffHash,
       issueNumber: 101,
       baseSha: 'a'.repeat(40),
       policyVersion: 'policy-v1',
       promptVersion: 'prompt-v1',
+      claudeCodeTokenUsage: 'not_applicable',
     })
     const { proposalHash, ...withoutHash } = proposal
     expect(proposalHash).toBe(hashJson(withoutHash))

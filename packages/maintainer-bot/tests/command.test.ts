@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertModelCredentialIsolation, canonicalGitDiffArgs } from '../src/command.js'
+import { assertModelCredentialIsolation, canonicalGitDiffArgs, sanitizedChildEnvironment } from '../src/command.js'
 
 describe('canonical Git diff arguments', () => {
   it('pins the patch representation used across checkout boundaries', () => {
@@ -47,5 +47,15 @@ describe('model credential isolation', () => {
       DEEPSEEK_API_KEY: 'provider-only',
       PATH: '/usr/bin',
     })).not.toThrow()
+  })
+})
+
+describe('validation child environment', () => {
+  it('uses a strict allowlist and excludes runner and npm cache variables', () => {
+    expect(sanitizedChildEnvironment({
+      PATH: '/bin', HOME: '/home/runner', TMPDIR: '/tmp', CI: 'true',
+      RUNNER_TEMP: '/runner-temp', npm_config_cache: '/runner-cache',
+      SAFE_BUT_UNNEEDED: 'omit', GITHUB_TOKEN: 'secret',
+    })).toEqual({ PATH: '/bin', HOME: '/home/runner', TMPDIR: '/tmp', CI: 'true' })
   })
 })

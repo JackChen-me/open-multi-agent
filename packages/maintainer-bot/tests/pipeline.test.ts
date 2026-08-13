@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
@@ -15,7 +15,7 @@ import { sha256 } from '../src/hash.js'
 import { runMaintainerBot } from '../src/pipeline.js'
 import { serializeModelRequest } from '../src/model-budget.js'
 import { controlPlaneRequestSchema } from '../src/schema.js'
-import { FileRunStateStore } from '../src/state.js'
+import { computeRunKey, FileRunStateStore } from '../src/state.js'
 import { authorizedRequest, BASE_SHA, ScriptedCommandRunner, testConfig } from './helpers.js'
 
 const ORIGINAL = 'export const greeting = "."\n'
@@ -40,27 +40,30 @@ async function fixtureRepo(): Promise<string> {
 
 async function scriptedClaudeHarness(options: {
   readonly fail?: boolean
-} = {}): Promise<{ cli: string; countPath: string; promptPath: string }> {
+} = {}): Promise<{ cli: string; contractPath: string; countPath: string; promptPath: string }> {
   const root = await mkdtemp(join(tmpdir(), 'oma-scripted-claude-backend-'))
   const cli = join(root, 'backend.mjs')
+  const contractPath = join(root, 'contract.json')
   const countPath = join(root, 'count.txt')
   const promptPath = join(root, 'prompt.txt')
   const body = options.fail === true
     ? `process.stdin.resume(); process.stdin.on('end', () => { console.error('token=ghp_abcdefghijklmnopqrstuvwxyz'); process.exitCode = 7 })\n`
     : `import { readFile, writeFile } from 'node:fs/promises'\n` +
       `const values = process.argv.slice(2); const repoIndex = values.indexOf('--repo'); const repo = values[repoIndex + 1]\n` +
+      `const contractIndex = values.indexOf('--contract'); await writeFile(${JSON.stringify(contractPath)}, await readFile(values[contractIndex + 1], 'utf8'))\n` +
       `const countPath = ${JSON.stringify(countPath)}\n` +
       `let count = 0; try { count = Number(await readFile(countPath, 'utf8')) } catch {}\n` +
       `await writeFile(countPath, String(count + 1))\n` +
       `const chunks = []; process.stdin.on('data', chunk => chunks.push(Buffer.from(chunk))); process.stdin.on('end', async () => { await writeFile(${JSON.stringify(promptPath)}, Buffer.concat(chunks)); await writeFile(repo + '/packages/demo/src/greeting.ts', ${JSON.stringify(FIXED)}); console.log(JSON.stringify({ status: 'CODING_COMPLETED', turns: 3, terminationReason: 'success', safeEventCount: 4 })) })\n`
   await writeFile(cli, body)
-  return { cli, countPath, promptPath }
+  return { cli, contractPath, countPath, promptPath }
 }
 
 function repositoryRunner(
   root: string,
   validationExitCode = 0,
   validationMutation?: string,
+  validationModeMutation?: number,
 ): ScriptedCommandRunner {
   return new ScriptedCommandRunner(async (command, args) => {
     if (command === 'git' && args[0] === 'rev-parse') return { stdout: `${BASE_SHA}\n`, stderr: '', exitCode: 0 }
@@ -71,8 +74,9 @@ function repositoryRunner(
     }
     if (command === 'git' && args[0] === 'diff') {
       const current = await readFile(join(root, 'packages/demo/src/greeting.ts'), 'utf8')
+      const info = await stat(join(root, 'packages/demo/src/greeting.ts'))
       return {
-        stdout: `diff --git a/packages/demo/src/greeting.ts b/packages/demo/src/greeting.ts\n-${ORIGINAL.trimEnd()}\n${current.trimEnd().split('\n').map(line => `+${line}`).join('\n')}\n`,
+        stdout: `diff --git a/packages/demo/src/greeting.ts b/packages/demo/src/greeting.ts\n${(info.mode & 0o111) === 0 ? '' : 'old mode 100644\nnew mode 100755\n'}-${ORIGINAL.trimEnd()}\n${current.trimEnd().split('\n').map(line => `+${line}`).join('\n')}\n`,
         stderr: '',
         exitCode: 0,
       }
@@ -80,6 +84,9 @@ function repositoryRunner(
     if (command === 'npm') {
       if (validationMutation !== undefined) {
         await writeFile(join(root, 'packages/demo/src/greeting.ts'), validationMutation)
+      }
+      if (validationModeMutation !== undefined) {
+        await chmod(join(root, 'packages/demo/src/greeting.ts'), validationModeMutation)
       }
       return {
         stdout: validationExitCode === 0 ? '1 test passed\n' : '',
@@ -160,6 +167,71 @@ describe('maintainer-bot vertical pipeline', () => {
     expect(await readFile(join(repoRoot, 'packages/demo/src/greeting.ts'), 'utf8')).toBe(FIXED)
     expect(adapter.roles).toEqual(['triage', 'planner', 'implementer', 'reviewer'])
     expect(result.proposal.validationResults.every(validation => validation.success)).toBe(true)
+    expect(result.proposal.claudeCodeTokenUsage).toBe('not_applicable')
+    const trace = JSON.parse(await readFile(join(
+      artifactDir,
+      `${result.record.runKey}.pipeline-trace.json`,
+    ))) as { events: Array<{ stage: string; status: string }> }
+    expect(trace.events.map(event => `${event.stage}:${event.status}`)).toEqual([
+      'admission:start', 'admission:complete',
+      'coding:start', 'coding:complete',
+      'validation:start', 'validation:complete',
+      'review:start', 'review:complete',
+      'proposal:start', 'proposal:complete',
+    ])
+  })
+
+  it('keeps trace persistence failure isolated from the authoritative pipeline result', async () => {
+    const repoRoot = await fixtureRepo()
+    const artifactDir = await mkdtemp(join(tmpdir(), 'oma-artifacts-'))
+    const request = authorizedRequest()
+    const runKey = computeRunKey({
+      repository: request.issue.repository,
+      issueNumber: request.issue.number,
+      issueRevision: request.authorization!.issueRevision,
+      baseSha: request.baseSha,
+    })
+    await mkdir(join(artifactDir, `${runKey}.pipeline-trace.json`))
+    const result = await runMaintainerBot({
+      repoRoot,
+      artifactDir,
+      request,
+      config: testConfig(),
+      runner: repositoryRunner(repoRoot),
+      stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
+      runId: 'run-trace-write-failure',
+      adapter: new PipelineAdapter('approve'),
+      env: { PATH: '/usr/bin' },
+      requireEvidenceToolCalls: false,
+    })
+    expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
+  })
+
+  it('records token usage and estimated cost without enforcing compatibility budget fields', async () => {
+    const repoRoot = await fixtureRepo()
+    const config = testConfig({
+      limits: {
+        ...testConfig().limits,
+        maxTokenBudget: 1,
+        maxCostUsd: 0.000_001,
+      },
+    })
+    const result = await runMaintainerBot({
+      repoRoot,
+      artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
+      request: authorizedRequest(),
+      config,
+      runner: repositoryRunner(repoRoot),
+      stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
+      runId: 'run-observational-model-usage',
+      adapter: new PipelineAdapter('approve'),
+      env: { PATH: '/usr/bin' },
+      requireEvidenceToolCalls: false,
+    })
+    expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
+    expect(result.tokenUsage.input_tokens + result.tokenUsage.output_tokens)
+      .toBeGreaterThan(config.limits.maxTokenBudget)
+    expect(result.estimatedCostUsd).toBeGreaterThan(config.limits.maxCostUsd)
   })
 
   it('selects Claude Code as the sole coding engine while OMA runs coding and independent review', async () => {
@@ -178,7 +250,7 @@ describe('maintainer-bot vertical pipeline', () => {
       runId: 'run-claude-code-success',
       adapter,
       apiKey: 'scripted-provider-key',
-      claudeCodeHarnessCli: scripted.cli,
+      maintainerRuntimeCli: scripted.cli,
       env: { PATH: process.env['PATH'] ?? '/usr/bin' },
       requireEvidenceToolCalls: false,
       onProgress: event => progress.push(`${event.type}:${event.agent ?? event.task ?? ''}`),
@@ -186,6 +258,9 @@ describe('maintainer-bot vertical pipeline', () => {
     expect(result.status).toBe('DRAFT_PR_PROPOSAL_READY')
     expect(adapter.roles).toEqual(['triage', 'reviewer'])
     expect(await readFile(scripted.countPath, 'utf8')).toBe('1')
+    expect(JSON.parse(await readFile(scripted.contractPath, 'utf8'))).toMatchObject({
+      allowedScopes: [{ path: 'packages/demo/src/greeting.ts', kind: 'file' }],
+    })
     const codingPrompt = await readFile(scripted.promptPath, 'utf8')
     expect(codingPrompt).toContain('"title":"Fix deterministic greeting output"')
     expect(codingPrompt).toContain('"reproductionSteps":["Call greeting(\\"Ada\\") and compare the returned string."]')
@@ -202,9 +277,10 @@ describe('maintainer-bot vertical pipeline', () => {
     const repoRoot = await fixtureRepo()
     const scripted = await scriptedClaudeHarness({ fail: true })
     const adapter = new PipelineAdapter('approve')
+    const artifactDir = await mkdtemp(join(tmpdir(), 'oma-artifacts-'))
     const result = await runMaintainerBot({
       repoRoot,
-      artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
+      artifactDir,
       request: authorizedRequest(),
       config: testConfig({ executionBackend: 'claude-code' }),
       runner: repositoryRunner(repoRoot),
@@ -212,7 +288,7 @@ describe('maintainer-bot vertical pipeline', () => {
       runId: 'run-claude-code-failure',
       adapter,
       apiKey: 'scripted-provider-key',
-      claudeCodeHarnessCli: scripted.cli,
+      maintainerRuntimeCli: scripted.cli,
       env: { PATH: process.env['PATH'] ?? '/usr/bin' },
       requireEvidenceToolCalls: false,
     })
@@ -222,6 +298,16 @@ describe('maintainer-bot vertical pipeline', () => {
     expect(result.detail).not.toContain('ghp_')
     expect(result.detail.length).toBeLessThanOrEqual(8_000)
     expect(adapter.roles).toEqual(['triage'])
+    const [traceName] = (await readdir(artifactDir)).filter(name => name.endsWith('.pipeline-trace.json'))
+    const trace = JSON.parse(await readFile(join(artifactDir, traceName!))) as {
+      claudeCodeTokenUsage: string
+      events: Array<{ stage: string; status: string }>
+    }
+    expect(trace.claudeCodeTokenUsage).toBe('not_reported')
+    expect(trace.events.map(event => `${event.stage}:${event.status}`)).toEqual([
+      'admission:start', 'admission:complete', 'coding:start', 'coding:failure',
+    ])
+    expect(JSON.stringify(trace)).not.toMatch(/ghp_|token=/)
   })
 
   it('does not call a model or modify files without agent-ready authorization', async () => {
@@ -325,7 +411,26 @@ describe('maintainer-bot vertical pipeline', () => {
     })
     expect(result.status).toBe('FAILED')
     expect(result).not.toHaveProperty('proposal')
-    expect(result.detail).toMatch(/afterHash differs from the fresh review snapshot/)
+    expect(result.detail).toMatch(/Candidate differs from the pre-validation frozen bundle/)
+  })
+
+  it('does not promote a legacy candidate when validation changes only its file mode', async () => {
+    const repoRoot = await fixtureRepo()
+    const result = await runMaintainerBot({
+      repoRoot,
+      artifactDir: await mkdtemp(join(tmpdir(), 'oma-artifacts-')),
+      request: authorizedRequest(),
+      config: testConfig(),
+      runner: repositoryRunner(repoRoot, 0, undefined, 0o755),
+      stateStore: new FileRunStateStore(await mkdtemp(join(tmpdir(), 'oma-state-'))),
+      runId: 'run-validation-mode-drift',
+      adapter: new PipelineAdapter('approve'),
+      env: { PATH: '/usr/bin' },
+      requireEvidenceToolCalls: false,
+    })
+    expect(result.status).toBe('FAILED')
+    expect(result).not.toHaveProperty('proposal')
+    expect(result.detail).toMatch(/Candidate differs from the pre-validation frozen bundle/)
   })
 
   it('rejects a model plan that widens beyond the maintainer-approved target file', async () => {

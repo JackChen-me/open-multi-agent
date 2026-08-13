@@ -1,17 +1,13 @@
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
-  NodeCommandRunner,
-  parseChangedPaths,
+  maintainerRuntimeValidationContractSchema,
   redactSensitiveText,
   renderCommand,
-  resolveInside,
-  sha256,
-  validationCommandSchema,
   validationResultSchema,
   type ValidationResult,
 } from '@open-multi-agent/maintainer-bot'
-import { z } from 'zod'
+import { assertApprovedCandidate } from './candidate-gate.js'
 import type { SandboxProcessRunner } from './bounded-process.js'
 import { runValidationInSandbox } from './validation-sandbox.js'
 import {
@@ -19,24 +15,6 @@ import {
   cleanupValidationWorkspace,
   createValidationWorkspace,
 } from './validation-workspace.js'
-
-export const productionValidationContractSchema = z.object({
-  schemaVersion: z.literal(1),
-  contract: z.literal('oma-maintainer-sandbox-validation-v1'),
-  baseSha: z.string().regex(/^[0-9a-f]{40}$/),
-  changedFiles: z.array(z.object({
-    path: z.string().min(1).max(500),
-    contentHash: z.string().regex(/^[0-9a-f]{64}$/),
-  })).min(1).max(100),
-  candidateDiff: z.string().min(1).max(500_000),
-  validationCommands: z.array(validationCommandSchema).min(1).max(30),
-  limits: z.object({
-    maxFileBytes: z.number().int().positive().max(1_000_000),
-    maxValidationOutputBytes: z.number().int().positive().max(10_000_000),
-  }),
-})
-
-export type ProductionValidationContract = z.infer<typeof productionValidationContractSchema>
 
 export async function runProductionSandboxValidation(options: {
   readonly contract: unknown
@@ -47,9 +25,9 @@ export async function runProductionSandboxValidation(options: {
   readonly sourceEnvironment?: NodeJS.ProcessEnv
 }): Promise<ValidationResult[]> {
   assertCredentialFreeValidationEnvironment(options.sourceEnvironment ?? process.env)
-  const contract = productionValidationContractSchema.parse(options.contract)
+  const contract = maintainerRuntimeValidationContractSchema.parse(options.contract)
   const repoRoot = await realpath(resolve(options.repoRoot))
-  await assertSourceCandidate(repoRoot, contract)
+  await assertApprovedCandidate(repoRoot, contract)
 
   const results: ValidationResult[] = []
   for (const command of contract.validationCommands) {
@@ -62,6 +40,7 @@ export async function runProductionSandboxValidation(options: {
       parentDir: options.workspaceParentDir,
     })
     try {
+      await assertApprovedCandidate(workspace.repoRoot, contract, { ignoreUnapprovedUntrackedFiles: true })
       const startedAt = Date.now()
       const result = await runValidationInSandbox({
         workspaceRoot: workspace.repoRoot,
@@ -88,42 +67,14 @@ export async function runProductionSandboxValidation(options: {
           unset: [...command.unsetEnv].sort(),
         },
       }))
+      await assertApprovedCandidate(workspace.repoRoot, contract, { ignoreUnapprovedUntrackedFiles: true })
       await assertValidationWorkspaceCandidate(workspace, contract.limits.maxFileBytes)
     } finally {
       await cleanupValidationWorkspace(workspace)
     }
   }
-  await assertSourceCandidate(repoRoot, contract)
+  await assertApprovedCandidate(repoRoot, contract)
   return results
-}
-
-async function assertSourceCandidate(
-  repoRoot: string,
-  contract: ProductionValidationContract,
-): Promise<void> {
-  const runner = new NodeCommandRunner()
-  const [head, status] = await Promise.all([
-    runner.run('git', ['rev-parse', 'HEAD'], { cwd: repoRoot }),
-    runner.run('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: repoRoot }),
-  ])
-  if (head.stdout.trim() !== contract.baseSha) {
-    throw new Error('Production validation source checkout differs from the pinned base SHA.')
-  }
-  const actualPaths = parseChangedPaths(status.stdout)
-  const expectedPaths = contract.changedFiles.map(file => file.path).sort()
-  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
-    throw new Error('Production validation source path set differs from the approved candidate.')
-  }
-  for (const file of contract.changedFiles) {
-    const absolute = resolveInside(repoRoot, file.path)
-    const info = await lstat(absolute)
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new Error('Production validation candidate contains a non-regular file.')
-    }
-    if (sha256(await readFile(absolute)) !== file.contentHash) {
-      throw new Error('Production validation source content differs from the approved candidate.')
-    }
-  }
 }
 
 function assertCredentialFreeValidationEnvironment(environment: NodeJS.ProcessEnv): void {

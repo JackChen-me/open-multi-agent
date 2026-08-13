@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { claudeCodeTokenUsageSchema } from './pipeline-trace.js'
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/)
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/)
@@ -459,10 +460,12 @@ export const draftPrProposalSchema = z.object({
   validationResults: z.array(validationResultSchema).min(1),
   skippedChecks: z.array(boundedLine),
   model: z.string(),
+  claudeCodeTokenUsage: claudeCodeTokenUsageSchema,
   promptVersion: z.string(),
   policyVersion: z.string(),
   risks: z.array(boundedLine),
   review: reviewOutputSchema,
+  validatedCandidateDiffHash: sha256,
   generatedAt: z.string(),
   proposalHash: sha256,
 })

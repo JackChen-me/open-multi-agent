@@ -118,6 +118,9 @@ export async function buildControlPlaneRequest(
     && priorStatus.runKey !== null
     && priorStatus.issueRevision !== null
     && priorStatus.branch !== null
+    && priorStatus.status === 'DRAFT_PR_CREATED'
+    && priorStatus.pullRequestUrl !== null
+    && priorStatus.headSha !== null
   ) {
     const pulls = await options.github.listPullRequestsForHead(repository, priorStatus.branch)
     if (
@@ -129,7 +132,9 @@ export async function buildControlPlaneRequest(
         priorStatus.baseSha,
         priorStatus.branch,
         options.writerIdentity,
+        priorStatus.headSha,
       )
+      && pulls[0]!.html_url === priorStatus.pullRequestUrl
     ) {
       trustedBotPullRequestNumbers.add(pulls[0]!.number)
     }

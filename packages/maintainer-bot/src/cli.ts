@@ -70,7 +70,7 @@ async function execute(dryRun: boolean): Promise<void> {
     dryRun,
     env: process.env,
     apiKey: dryRun ? undefined : readProviderKeyFromFd(requireFlag('--provider-key-fd')),
-    claudeCodeHarnessCli: flag('--claude-code-harness-cli'),
+    maintainerRuntimeCli: flag('--maintainer-runtime-cli'),
     onProgress: event => {
       if (event.type === 'task_start' || event.type === 'task_complete' || event.type === 'error') {
         console.error(`[OMA] ${event.type}: ${event.agent ?? event.task ?? 'task'}`)
@@ -145,7 +145,7 @@ function printHelp(): void {
 Usage:
   oma-maintainer-bot admit --request request.json [--repo PATH]
   oma-maintainer-bot dry-run --request request.json --config config.json [--repo PATH]
-  oma-maintainer-bot run --request request.json --config config.json --state-dir PATH --artifact-dir PATH --provider-key-fd FD [--repo PATH] [--run-id ID]
+  oma-maintainer-bot run --request request.json --config config.json --state-dir PATH --artifact-dir PATH --provider-key-fd FD [--maintainer-runtime-cli PATH] [--repo PATH] [--run-id ID]
 
 admit and dry-run are read-only. run receives the provider credential through a dedicated file descriptor and refuses to
 start if GitHub/npm write credentials are present in the model process. It may

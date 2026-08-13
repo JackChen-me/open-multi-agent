@@ -11,6 +11,7 @@ describe('credential-isolated model process environment', () => {
       PATH: '/usr/bin',
       HOME: '/home/runner',
       RUNNER_TEMP: '/tmp/runner',
+      npm_config_cache: '/tmp/npm-cache',
       CI: 'true',
       DEEPSEEK_API_KEY: 'old-value',
       GITHUB_TOKEN: 'github-write',
@@ -24,14 +25,12 @@ describe('credential-isolated model process environment', () => {
       OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'github-app-private-key',
       SAFE_BUT_UNNEEDED: 'omit-me',
     }, 'deepseek-only')
-    expect(isolated).toMatchObject({
-      PATH: '/usr/bin', HOME: '/home/runner', RUNNER_TEMP: '/tmp/runner', CI: 'true',
-    })
+    expect(isolated).toMatchObject({ PATH: '/usr/bin', HOME: '/home/runner', CI: 'true' })
     for (const name of [
       'GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
       'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'CODEX_GITHUB_PERSONAL_ACCESS_TOKEN', 'SAFE_BUT_UNNEEDED',
       'MAINTAINER_BOT_APP_TOKEN', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY',
-      'DEEPSEEK_API_KEY',
+      'DEEPSEEK_API_KEY', 'RUNNER_TEMP', 'npm_config_cache',
     ]) expect(isolated).not.toHaveProperty(name)
     expect(() => assertNoHostCredentials(isolated)).not.toThrow()
   })

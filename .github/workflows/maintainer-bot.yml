@@ -20,6 +20,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Check out the trusted workflow commit with read-only GITHUB_TOKEN
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Verify pinned npm version
+        run: test "$(npm --version)" = "10.9.8"
+
+      - name: Install locked dependencies before minting any App token
+        run: npm ci --ignore-scripts
+
+      - name: Build the deterministic host before minting any App token
+        id: build-host
+        run: npm run build -w @open-multi-agent/maintainer-host
+
       - name: Create repository-scoped Maintainer Bot App token
         id: app-token
         if: vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED == 'true'
@@ -34,11 +58,13 @@ jobs:
           permission-metadata: read
           permission-pull-requests: write
 
-      - name: Verify App identity, publish STARTED, and pin the default branch
-        id: started
+      - name: Verify App, event snapshot, and triple-SHA identity; publish STARTED
+        id: start
         if: steps.app-token.outcome == 'success'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
+          MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          OMA_CLAIM_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+          OMA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           OMA_APP_WRITER_ENABLED: ${{ vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED }}
           OMA_EXPECTED_APP_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_ID }}
           OMA_EXPECTED_APP_CLIENT_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_CLIENT_ID }}
@@ -47,296 +73,79 @@ jobs:
           OMA_EXPECTED_APP_BOT_USER_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_BOT_USER_ID }}
           OMA_ACTUAL_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           OMA_ACTUAL_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const marker = 'oma-maintainer-bot-status:v2'
-            const bootstrapMarker = 'oma-maintainer-bot-bootstrap-status:v1'
-            const repository = context.repo.owner + '/' + context.repo.repo
-            const issueNumber = context.issue.number
-            const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
-            const claimId = `${context.runId}.${process.env.GITHUB_RUN_ATTEMPT}`
-            const positiveId = (name, value) => {
-              if (!/^[1-9]\d*$/.test(value ?? '')) throw new Error(`${name} must be a positive integer.`)
-              const parsed = Number(value)
-              if (!Number.isSafeInteger(parsed)) throw new Error(`${name} is outside the safe integer range.`)
-              return parsed
-            }
-            if (process.env.OMA_APP_WRITER_ENABLED !== 'true') {
-              throw new Error('The dedicated Maintainer Bot App writer is not explicitly enabled.')
-            }
-            const expected = {
-              appId: positiveId('expected App ID', process.env.OMA_EXPECTED_APP_ID),
-              clientId: process.env.OMA_EXPECTED_APP_CLIENT_ID ?? '',
-              slug: process.env.OMA_EXPECTED_APP_SLUG ?? '',
-              installationId: positiveId('expected installation ID', process.env.OMA_EXPECTED_APP_INSTALLATION_ID),
-              botUserId: positiveId('expected bot user ID', process.env.OMA_EXPECTED_APP_BOT_USER_ID),
-            }
-            const actualSlug = process.env.OMA_ACTUAL_APP_SLUG ?? ''
-            const actualInstallationId = positiveId('actual installation ID', process.env.OMA_ACTUAL_APP_INSTALLATION_ID)
-            if (!/^[A-Za-z0-9._-]{8,100}$/.test(expected.clientId)) throw new Error('Expected App client ID is invalid.')
-            if (!/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(expected.slug)) throw new Error('Expected App slug is invalid.')
-            if (actualSlug !== expected.slug || actualInstallationId !== expected.installationId) {
-              throw new Error('Minted App slug or installation ID does not match the trusted contract.')
-            }
-            const botLogin = `${expected.slug}[bot]`
-            // IssueComment actors expose the App slug while REST bot users include the [bot] suffix.
-            const isExpectedGraphQlBotActor = actor =>
-              actor?.__typename === 'Bot' &&
-              actor.databaseId === expected.botUserId &&
-              (actor.login === expected.slug || actor.login === botLogin)
-            const [viewer, appResponse, botResponse, accessResponse] = await Promise.all([
-              github.graphql('query { viewer { login } }'),
-              github.request('GET /apps/{app_slug}', { app_slug: expected.slug }),
-              github.rest.users.getByUsername({ username: botLogin }),
-              github.request('GET /installation/repositories', { per_page: 100 }),
-            ])
-            if (viewer.viewer?.login !== botLogin) throw new Error('The token viewer is not the expected App bot.')
-            if (
-              appResponse.data.id !== expected.appId ||
-              appResponse.data.client_id !== expected.clientId ||
-              appResponse.data.slug !== expected.slug
-            ) throw new Error('GitHub App metadata does not match the trusted contract.')
-            if (
-              botResponse.data.id !== expected.botUserId ||
-              botResponse.data.login !== botLogin ||
-              botResponse.data.type !== 'Bot'
-            ) throw new Error('GitHub App bot user does not match the trusted contract.')
-            const repositories = accessResponse.data.repositories.map(item => item.full_name).sort()
-            if (accessResponse.data.total_count !== 1 || repositories.length !== 1 || repositories[0] !== repository) {
-              throw new Error('The App installation token is not scoped to exactly this repository.')
-            }
-            const verifyComment = async comment => {
-              if (
-                comment.user?.id !== expected.botUserId ||
-                comment.user?.login !== botLogin ||
-                comment.user?.type !== 'Bot'
-              ) throw new Error('Status comment REST author is not the expected App bot.')
-              const proof = await github.graphql(`
-                query OMAStatusCommentAuthorship($id: ID!) {
-                  node(id: $id) {
-                    ... on IssueComment {
-                      author { __typename login ... on Bot { databaseId } }
-                      editor { __typename login ... on Bot { databaseId } }
-                      createdViaEmail
-                    }
-                  }
-                }
-              `, { id: comment.node_id })
-              if (
-                !isExpectedGraphQlBotActor(proof.node?.author) ||
-                proof.node?.createdViaEmail !== false ||
-                (proof.node?.editor !== null && !isExpectedGraphQlBotActor(proof.node?.editor))
-              ) throw new Error('Status comment App authorship or editor provenance is invalid.')
-            }
-            const repo = await github.rest.repos.get(context.repo)
-            const issue = await github.rest.issues.get({
-              ...context.repo,
-              issue_number: issueNumber,
-            })
-            const eventIssue = context.payload.issue
-            const labelNames = labels => [...new Set(labels.map(label => typeof label === 'string' ? label : label.name))].sort()
-            const eventSnapshotMatched = issue.data.number === eventIssue.number &&
-              issue.data.title === eventIssue.title &&
-              (issue.data.body ?? '') === (eventIssue.body ?? '') &&
-              issue.data.state === eventIssue.state &&
-              issue.data.updated_at === eventIssue.updated_at &&
-              issue.data.user?.login === eventIssue.user?.login &&
-              JSON.stringify(labelNames(issue.data.labels)) === JSON.stringify(labelNames(eventIssue.labels))
-            const branch = await github.rest.repos.getBranch({
-              ...context.repo,
-              branch: repo.data.default_branch,
-            })
-            const baseSha = branch.data.commit.sha
-            const workflowSha = process.env.GITHUB_WORKFLOW_SHA ?? ''
-            if (!/^[0-9a-f]{40}$/.test(workflowSha) || workflowSha !== baseSha) {
-              throw new Error('The default branch moved after workflow dispatch; a fresh agent-ready authorization is required.')
-            }
-            const metadata = {
-              version: 2,
-              repository,
-              issueNumber,
-              status: 'STARTED',
-              claimId,
-              actionsRunId: Number(context.runId),
-              runUrl,
-              baseSha,
-              issueRevision: null,
-              runKey: null,
-              branch: null,
-              pullRequestUrl: null,
-              updatedAt: new Date().toISOString(),
-              claims: [],
-            }
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo,
-              issue_number: issueNumber,
-              per_page: 100,
-            })
-            const trusted = comments.filter(comment =>
-              comment.user?.id === expected.botUserId &&
-              comment.user?.login === botLogin &&
-              comment.user?.type === 'Bot' &&
-              comment.body?.includes(marker))
-            const bootstrap = comments.filter(comment =>
-              comment.user?.id === 41898282 &&
-              comment.user?.login === 'github-actions[bot]' &&
-              comment.user?.type === 'Bot' &&
-              comment.body?.includes(bootstrapMarker))
-            if (trusted.length > 1) throw new Error('Multiple trusted Maintainer Bot App status comments exist.')
-            if (bootstrap.length > 1) throw new Error('Multiple trusted bootstrap failure comments exist.')
-            if (trusted[0] !== undefined) await verifyComment(trusted[0])
-            if (bootstrap[0] !== undefined) {
-              await github.rest.issues.deleteComment({ ...context.repo, comment_id: bootstrap[0].id })
-            }
-            let written
-            if (trusted[0] === undefined) {
-              const body = `<!-- ${marker} ${JSON.stringify(metadata)} -->
-            ## OMA Maintainer Bot — STARTED
+        run: >-
+          node packages/maintainer-host/dist/cli.js start
+          --event "$GITHUB_EVENT_PATH"
+          --policy packages/maintainer-host/config/production-policy.json
+          --repo "$GITHUB_WORKSPACE"
+          --claim-id "$OMA_CLAIM_ID"
+          --actions-run-id "$GITHUB_RUN_ID"
+          --run-url "$OMA_RUN_URL"
+          --workflow-sha "$GITHUB_WORKFLOW_SHA"
+          --app-writer-enabled "$OMA_APP_WRITER_ENABLED"
+          --expected-app-id "$OMA_EXPECTED_APP_ID"
+          --expected-app-client-id "$OMA_EXPECTED_APP_CLIENT_ID"
+          --expected-app-slug "$OMA_EXPECTED_APP_SLUG"
+          --expected-app-installation-id "$OMA_EXPECTED_APP_INSTALLATION_ID"
+          --expected-app-bot-user-id "$OMA_EXPECTED_APP_BOT_USER_ID"
+          --app-slug "$OMA_ACTUAL_APP_SLUG"
+          --app-installation-id "$OMA_ACTUAL_APP_INSTALLATION_ID"
+          --start-out "$RUNNER_TEMP/oma-maintainer/start.json"
 
-            - Actions run: [${context.runId}](${runUrl})
-            - Base SHA: \`${baseSha}\`
-            - Issue revision: \`pending\`
+      - name: Recover typed start failure with the verified App
+        id: start-recovery
+        if: always() && steps.app-token.outcome == 'success' && steps.start.outcome != 'success'
+        env:
+          MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          OMA_CLAIM_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+          OMA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OMA_FAILURE_STAGE: ${{ steps.start.outputs.failure_stage || 'output-write' }}
+          OMA_FAILURE_DETAIL: ${{ steps.start.outputs.failure_detail || 'The typed start command failed before it could persist trusted failure outputs.' }}
+          OMA_APP_WRITER_ENABLED: ${{ vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED }}
+          OMA_EXPECTED_APP_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_ID }}
+          OMA_EXPECTED_APP_CLIENT_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_CLIENT_ID }}
+          OMA_EXPECTED_APP_SLUG: ${{ vars.OMA_MAINTAINER_BOT_APP_SLUG }}
+          OMA_EXPECTED_APP_INSTALLATION_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_INSTALLATION_ID }}
+          OMA_EXPECTED_APP_BOT_USER_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_BOT_USER_ID }}
+          OMA_ACTUAL_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          OMA_ACTUAL_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js recover-start
+          --event "$GITHUB_EVENT_PATH"
+          --policy packages/maintainer-host/config/production-policy.json
+          --claim-id "$OMA_CLAIM_ID"
+          --actions-run-id "$GITHUB_RUN_ID"
+          --run-url "$OMA_RUN_URL"
+          --failure-stage "$OMA_FAILURE_STAGE"
+          --failure-detail "$OMA_FAILURE_DETAIL"
+          --app-writer-enabled "$OMA_APP_WRITER_ENABLED"
+          --expected-app-id "$OMA_EXPECTED_APP_ID"
+          --expected-app-client-id "$OMA_EXPECTED_APP_CLIENT_ID"
+          --expected-app-slug "$OMA_EXPECTED_APP_SLUG"
+          --expected-app-installation-id "$OMA_EXPECTED_APP_INSTALLATION_ID"
+          --expected-app-bot-user-id "$OMA_EXPECTED_APP_BOT_USER_ID"
+          --app-slug "$OMA_ACTUAL_APP_SLUG"
+          --app-installation-id "$OMA_ACTUAL_APP_INSTALLATION_ID"
 
-            The dedicated GitHub App token, identity, permission request, and repository scope passed preflight. Deterministic authorization, revision, scope, duplicate, and readiness checks are starting.
-
-            _This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._
-            `
-              written = (await github.rest.issues.createComment({
-                ...context.repo,
-                issue_number: issueNumber,
-                body,
-              })).data
-            } else {
-              const matches = [...trusted[0].body.matchAll(new RegExp(`<!--\\s*${marker}\\s+(\\{[^\\n]*\\})\\s*-->`, 'g'))]
-              if (matches.length !== 1) throw new Error('Trusted Maintainer Bot comment has invalid machine metadata.')
-              const previous = JSON.parse(matches[0][1])
-              if (previous.repository !== repository || previous.issueNumber !== issueNumber || previous.version !== 2) {
-                throw new Error('Trusted Maintainer Bot comment belongs to a different issue or contract version.')
-              }
-              const body = `${matches[0][0]}
-            ## OMA Maintainer Bot — STARTED
-
-            - Actions run: [${context.runId}](${runUrl})
-            - Base SHA: \`${baseSha}\`
-            - Issue revision: \`pending\`
-            - Previous durable status: \`${previous.status}\`
-
-            The new label event was received through the verified Maintainer Bot App. The prior machine claim remains authoritative until deterministic duplicate, stale, permission, revision, and readiness checks finish.
-
-            _This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._
-            `
-              written = (await github.rest.issues.updateComment({
-                ...context.repo,
-                comment_id: trusted[0].id,
-                body,
-              })).data
-            }
-            await verifyComment(written)
-            core.setOutput('base_sha', baseSha)
-            core.setOutput('claim_id', claimId)
-            core.setOutput('comment_id', String(written.id))
-            core.setOutput('run_url', runUrl)
-            core.setOutput('event_snapshot_matched', String(eventSnapshotMatched))
-            core.setOutput('removed_bootstrap_comment_count', String(bootstrap.length))
-
-      - name: Publish pre-model App configuration failure
-        if: always() && (steps.app-token.outcome != 'success' || steps.started.outcome != 'success')
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const marker = 'oma-maintainer-bot-bootstrap-status:v1'
-            const repository = context.repo.owner + '/' + context.repo.repo
-            const issueNumber = context.issue.number
-            const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
-            const bootstrapBotId = 41898282
-            const bootstrapBotLogin = 'github-actions[bot]'
-            const viewer = await github.graphql('query { viewer { login } }')
-            if (viewer.viewer?.login !== bootstrapBotLogin) {
-              throw new Error('Bootstrap failure notice does not have the expected repository token identity.')
-            }
-            const repo = await github.rest.repos.get(context.repo)
-            const branch = await github.rest.repos.getBranch({ ...context.repo, branch: repo.data.default_branch })
-            const baseSha = branch.data.commit.sha
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo,
-              issue_number: issueNumber,
-              per_page: 100,
-            })
-            const trusted = comments.filter(comment =>
-              comment.user?.id === bootstrapBotId &&
-              comment.user?.login === bootstrapBotLogin &&
-              comment.user?.type === 'Bot' &&
-              comment.body?.includes(marker))
-            if (trusted.length > 1) throw new Error('Multiple trusted bootstrap failure comments exist.')
-            const detail = 'The dedicated Maintainer Bot GitHub App is disabled, missing required configuration, not installed with the requested permissions, or failed identity/scope preflight. No model or writer process ran.'
-            const metadata = {
-              version: 1,
-              repository,
-              issueNumber,
-              status: 'NEEDS_HUMAN',
-              actionsRunId: Number(context.runId),
-              runUrl,
-              baseSha,
-              updatedAt: new Date().toISOString(),
-            }
-            const body = `<!-- ${marker} ${JSON.stringify(metadata)} -->
-            ## OMA Maintainer Bot — NEEDS_HUMAN
-
-            - Actions run: [${context.runId}](${runUrl})
-            - Base SHA: \`${baseSha}\`
-            - Issue revision: \`not resolved\`
-
-            ${detail}
-
-            _This bootstrap status has no durable run claim and cannot authorize a model run or Draft PR. Any earlier App-authenticated claim remains authoritative until a verified App run resolves it._
-            `
-            const written = trusted[0] === undefined
-              ? (await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body })).data
-              : (await github.rest.issues.updateComment({ ...context.repo, comment_id: trusted[0].id, body })).data
-            if (
-              written.user?.id !== bootstrapBotId ||
-              written.user?.login !== bootstrapBotLogin ||
-              written.user?.type !== 'Bot'
-            ) throw new Error('GitHub did not attribute the bootstrap failure notice to the repository token bot.')
-            await core.summary
-              .addHeading('OMA Maintainer Bot — NEEDS_HUMAN')
-              .addLink(`Actions run ${context.runId}`, runUrl)
-              .addRaw(`\n${detail}\n`)
-              .write()
-
-      - name: Check out the trusted default-branch commit with read-only GITHUB_TOKEN
-        if: steps.started.outcome == 'success'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ steps.started.outputs.base_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up pinned Node.js
-        if: steps.started.outcome == 'success'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.23.1
-          cache: npm
-
-      - name: Verify pinned npm version
-        if: steps.started.outcome == 'success'
-        run: test "$(npm --version)" = "10.9.8"
-
-      - name: Select the single configured execution backend
-        id: backend
-        if: steps.started.outcome == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          backend="$(node -e "const p=require('./packages/maintainer-host/config/production-policy.json'); if (!['legacy','claude-code'].includes(p.executionBackend)) process.exit(2); process.stdout.write(p.executionBackend)")"
-          echo "name=$backend" >> "$GITHUB_OUTPUT"
+      - name: Publish non-authoritative App bootstrap or recovery failure
+        id: bootstrap
+        if: >-
+          always() &&
+          (steps.app-token.outcome != 'success' ||
+          (steps.start.outcome != 'success' && steps.start-recovery.outcome != 'success'))
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OMA_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OMA_BOOTSTRAP_STAGE: ${{ steps.app-token.outcome != 'success' && 'app-token-mint' || 'app-identity-or-recovery' }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js bootstrap-failure
+          --event "$GITHUB_EVENT_PATH"
+          --actions-run-id "$GITHUB_RUN_ID"
+          --run-url "$OMA_RUN_URL"
+          --stage "$OMA_BOOTSTRAP_STAGE"
 
       - name: Install Claude Code sandbox runtime dependencies
-        if: steps.backend.outputs.name == 'claude-code'
+        if: steps.start.outcome == 'success' && steps.start.outputs.execution_backend == 'claude-code'
         shell: bash
         run: |
           set -euo pipefail
@@ -344,17 +153,13 @@ jobs:
           sudo apt-get install --yes --no-install-recommends apparmor bubblewrap socat
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
           sudo install --owner=root --group=root --mode=0644 \
-            packages/maintainer-harness-canary/config/bwrap.apparmor \
+            packages/maintainer-runtime/config/bwrap.apparmor \
             /etc/apparmor.d/bwrap
           sudo apparmor_parser --replace /etc/apparmor.d/bwrap
           test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = '1'
 
-      - name: Install locked dependencies
-        if: steps.started.outcome == 'success'
-        run: npm ci
-
       - name: Install pinned Claude Code
-        if: steps.backend.outputs.name == 'claude-code'
+        if: steps.start.outcome == 'success' && steps.start.outputs.execution_backend == 'claude-code'
         env:
           npm_config_cache: ${{ runner.temp }}/npm-cache
         run: |
@@ -362,34 +167,23 @@ jobs:
           npm install --global @anthropic-ai/claude-code@2.1.220
           claude --version | grep -F '2.1.220'
 
-      - name: Build the deterministic host and OMA engine
-        id: build
-        if: steps.started.outcome == 'success'
-        run: npm run build -w @open-multi-agent/maintainer-host
-
-      - name: Build and preflight the production Claude Code harness
-        id: harness
-        if: steps.backend.outputs.name == 'claude-code' && steps.build.outcome == 'success'
+      - name: Build and preflight the production Maintainer Runtime
+        id: runtime
+        if: steps.start.outcome == 'success' && steps.start.outputs.execution_backend == 'claude-code'
         shell: bash
         run: |
           set -euo pipefail
-          npm run build -w @open-multi-agent/maintainer-harness-canary
-          node packages/maintainer-harness-canary/dist/cli.js sandbox-preflight \
+          npm run build -w @open-multi-agent/maintainer-runtime
+          node packages/maintainer-runtime/dist/cli.js sandbox-preflight \
             --repo "$GITHUB_WORKSPACE"
 
-      - name: Re-fetch, authorize, and claim the candidate run
+      - name: Re-fetch, authorize, and establish the durable candidate claim
         id: prepare
         if: >-
-          steps.started.outcome == 'success' &&
-          steps.build.outcome == 'success' &&
-          (steps.backend.outputs.name == 'legacy' || steps.harness.outcome == 'success')
+          steps.start.outcome == 'success' &&
+          (steps.start.outputs.execution_backend == 'legacy' || steps.runtime.outcome == 'success')
         env:
           MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          OMA_CLAIM_ID: ${{ steps.started.outputs.claim_id }}
-          OMA_RUN_URL: ${{ steps.started.outputs.run_url }}
-          OMA_BASE_SHA: ${{ steps.started.outputs.base_sha }}
-          OMA_EVENT_SNAPSHOT_MATCHED: ${{ steps.started.outputs.event_snapshot_matched }}
-          OMA_REMOVED_BOOTSTRAP_COMMENT_COUNT: ${{ steps.started.outputs.removed_bootstrap_comment_count }}
           OMA_APP_WRITER_ENABLED: ${{ vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED }}
           OMA_EXPECTED_APP_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_ID }}
           OMA_EXPECTED_APP_CLIENT_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_CLIENT_ID }}
@@ -400,16 +194,11 @@ jobs:
           OMA_ACTUAL_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
         run: >-
           node packages/maintainer-host/dist/cli.js prepare
+          --start "$RUNNER_TEMP/oma-maintainer/start.json"
+          --start-hash "${{ steps.start.outputs.start_hash }}"
           --event "$GITHUB_EVENT_PATH"
           --policy packages/maintainer-host/config/production-policy.json
           --repo "$GITHUB_WORKSPACE"
-          --event-id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-          --claim-id "$OMA_CLAIM_ID"
-          --actions-run-id "$GITHUB_RUN_ID"
-          --run-url "$OMA_RUN_URL"
-          --base-sha "$OMA_BASE_SHA"
-          --event-snapshot-matched "$OMA_EVENT_SNAPSHOT_MATCHED"
-          --removed-bootstrap-comment-count "$OMA_REMOVED_BOOTSTRAP_COMMENT_COUNT"
           --app-writer-enabled "$OMA_APP_WRITER_ENABLED"
           --expected-app-id "$OMA_EXPECTED_APP_ID"
           --expected-app-client-id "$OMA_EXPECTED_APP_CLIENT_ID"
@@ -422,7 +211,7 @@ jobs:
 
       - name: Run the selected OMA backend in a credential-isolated child process
         id: engine
-        if: steps.prepare.outcome == 'success'
+        if: steps.prepare.outcome == 'success' && steps.prepare.outputs.should_run == 'true'
         continue-on-error: true
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -437,8 +226,6 @@ jobs:
             LANG="${LANG:-C.UTF-8}" \
             CI=1 \
             TMPDIR="$RUNNER_TEMP" \
-            RUNNER_TEMP="$RUNNER_TEMP" \
-            npm_config_cache="$RUNNER_TEMP/npm-cache" \
             node packages/maintainer-host/dist/cli.js run-engine \
             --provider-key-fd 3 \
             --activation "$RUNNER_TEMP/oma-maintainer/activation.json" \
@@ -446,12 +233,22 @@ jobs:
             --state-dir "$RUNNER_TEMP/oma-maintainer/state" \
             --artifact-dir "$RUNNER_TEMP/oma-maintainer/artifacts" \
             --maintainer-bot-cli packages/maintainer-bot/dist/cli.js \
-            --claude-code-harness-cli packages/maintainer-harness-canary/dist/cli.js \
+            --maintainer-runtime-cli packages/maintainer-runtime/dist/cli.js \
             --repo "$GITHUB_WORKSPACE"
+
+      - name: Upload bounded OMA pipeline trace
+        if: always() && steps.prepare.outputs.should_run == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maintainer-bot-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oma-maintainer/artifacts/*.pipeline-trace.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Revalidate with the App and create at most one Draft PR
         id: finalize
-        if: always() && steps.build.outcome == 'success' && steps.prepare.outcome == 'success'
+        if: always() && steps.prepare.outcome == 'success'
         env:
           MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           OMA_APP_WRITER_ENABLED: ${{ vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED }}
@@ -481,161 +278,37 @@ jobs:
           --app-installation-id "$OMA_ACTUAL_APP_INSTALLATION_ID"
           --final-out "$RUNNER_TEMP/oma-maintainer/final.json"
 
-      - name: Publish App-authenticated infrastructure failure fallback
-        if: always() && steps.started.outcome == 'success' && steps.finalize.outcome != 'success'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+      - name: Recover App-authenticated control-plane failure
+        id: recovery
+        if: always() && steps.start.outcome == 'success' && steps.finalize.outcome != 'success'
         env:
-          OMA_BASE_SHA: ${{ steps.started.outputs.base_sha }}
-          OMA_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          OMA_APP_BOT_USER_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_BOT_USER_ID }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const marker = 'oma-maintainer-bot-status:v2'
-            const repository = context.repo.owner + '/' + context.repo.repo
-            const issueNumber = context.issue.number
-            const claimId = `${context.runId}.${process.env.GITHUB_RUN_ATTEMPT}`
-            const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
-            const baseSha = process.env.OMA_BASE_SHA || context.sha
-            const appSlug = process.env.OMA_APP_SLUG ?? ''
-            const botLogin = `${appSlug}[bot]`
-            const botUserId = Number(process.env.OMA_APP_BOT_USER_ID)
-            // IssueComment actors expose the App slug while REST bot users include the [bot] suffix.
-            const isExpectedGraphQlBotActor = actor =>
-              actor?.__typename === 'Bot' &&
-              actor.databaseId === botUserId &&
-              (actor.login === appSlug || actor.login === botLogin)
-            const viewer = await github.graphql('query { viewer { login } }')
-            if (viewer.viewer?.login !== botLogin || !Number.isSafeInteger(botUserId) || botUserId <= 0) {
-              throw new Error('Failure fallback does not have the expected App identity.')
-            }
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo,
-              issue_number: issueNumber,
-              per_page: 100,
-            })
-            const trusted = comments.filter(comment =>
-              comment.user?.id === botUserId &&
-              comment.user?.login === botLogin &&
-              comment.user?.type === 'Bot' &&
-              comment.body?.includes(marker))
-            if (trusted.length !== 1) throw new Error('Expected exactly one trusted Maintainer Bot App status comment.')
-            const current = trusted[0]
-            const proof = await github.graphql(`
-              query OMAStatusCommentAuthorship($id: ID!) {
-                node(id: $id) {
-                  ... on IssueComment {
-                    author { __typename login ... on Bot { databaseId } }
-                    editor { __typename login ... on Bot { databaseId } }
-                    createdViaEmail
-                  }
-                }
-              }
-            `, { id: current.node_id })
-            if (
-              !isExpectedGraphQlBotActor(proof.node?.author) ||
-              proof.node?.createdViaEmail !== false ||
-              (proof.node?.editor !== null && !isExpectedGraphQlBotActor(proof.node?.editor))
-            ) throw new Error('Failure fallback status provenance is invalid.')
-            const matches = [...current.body.matchAll(new RegExp(`<!--\\s*${marker}\\s+(\\{[^\\n]*\\})\\s*-->`, 'g'))]
-            if (matches.length !== 1) throw new Error('Trusted Maintainer Bot comment has invalid machine metadata.')
-            let previous
-            try { previous = JSON.parse(matches[0][1]) } catch { throw new Error('Trusted status metadata is not valid JSON.') }
-            const sameClaim = previous?.claimId === claimId && previous?.runKey
-            const runningClaim = sameClaim && (previous.status === 'STARTED' || previous.status === 'RUNNING')
-            const terminalClaim = sameClaim && !runningClaim
-            const status = runningClaim ? 'NEEDS_HUMAN' : terminalClaim ? previous.status : 'FAILED'
-            const metadata = {
-              version: 2,
-              repository,
-              issueNumber,
-              status,
-              claimId,
-              actionsRunId: Number(context.runId),
-              runUrl,
-              baseSha: sameClaim ? previous.baseSha : baseSha,
-              issueRevision: sameClaim ? previous.issueRevision : null,
-              runKey: sameClaim ? previous.runKey : null,
-              branch: sameClaim ? previous.branch : null,
-              pullRequestUrl: sameClaim ? previous.pullRequestUrl : null,
-              updatedAt: new Date().toISOString(),
-            }
-            const claims = new Map()
-            const add = value => {
-              if (!value || !value.claimId) return
-              const claim = {
-                status: value.status,
-                claimId: value.claimId,
-                actionsRunId: value.actionsRunId,
-                runUrl: value.runUrl,
-                baseSha: value.baseSha,
-                issueRevision: value.issueRevision ?? null,
-                runKey: value.runKey ?? null,
-                branch: value.branch ?? null,
-                pullRequestUrl: value.pullRequestUrl ?? null,
-                updatedAt: value.updatedAt,
-              }
-              claims.set(claim.runKey ?? `pending:${claim.claimId}`, claim)
-            }
-            if (Array.isArray(previous?.claims)) previous.claims.forEach(add)
-            add(previous)
-            if (metadata.runKey) claims.delete(`pending:${metadata.claimId}`)
-            add(metadata)
-            metadata.claims = [...claims.values()]
-            if (metadata.claims.length > 64) throw new Error('Durable claim ledger reached safe capacity.')
-            const revision = metadata.issueRevision === null ? '\`not resolved\`' : `\`${metadata.issueRevision}\``
-            const detail = runningClaim
-              ? 'The control layer stopped after a durable RUNNING claim. Automatic model resume is forbidden; inspect this run and reauthorize a fresh revision or base.'
-              : terminalClaim
-                ? `The control layer had already published terminal state ${previous.status}; this fallback preserved that authoritative terminal result.`
-                : 'The control layer failed before it established a durable RUNNING claim. Inspect the linked run; no Draft PR was authorized by this fallback.'
-            const body = `<!-- ${marker} ${JSON.stringify(metadata)} -->
-            ## OMA Maintainer Bot — ${status}
+          MAINTAINER_BOT_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          OMA_APP_WRITER_ENABLED: ${{ vars.OMA_MAINTAINER_BOT_APP_WRITER_ENABLED }}
+          OMA_EXPECTED_APP_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_ID }}
+          OMA_EXPECTED_APP_CLIENT_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_CLIENT_ID }}
+          OMA_EXPECTED_APP_SLUG: ${{ vars.OMA_MAINTAINER_BOT_APP_SLUG }}
+          OMA_EXPECTED_APP_INSTALLATION_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_INSTALLATION_ID }}
+          OMA_EXPECTED_APP_BOT_USER_ID: ${{ vars.OMA_MAINTAINER_BOT_APP_BOT_USER_ID }}
+          OMA_ACTUAL_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          OMA_ACTUAL_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js recover
+          --event "$GITHUB_EVENT_PATH"
+          --start "$RUNNER_TEMP/oma-maintainer/start.json"
+          --start-hash "${{ steps.start.outputs.start_hash }}"
+          --app-writer-enabled "$OMA_APP_WRITER_ENABLED"
+          --expected-app-id "$OMA_EXPECTED_APP_ID"
+          --expected-app-client-id "$OMA_EXPECTED_APP_CLIENT_ID"
+          --expected-app-slug "$OMA_EXPECTED_APP_SLUG"
+          --expected-app-installation-id "$OMA_EXPECTED_APP_INSTALLATION_ID"
+          --expected-app-bot-user-id "$OMA_EXPECTED_APP_BOT_USER_ID"
+          --app-slug "$OMA_ACTUAL_APP_SLUG"
+          --app-installation-id "$OMA_ACTUAL_APP_INSTALLATION_ID"
 
-            - Actions run: [${context.runId}](${runUrl})
-            - Base SHA: \`${metadata.baseSha}\`
-            - Issue revision: ${revision}
-
-            ${detail}
-
-            _This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._
-            `
-            const updated = (await github.rest.issues.updateComment({
-              ...context.repo,
-              comment_id: current.id,
-              body,
-            })).data
-            if (
-              updated.user?.id !== botUserId ||
-              updated.user?.login !== botLogin ||
-              updated.user?.type !== 'Bot'
-            ) throw new Error('GitHub did not attribute the fallback update to the expected App bot.')
-            const updatedProof = await github.graphql(`
-              query OMAUpdatedStatusCommentAuthorship($id: ID!) {
-                node(id: $id) {
-                  ... on IssueComment {
-                    author { __typename login ... on Bot { databaseId } }
-                    editor { __typename login ... on Bot { databaseId } }
-                    createdViaEmail
-                  }
-                }
-              }
-            `, { id: updated.node_id })
-            if (
-              !isExpectedGraphQlBotActor(updatedProof.node?.author) ||
-              updatedProof.node?.createdViaEmail !== false ||
-              (updatedProof.node?.editor !== null && !isExpectedGraphQlBotActor(updatedProof.node?.editor))
-            ) throw new Error('Updated failure status App provenance is invalid.')
-            await core.summary
-              .addHeading(`OMA Maintainer Bot — ${status}`)
-              .addLink(`Actions run ${context.runId}`, runUrl)
-              .addRaw(`\n${detail}\n`)
-              .write()
-
-      - name: Mark App bootstrap failure as an unsuccessful run
-        if: always() && (steps.app-token.outcome != 'success' || steps.started.outcome != 'success')
-        run: exit 1
-
-      - name: Mark validated FAILED terminal as an unsuccessful run
-        if: always() && steps.finalize.outcome == 'success' && steps.finalize.outputs.terminal_status == 'FAILED'
-        run: exit 1
+      - name: Apply typed terminal exit policy
+        if: always()
+        env:
+          OMA_TERMINAL_STATUS: ${{ steps.finalize.outputs.terminal_status || steps.recovery.outputs.terminal_status || steps.start-recovery.outputs.terminal_status || steps.bootstrap.outputs.terminal_status || 'FAILED' }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js exit-terminal
+          --status "$OMA_TERMINAL_STATUS"

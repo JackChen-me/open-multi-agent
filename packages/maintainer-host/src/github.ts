@@ -73,6 +73,7 @@ export interface GitHubClient {
   getActionsRun(repository: string, runId: number): Promise<GitHubActionsRun | null>
   createIssueComment(repository: string, issueNumber: number, body: string): Promise<GitHubComment>
   updateIssueComment(repository: string, commentId: number, body: string): Promise<GitHubComment>
+  deleteIssueComment(repository: string, commentId: number): Promise<void>
   listPullRequestsForHead(repository: string, head: string): Promise<GitHubPullRequest[]>
   createDraftPullRequest(input: {
     repository: string
@@ -223,6 +224,10 @@ export class GitHubRestClient implements GitHubClient {
       `/repos/${repo(repository)}/issues/comments/${commentId}`,
       { body },
     ))
+  }
+
+  async deleteIssueComment(repository: string, commentId: number): Promise<void> {
+    await this.request('DELETE', `/repos/${repo(repository)}/issues/comments/${commentId}`)
   }
 
   async listPullRequestsForHead(repository: string, head: string): Promise<GitHubPullRequest[]> {

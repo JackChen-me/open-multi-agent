@@ -20,12 +20,10 @@ const SAFE_ENVIRONMENT_NAMES = [
   'PATH',
   'HOME',
   'TMPDIR',
-  'RUNNER_TEMP',
   'CI',
   'LANG',
   'LC_ALL',
   'TZ',
-  'npm_config_cache',
 ] as const
 
 export function buildIsolatedModelEnvironment(
@@ -59,7 +57,7 @@ export async function runIsolatedEngine(options: {
   readonly stateDir: string
   readonly artifactDir: string
   readonly maintainerBotCli: string
-  readonly claudeCodeHarnessCli?: string
+  readonly maintainerRuntimeCli?: string
   readonly deepSeekApiKey?: string
   readonly sourceEnvironment?: NodeJS.ProcessEnv
   readonly nodeExecutable?: string
@@ -89,8 +87,8 @@ export async function runIsolatedEngine(options: {
     atomicWriteJson(requestPath, activation.request),
     atomicWriteJson(configPath, activation.config),
   ])
-  if (activation.config.executionBackend === 'claude-code' && options.claudeCodeHarnessCli === undefined) {
-    throw new Error('Claude Code backend requires a harness CLI path.')
+  if (activation.config.executionBackend === 'claude-code' && options.maintainerRuntimeCli === undefined) {
+    throw new Error('Claude Code backend requires a maintainer runtime CLI path.')
   }
   const child = await spawnCaptured(
     options.nodeExecutable ?? process.execPath,
@@ -105,7 +103,7 @@ export async function runIsolatedEngine(options: {
       '--run-id', activation.claimId,
       '--provider-key-fd', '3',
       ...(activation.config.executionBackend === 'claude-code'
-        ? ['--claude-code-harness-cli', resolve(options.claudeCodeHarnessCli!)]
+        ? ['--maintainer-runtime-cli', resolve(options.maintainerRuntimeCli!)]
         : []),
     ],
     environment,

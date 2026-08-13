@@ -1,10 +1,11 @@
-import { readFile, realpath, rm, lstat, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, realpath, rm, lstat, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
+import { NodeCommandRunner } from '@open-multi-agent/maintainer-bot'
 import {
-  canonicalGitDiffArgs,
-  NodeCommandRunner,
-} from '@open-multi-agent/maintainer-bot'
+  collectCandidateStatus,
+  renderCandidateDiffSnapshot,
+} from './candidate-gate.js'
 
 export interface ValidationWorkspace {
   readonly containerRoot: string
@@ -39,6 +40,11 @@ export async function createValidationWorkspace(options: {
   const commandRunner = new NodeCommandRunner()
   const gitEnvironment = validationGitEnvironment(containerRoot)
   try {
+    const sourceSnapshot = await collectCandidateStatus({
+      repoRoot: sourceRepoRoot,
+      expectedPaths: options.changedPaths,
+      ignoreUnapprovedUntrackedFiles: true,
+    })
     await mkdir(join(containerRoot, 'home'), { mode: 0o700 })
     await mkdir(resolverRoot, { mode: 0o700 })
     await writeFile(resolverHostsPath, VALIDATION_HOSTS, { mode: 0o600 })
@@ -61,6 +67,22 @@ export async function createValidationWorkspace(options: {
         cwd: repoRoot,
         env: gitEnvironment,
       })
+    }
+    for (const path of sourceSnapshot.newPaths) {
+      const sourcePath = resolveWorkspacePath(sourceRepoRoot, path)
+      const destinationPath = resolveWorkspacePath(repoRoot, path)
+      const [sourceInfo, destinationInfo] = await Promise.all([
+        lstat(sourcePath),
+        lstat(destinationPath),
+      ])
+      if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()
+        || !destinationInfo.isFile() || destinationInfo.isSymbolicLink()) {
+        throw new Error('New-file candidate must remain a regular non-symlink file.')
+      }
+      // The v1 review diff format cannot encode a missing final newline. Copy
+      // the already-gated source bytes, then verify both their hash and the
+      // frozen diff before any validation command can start.
+      await copyFile(sourcePath, destinationPath)
     }
     await mkdir(join(repoRoot, 'node_modules'))
     const dependencyRoot = await realpath(resolve(sourceRepoRoot, 'node_modules'))
@@ -90,11 +112,15 @@ export async function assertValidationWorkspaceCandidate(
   const gitEnvironment = validationGitEnvironment(workspace.containerRoot)
   await assertResolverIntegrity(workspace)
   await assertHead(commandRunner, workspace.repoRoot, gitEnvironment, workspace.baseSha)
-  const status = await commandRunner.run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=no'], {
-    cwd: workspace.repoRoot,
-    env: gitEnvironment,
+  // A raw '--untracked-files=no' would hide approved new-file candidates.
+  // Collect all status entries, then ignore only unapproved disposable output.
+  const snapshot = await collectCandidateStatus({
+    repoRoot: workspace.repoRoot,
+    expectedPaths: workspace.changedPaths,
+    ignoreUnapprovedUntrackedFiles: true,
+    environment: gitEnvironment,
   })
-  const statusPaths = parseSnapshotStatus(status.stdout)
+  const statusPaths = snapshot.paths
   if (JSON.stringify(statusPaths) !== JSON.stringify([...workspace.changedPaths].sort())) {
     throw new Error('Disposable validation workspace path set differs from the frozen candidate.')
   }
@@ -107,12 +133,11 @@ export async function assertValidationWorkspaceCandidate(
       throw new Error('Disposable validation workspace candidate contains an oversized changed file.')
     }
   }
-  const diff = statusPaths.length === 0
-    ? ''
-    : (await commandRunner.run('git', canonicalGitDiffArgs({ paths: statusPaths }), {
-        cwd: workspace.repoRoot,
-        env: gitEnvironment,
-      })).stdout
+  const diff = await renderCandidateDiffSnapshot({
+    repoRoot: workspace.repoRoot,
+    snapshot,
+    environment: gitEnvironment,
+  })
   if (diff !== workspace.candidateDiff) {
     throw new Error('Disposable validation workspace patch differs from the frozen candidate.')
   }
@@ -157,21 +182,6 @@ async function assertCleanStatus(
     env: environment,
   })
   if (status.stdout.length > 0) throw new Error('Disposable validation workspace base is not clean.')
-}
-
-function parseSnapshotStatus(value: string): string[] {
-  const fields = value.split('\0')
-  const paths: string[] = []
-  for (let index = 0; index < fields.length; index += 1) {
-    const field = fields[index]
-    if (field === undefined || field.length === 0) continue
-    if (field.length < 4 || field[2] !== ' ') throw new Error('Malformed disposable workspace Git status.')
-    const status = field.slice(0, 2)
-    if (/[DRCTU?]/.test(status)) throw new Error('Validation left a forbidden disposable workspace status.')
-    if (status.includes('R') || status.includes('C')) index += 1
-    paths.push(field.slice(3))
-  }
-  return [...new Set(paths)].sort()
 }
 
 function resolveWorkspacePath(repoRoot: string, path: string): string {

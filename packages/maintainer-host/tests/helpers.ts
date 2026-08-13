@@ -119,6 +119,7 @@ export class FakeGitHub implements GitHubClient {
   viewerLogin = APP_BOT_LOGIN
   app = { id: APP_ID, clientId: APP_CLIENT_ID, slug: APP_SLUG }
   botUser: GitHubActor = { id: APP_BOT_USER_ID, login: APP_BOT_LOGIN, type: 'Bot' }
+  commentUser: GitHubActor = { id: APP_BOT_USER_ID, login: APP_BOT_LOGIN, type: 'Bot' }
   installationRepositories = [REPOSITORY]
   commentAuthorshipOverrides = new Map<string, GitHubIssueCommentAuthorship>()
   issue: GitHubIssue = issueFromEvent()
@@ -131,6 +132,7 @@ export class FakeGitHub implements GitHubClient {
   createdPullRequests = 0
   createdComments = 0
   updatedComments = 0
+  deletedComments = 0
 
   async getAuthenticatedViewerLogin() {
     return this.viewerLogin
@@ -193,7 +195,7 @@ export class FakeGitHub implements GitHubClient {
 
   async createIssueComment(_repository: string, _issueNumber: number, body: string): Promise<GitHubComment> {
     this.createdComments += 1
-    const comment = botComment(10_000 + this.createdComments, body)
+    const comment = { ...botComment(10_000 + this.createdComments, body), user: structuredClone(this.commentUser) }
     this.comments.push(comment)
     return structuredClone(comment)
   }
@@ -205,6 +207,13 @@ export class FakeGitHub implements GitHubClient {
     const updated = { ...this.comments[index]!, body, updated_at: '2026-08-10T18:00:00Z' }
     this.comments[index] = updated
     return structuredClone(updated)
+  }
+
+  async deleteIssueComment(_repository: string, commentId: number): Promise<void> {
+    const index = this.comments.findIndex(comment => comment.id === commentId)
+    if (index === -1) throw new Error('comment not found')
+    this.comments.splice(index, 1)
+    this.deletedComments += 1
   }
 
   async listPullRequestsForHead(_repository: string, head: string): Promise<GitHubPullRequest[]> {

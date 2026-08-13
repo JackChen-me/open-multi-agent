@@ -1,5 +1,8 @@
 import { z } from 'zod'
-import { validationCommandSchema } from '@open-multi-agent/maintainer-bot'
+import {
+  validationCommandSchema,
+  validationResultSchema,
+} from '@open-multi-agent/maintainer-bot'
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/)
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/)
@@ -77,16 +80,10 @@ export const canaryRequestSchema = z.object({
 
 export type CanaryRequest = z.infer<typeof canaryRequestSchema>
 
-export const validationEvidenceSchema = z.object({
-  id: z.string().min(1),
-  command: z.string().min(1),
-  success: z.boolean(),
-  exitCode: z.number().int(),
-  durationMs: z.number().int().nonnegative(),
-  stdout: z.string(),
-  stderr: z.string(),
-  truncated: z.boolean(),
-})
+// Canary artifacts intentionally omit the production command-environment
+// echo, but share every other validation-result field with the runtime
+// producer/consumer contract.
+export const validationEvidenceSchema = validationResultSchema.omit({ environment: true })
 
 export const safeEventSchema = z.object({
   sequence: z.number().int().positive(),

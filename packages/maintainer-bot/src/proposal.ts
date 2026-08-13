@@ -57,10 +57,14 @@ export function buildDraftPrProposal(options: BuildDraftPrProposalOptions): Draf
     validationResults,
     skippedChecks: [...(options.skippedChecks ?? [])],
     model: options.config.model,
+    claudeCodeTokenUsage: options.config.executionBackend === 'claude-code'
+      ? 'not_reported' as const
+      : 'not_applicable' as const,
     promptVersion: options.config.promptVersion,
     policyVersion: options.config.policyVersion,
     risks: [...new Set(options.risks)],
     review: options.review,
+    validatedCandidateDiffHash: options.reviewBundle.diffHash,
     generatedAt: (options.now ?? (() => new Date()))().toISOString(),
   }
   return draftPrProposalSchema.parse({ ...partial, proposalHash: hashJson(partial) })

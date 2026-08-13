@@ -120,13 +120,18 @@ export class NodeCommandRunner implements CommandRunner {
 }
 
 export function sanitizedChildEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const output: NodeJS.ProcessEnv = {}
-  for (const [name, value] of Object.entries(source)) {
-    if (value === undefined || isCredentialName(name)) continue
-    output[name] = value
-  }
-  output['CI'] = source['CI'] ?? '1'
-  return output
+  // Validation is a stricter boundary than the model host: pass only runtime
+  // essentials. Arbitrary runner variables can carry credentials or trip the
+  // runtime's fail-closed credential-name gate.
+  return Object.fromEntries([
+    ['PATH', source['PATH']],
+    ['HOME', source['HOME']],
+    ['TMPDIR', source['TMPDIR']],
+    ['LANG', source['LANG']],
+    ['LC_ALL', source['LC_ALL']],
+    ['TZ', source['TZ']],
+    ['CI', source['CI'] ?? '1'],
+  ].filter((entry): entry is [string, string] => entry[1] !== undefined))
 }
 
 export function assertModelCredentialIsolation(env: NodeJS.ProcessEnv = process.env): void {
@@ -165,10 +170,6 @@ export function redactSensitiveText(value: string): string {
     .replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[REDACTED]')
     .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, '[REDACTED]')
     .replace(/((?:token|api[_-]?key|password|secret)\s*[=:]\s*)[^\s]+/gi, '$1[REDACTED]')
-}
-
-function isCredentialName(name: string): boolean {
-  return /(TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH_SOCK)/i.test(name)
 }
 
 function boundOutput(value: string, limit: number): string {

@@ -15,7 +15,7 @@ describe('pre-registered deterministic validation runner', () => {
         MAINTAINER_BOT_APP_TOKEN: 'must-not-leak',
         OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'must-not-leak',
         DEEPSEEK_API_KEY: 'must-not-leak',
-        SAFE_VALUE: 'kept',
+        SAFE_VALUE: 'not-required-by-validation',
       },
       now: (() => { let value = 0; return () => value += 5 })(),
     })
@@ -23,7 +23,8 @@ describe('pre-registered deterministic validation runner', () => {
     expect(results[0]).toMatchObject({ id: 'fixture-test', success: true, durationMs: 5 })
     expect(runner.calls[0]?.command).toBe('npm')
     expect(runner.calls[0]?.args).toEqual(['test', '-w', '@fixture/demo'])
-    expect(runner.calls[0]?.options.env).toMatchObject({ PATH: '/usr/bin', SAFE_VALUE: 'kept' })
+    expect(runner.calls[0]?.options.env).toMatchObject({ PATH: '/usr/bin', CI: '1' })
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('SAFE_VALUE')
     expect(runner.calls[0]?.options.env).not.toHaveProperty('GITHUB_TOKEN')
     expect(runner.calls[0]?.options.env).not.toHaveProperty('MAINTAINER_BOT_APP_TOKEN')
     expect(runner.calls[0]?.options.env).not.toHaveProperty('OMA_MAINTAINER_BOT_APP_PRIVATE_KEY')

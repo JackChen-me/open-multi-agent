@@ -15,7 +15,7 @@ import {
   sha256,
   runMaintainerBot,
 } from '@open-multi-agent/maintainer-bot'
-import { finalizeActivation, prepareActivation } from '../src/activation.js'
+import { finalizeActivation, prepareActivation, publicStatusForAdmission } from '../src/activation.js'
 import { productionPolicy } from './helpers.js'
 import {
   BASE_SHA,
@@ -37,6 +37,11 @@ const ORIGINAL = 'export const isolated = false\n'
 const FIXED = 'export const isolated = true\n'
 
 describe('mocked GitHub + scripted OMA activation path', () => {
+  it('reserves NEEDS_CLARIFICATION for Issue readiness and maps an authorization candidate anomaly to public FAILED', () => {
+    expect(publicStatusForAdmission('NEEDS_CLARIFICATION')).toBe('NEEDS_CLARIFICATION')
+    expect(publicStatusForAdmission('READY_CANDIDATE')).toBe('NEEDS_HUMAN')
+  })
+
   it('runs the agent-ready Claude backend through OMA, sandbox contract, fresh review, and the deterministic Draft PR writer', async () => {
     const fixture = await runClaudeToProposal()
     const final = await finalizeActivation({
@@ -59,6 +64,7 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(final.status).toBe('DRAFT_PR_CREATED')
     expect(fixture.github.createdPullRequests).toBe(1)
     expect(fixture.github.pulls[0]).toMatchObject({ draft: true, state: 'open' })
+    expect(fixture.github.pulls[0]?.body).toContain('Claude Code token usage: unknown (not reported)')
     expect(await readFile(fixture.backendCountPath, 'utf8')).toBe('1')
     expect(fixture.adapter.roles).toEqual(['triage', 'reviewer'])
     const sandboxCalls = fixture.runner.calls.filter(call => call.args.includes('run-production-validation'))
@@ -90,6 +96,7 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(fixture.github.createdPullRequests).toBe(1)
     expect(fixture.github.pulls[0]).toMatchObject({ state: 'open', draft: true })
     expect(fixture.github.pulls[0]?.body).toContain('Related Issue: [#488]')
+    expect(fixture.github.pulls[0]?.body).toContain('Claude Code token usage: not applicable')
     expect(fixture.github.pulls[0]?.body).not.toMatch(/(?:fixes|closes)\s+#488/i)
     expect(await readFile(join(fixture.repoRoot, TARGET), 'utf8')).toBe(FIXED)
 
@@ -135,6 +142,28 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       removedBootstrapCommentCount: 0,
     })
     expect(duplicate).toMatchObject({ shouldRun: false, status: 'DRAFT_PR_CREATED' })
+    expect(fixture.github.createdPullRequests).toBe(1)
+
+    fixture.github.pulls[0]!.head.sha = 'f'.repeat(40)
+    const driftedRepo = await fixtureRepo()
+    const drifted = await prepareActivation({
+      event: fixture.event,
+      github: fixture.github,
+      runner: repositoryRunner(driftedRepo),
+      repoRoot: driftedRepo,
+      policy: fixture.policy,
+      eventId: '102.1',
+      receivedAt: '2026-08-10T18:02:00Z',
+      claimId: '102.1',
+      actionsRunId: 102,
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/102`,
+      baseShaHint: BASE_SHA,
+      eventSnapshotMatched: true,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
+    })
+    expect(drifted).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
+    expect(drifted.detail).toMatch(/active pull request|conflicting or untrusted pull request state/i)
     expect(fixture.github.createdPullRequests).toBe(1)
   })
 
@@ -287,7 +316,8 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(context.detail).toContain('The model was not run')
     expect(context.detail).toContain('reauthorize')
     expect(runner.calls).toEqual([])
-    expect(github.comments.at(-1)?.body).toContain('OMA Maintainer Bot — NEEDS_HUMAN')
+    expect(github.comments.at(-1)?.body).toContain('OMA Maintainer Bot — FAILED')
+    expect(github.comments.at(-1)?.body).toContain('"status":"NEEDS_HUMAN"')
     expect(github.comments.at(-1)?.body).not.toContain('NEEDS_CLARIFICATION')
   })
 
@@ -398,11 +428,34 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(fixture.runner.calls.some(call => call.args[0] === 'switch')).toBe(false)
     expect(fixture.runner.calls.some(call => call.args[0] === 'push')).toBe(false)
   })
+
+  it('rejects staged candidate drift after git add and before commit', async () => {
+    const fixture = await runToProposal(undefined, 'staged')
+    const result = await finalizeProposalFixture(fixture, '2026-08-10T18:06:00Z')
+    expect(result).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
+    expect(result.detail).toMatch(/Staged candidate diff differs/)
+    expect(fixture.runner.calls.some(call => call.args[0] === 'commit')).toBe(false)
+    expect(fixture.runner.calls.some(call => call.args[0] === 'push')).toBe(false)
+    expect(fixture.github.createdPullRequests).toBe(0)
+  })
+
+  it('rejects committed tree drift after commit and before push', async () => {
+    const fixture = await runToProposal(undefined, 'committed')
+    const result = await finalizeProposalFixture(fixture, '2026-08-10T18:07:00Z')
+    expect(result).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
+    expect(result.detail).toMatch(/Committed candidate diff differs/)
+    expect(fixture.runner.calls.some(call => call.args[0] === 'commit')).toBe(true)
+    expect(fixture.runner.calls.some(call => call.args[0] === 'push')).toBe(false)
+    expect(fixture.github.createdPullRequests).toBe(0)
+  })
 })
 
-async function runToProposal(localGitConfigKeys?: readonly string[]) {
+async function runToProposal(
+  localGitConfigKeys?: readonly string[],
+  writerDiffDrift?: 'staged' | 'committed',
+) {
   const repoRoot = await fixtureRepo()
-  const runner = repositoryRunner(repoRoot, localGitConfigKeys)
+  const runner = repositoryRunner(repoRoot, localGitConfigKeys, writerDiffDrift)
   const github = new FakeGitHub()
   const policy = { ...await productionPolicy(), executionBackend: 'legacy' as const }
   const event = labelEvent()
@@ -450,6 +503,29 @@ async function runToProposal(localGitConfigKeys?: readonly string[]) {
   return { repoRoot, runner, github, policy, event, activation, stateDir, artifactDir }
 }
 
+async function finalizeProposalFixture(
+  fixture: Awaited<ReturnType<typeof runToProposal>>,
+  finalizedAt: string,
+) {
+  return finalizeActivation({
+    activation: fixture.activation,
+    engineResult: {
+      schemaVersion: 1, attempted: true, exitCode: 0,
+      status: 'DRAFT_PR_PROPOSAL_READY', detail: 'Proposal ready.',
+    },
+    originalEvent: fixture.event,
+    github: fixture.github,
+    runner: fixture.runner,
+    githubAppToken: 'github-app-installation-token',
+    writerContract: APP_CONTRACT,
+    repoRoot: fixture.repoRoot,
+    policy: fixture.policy,
+    stateDir: fixture.stateDir,
+    artifactDir: fixture.artifactDir,
+    finalizedAt,
+  })
+}
+
 async function runClaudeToProposal() {
   const repoRoot = await fixtureRepo()
   const runner = repositoryRunner(repoRoot)
@@ -489,7 +565,7 @@ console.log(JSON.stringify({ status: 'CODING_COMPLETED', turns: 2, terminationRe
   const result = await runMaintainerBot({
     repoRoot, artifactDir, request: activation.request, config: activation.config, runner,
     stateStore: new FileRunStateStore(stateDir), runId: activation.claimId, adapter,
-    apiKey: 'scripted-provider-key', claudeCodeHarnessCli: harnessCli,
+    apiKey: 'scripted-provider-key', maintainerRuntimeCli: harnessCli,
     env: { PATH: process.env['PATH'] ?? '/usr/bin', HOME: '/tmp/oma-host-home' },
     requireEvidenceToolCalls: false, now: () => new Date('2026-08-10T17:50:00Z'),
   })
@@ -514,6 +590,7 @@ async function fixtureRepo(): Promise<string> {
 function repositoryRunner(
   root: string,
   localGitConfigKeys: readonly string[] = ['core.repositoryformatversion', 'core.filemode', 'remote.origin.url'],
+  writerDiffDrift?: 'staged' | 'committed',
 ): RecordingRunner {
   let committed = false
   return new RecordingRunner(async (command, args) => {
@@ -532,6 +609,12 @@ function repositoryRunner(
       if (args.includes('--cached') && args.includes('--diff-filter=DRTUXB')) return ok('')
       if (args.length === 2 && args[1] === '--name-only') return ok('')
       const current = await readFile(join(root, TARGET), 'utf8')
+      if (writerDiffDrift === 'staged' && args.includes('--cached')) {
+        return ok(`diff --git a/${TARGET} b/${TARGET}\n-${ORIGINAL.trimEnd()}\n+staged drift\n`)
+      }
+      if (writerDiffDrift === 'committed' && args.includes(BASE_SHA) && args.includes('HEAD')) {
+        return ok(`diff --git a/${TARGET} b/${TARGET}\n-${ORIGINAL.trimEnd()}\n+committed drift\n`)
+      }
       return ok(`diff --git a/${TARGET} b/${TARGET}\n-${ORIGINAL.trimEnd()}\n+${current.trimEnd()}\n`)
     }
     if (command === 'git' && args[0] === 'ls-files') return ok('')

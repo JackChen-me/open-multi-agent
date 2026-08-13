@@ -1,40 +1,28 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { fstatSync, openSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, symlink, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import { canonicalGitDiffArgs, type CommandResult } from '@open-multi-agent/maintainer-bot'
+import type { CommandResult } from '@open-multi-agent/maintainer-bot'
 import {
-  assertHarnessCredentialIsolation,
   BoundedProcessError,
-  BoundedProcessRunner,
   type BoundedProcessRunOptions,
-  buildHarnessEnvironment,
-  buildHarnessSettings,
-  buildValidationSandboxInvocation,
+  type SandboxProcessRunner,
+  VALIDATION_HOSTS,
+  VALIDATION_NSSWITCH,
+} from '@open-multi-agent/maintainer-runtime'
+import {
   canaryArtifactSchema,
-  cleanupValidationWorkspace,
   computeCanarySnapshotRevision,
-  createValidationWorkspace,
   prepareCanaryRequest,
-  preflightValidationSandbox,
-  readProviderKeyFromFd,
-  runProductionClaudeCodeBackend,
-  runProductionSandboxValidation,
   runHarnessCanary,
-  takeProductionProviderKey,
   verifyArtifactHash,
   type CanaryPolicy,
   type CanaryRequest,
   type FailedCanaryArtifact,
   type RawIssueSnapshot,
-  type SandboxProcessRunner,
-  VALIDATION_HOSTS,
-  VALIDATION_NSSWITCH,
-  ValidationSandboxPreflightError,
 } from '../src/index.js'
 
 const exec = promisify(execFile)
@@ -251,478 +239,7 @@ function policy(
   }
 }
 
-describe('harness environment, settings, and credential isolation', () => {
-  it('keeps the provider credential only in the parent and configures fail-closed subprocess isolation', () => {
-    const env = buildHarnessEnvironment({
-      source: {
-        PATH: '/bin',
-        GITHUB_TOKEN: 'write-token',
-        GH_TOKEN: 'write-token',
-        ACTIONS_RUNTIME_TOKEN: 'runtime-token',
-        RUNNER_TRACKING_ID: 'tracking',
-        NPM_TOKEN: 'npm-token',
-        NODE_AUTH_TOKEN: 'node-token',
-        npm_config_cache: '/tmp/host-npm-cache',
-        SSH_AUTH_SOCK: '/tmp/ssh.sock',
-        OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'private-key',
-      },
-      deepSeekApiKey: FAKE_KEY,
-      isolatedHome: '/tmp/isolated-home',
-    })
-    expect(env['ANTHROPIC_AUTH_TOKEN']).toBe(FAKE_KEY)
-    expect(env['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB']).toBe('1')
-    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'RUNNER_TRACKING_ID', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'npm_config_cache', 'SSH_AUTH_SOCK', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY']) {
-      expect(env[name]).toBeUndefined()
-    }
-    for (const name of ['GITHUB_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'npm_config_cache']) {
-      expect(() => assertHarnessCredentialIsolation({
-        [name]: 'must-be-rejected',
-        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
-      })).toThrow(/forbidden host credentials/)
-    }
-    expect(() => assertHarnessCredentialIsolation({ ANTHROPIC_AUTH_TOKEN: 'x' })).toThrow(/scrubbing/)
-
-    const settings = buildHarnessSettings({
-      repoRoot: '/checkout',
-      artifactDir: '/evidence',
-      controlDir: '/control',
-      allowedPaths: [BASE_FILE],
-    })
-    expect(settings.sandbox).toMatchObject({
-      enabled: true,
-      failIfUnavailable: true,
-      allowUnsandboxedCommands: false,
-      autoAllowBashIfSandboxed: false,
-      excludedCommands: [],
-      network: { allowedDomains: [], strictAllowlist: true, allowLocalBinding: false, allowUnixSockets: [] },
-    })
-    expect(settings.sandbox.credentials.envVars).toContainEqual({ name: 'ANTHROPIC_AUTH_TOKEN', mode: 'deny' })
-    expect(settings.permissions.allow).toEqual([
-      'Read(//checkout/**)',
-      `Edit(//checkout/${BASE_FILE})`,
-    ])
-    expect(settings.permissions.deny).toEqual(expect.arrayContaining(['Bash', 'Write', 'WebFetch', 'WebSearch']))
-    expect(JSON.stringify(settings)).not.toContain('deepseek.com')
-  })
-})
-
-describe('one-shot provider key fd', () => {
-  it('reads one line, closes the inherited fd, and rejects empty, multiline, and invalid descriptors', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'oma-provider-fd-'))
-    const validPath = join(directory, 'valid')
-    await writeFile(validPath, `${FAKE_KEY}\n`, { mode: 0o600 })
-    const validFd = openSync(validPath, 'r')
-    expect(readProviderKeyFromFd(String(validFd))).toBe(FAKE_KEY)
-    expect(() => fstatSync(validFd)).toThrow()
-
-    for (const [name, value, message] of [
-      ['empty', '', /empty/],
-      ['multiline', `${FAKE_KEY}\nsecond\n`, /one line/],
-    ] as const) {
-      const path = join(directory, name)
-      await writeFile(path, value, { mode: 0o600 })
-      const fd = openSync(path, 'r')
-      expect(() => readProviderKeyFromFd(String(fd))).toThrow(message)
-      expect(() => fstatSync(fd)).toThrow()
-    }
-    expect(() => readProviderKeyFromFd('not-an-fd')).toThrow(/integer/)
-    expect(() => readProviderKeyFromFd('2')).toThrow(/allowed range/)
-  })
-})
-
-describe('production OMA Claude Code backend', () => {
-  it('reuses the canary settings and stream parser for one bounded coding run', async () => {
-    const fixture = await repoFixture('success')
-    const contractPath = join(fixture.harnessDir, 'production-contract.json')
-    await writeFile(contractPath, JSON.stringify({
-      schemaVersion: 1,
-      contract: 'oma-maintainer-claude-code-backend-v1',
-      baseSha: fixture.baseSha,
-      allowedPaths: [BASE_FILE],
-      protectedPaths: ['.git', '.github', 'AGENTS.md'],
-      model: 'deepseek-v4-flash',
-      claudeCodeVersion: '2.1.220',
-      limits: { timeoutMs: 5_000, maxTurns: 20, maxProcessOutputBytes: 100_000 },
-    }))
-    const prompt = JSON.stringify({
-      issueNumber: 491,
-      title: 'Cover executable subpath exports',
-      problem: 'The smoke test misses source barrels.',
-      currentBehavior: 'Missing barrels are not imported.',
-      expectedBehavior: 'Every executable barrel is covered.',
-      reproductionSteps: ['Run the focused subpath export test.'],
-      acceptanceCriteria: ['The focused test covers every executable barrel.'],
-      targetPaths: [BASE_FILE],
-      outOfScope: ['Public API changes.'],
-    })
-    const result = await runProductionClaudeCodeBackend({
-      contractPath,
-      repoRoot: fixture.root,
-      prompt,
-      deepSeekApiKey: FAKE_KEY,
-      sourceEnvironment: { PATH: process.env['PATH'] },
-      claudeCommand: process.execPath,
-      claudeArgsPrefix: [fixture.harnessScript],
-    })
-    expect(result).toEqual({ turns: 4, terminationReason: 'success', safeEventCount: 3 })
-    const capture = JSON.parse(await readFile(fixture.capturePath, 'utf8'))
-    expect(capture.settings.permissions.allow.some((value: string) => value.endsWith(`${fixture.root}/${BASE_FILE})`))).toBe(true)
-    expect(capture.settings.permissions.deny).toEqual(expect.arrayContaining(['Bash', 'WebFetch', 'Task']))
-    expect(capture.scrub).toBe('1')
-    expect(JSON.parse(capture.prompt)).toMatchObject({
-      title: 'Cover executable subpath exports',
-      reproductionSteps: ['Run the focused subpath export test.'],
-    })
-  })
-
-  it('removes the production provider credential from the adapter process environment', () => {
-    const environment = { DEEPSEEK_API_KEY: FAKE_KEY, PATH: '/bin' }
-    expect(takeProductionProviderKey(environment)).toBe(FAKE_KEY)
-    expect(environment).not.toHaveProperty('DEEPSEEK_API_KEY')
-  })
-})
-
 describe('fail-closed deterministic validation sandbox', () => {
-  it('runs the production validation contract only through a disposable fixed Bubblewrap invocation', async () => {
-    const fixture = await repoFixture('success')
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
-    await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE], fixture.baseSha)
-    const runner = new StrictMockValidationSandboxRunner()
-    const results = await runProductionSandboxValidation({
-      contract: productionValidationContract(fixture.baseSha, candidate, diff),
-      repoRoot: fixture.root,
-      sandboxProcessRunner: runner,
-      sourceEnvironment: { PATH: process.env['PATH'] },
-    })
-    expect(results).toHaveLength(1)
-    expect(results[0]).toMatchObject({ id: 'focused-subpath-test', success: true })
-    expect(runner.invocations).toHaveLength(1)
-    expect(runner.invocations[0]).toMatchObject({ command: '/usr/bin/bwrap', options: { env: {} } })
-    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
-  })
-
-  it('preserves a #501-shaped two-hunk patch across disposable validation', async () => {
-    const fixture = await repoFixture('success')
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    const candidate = original
-      .replace("import test from 'node:test'", "import test from 'node:test' // first distant edit")
-      .replace('// TODO missing barrels', "assert.ok('/observability') // second distant edit")
-    await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE], fixture.baseSha)
-    expect(diff.match(/^@@/gm)).toHaveLength(2)
-
-    const results = await runProductionSandboxValidation({
-      contract: productionValidationContract(fixture.baseSha, candidate, diff),
-      repoRoot: fixture.root,
-      sandboxProcessRunner: new StrictMockValidationSandboxRunner(),
-      sourceEnvironment: { PATH: process.env['PATH'] },
-    })
-
-    expect(results).toHaveLength(1)
-    expect(results[0]).toMatchObject({ id: 'focused-subpath-test', success: true })
-    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
-  })
-
-  it('fails closed without host fallback and discards ordinary sandbox side effects', async () => {
-    const fixture = await repoFixture('success')
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
-    await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
-    const contract = productionValidationContract(fixture.baseSha, candidate, diff)
-    await expect(runProductionSandboxValidation({
-      contract,
-      repoRoot: fixture.root,
-      sandboxProcessRunner: new StrictMockValidationSandboxRunner(true),
-      sourceEnvironment: { PATH: process.env['PATH'] },
-    })).rejects.toThrow(/Bubblewrap/)
-    const results = await runProductionSandboxValidation({
-      contract,
-      repoRoot: fixture.root,
-      sandboxProcessRunner: new StrictMockValidationSandboxRunner(false, undefined, undefined, async workspace => {
-        await mkdir(join(workspace, 'dist'), { recursive: true })
-        await writeFile(join(workspace, 'dist/host-pollution.txt'), 'blocked\n')
-      }),
-      sourceEnvironment: { PATH: process.env['PATH'] },
-    })
-    expect(results).toHaveLength(1)
-    expect(results[0]).toMatchObject({ success: true })
-    expect(await fileExists(join(fixture.root, 'dist/host-pollution.txt'))).toBe(false)
-    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
-  })
-
-  it('refuses to start production validation when a provider credential is present in its process environment', async () => {
-    const fixture = await repoFixture('success')
-    await expect(runProductionSandboxValidation({
-      contract: {},
-      repoRoot: fixture.root,
-      sourceEnvironment: { PATH: '/usr/bin', DEEPSEEK_API_KEY: 'must-not-leak' },
-    })).rejects.toThrow(/forbidden credentials/)
-  })
-
-  it('kills a multibyte output flood at the combined hard byte cap without retaining hostile output', async () => {
-    const runner = new BoundedProcessRunner()
-    const marker = '界'.repeat(512)
-    const execution = runner.run(process.execPath, ['--eval', `const marker=${JSON.stringify(marker)}; setInterval(() => { process.stdout.write(marker); process.stderr.write(marker) }, 0); process.on('SIGTERM', () => {})`], {
-      cwd: process.cwd(),
-      env: {},
-      timeoutMs: 5_000,
-      maxOutputBytes: 1_024,
-    })
-    const error = await execution.catch(value => value as unknown)
-    expect(error).toMatchObject({ reason: 'OUTPUT_LIMIT' })
-    expect(String(error)).not.toContain(marker)
-  }, 10_000)
-
-  it('escalates timeout from TERM to KILL when a child ignores SIGTERM and still converges', async () => {
-    const runner = new BoundedProcessRunner()
-    const startedAt = Date.now()
-    await expect(runner.run(process.execPath, ['--eval', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], {
-      cwd: process.cwd(),
-      env: {},
-      timeoutMs: 50,
-      maxOutputBytes: 10_000,
-    })).rejects.toMatchObject({ reason: 'TIMEOUT' })
-    expect(Date.now() - startedAt).toBeLessThan(4_000)
-  }, 10_000)
-
-  it('reports a stable OS error code when Bubblewrap cannot be spawned', async () => {
-    const runner = new BoundedProcessRunner()
-    await expect(runner.run('/definitely-not-an-oma-command', [], {
-      cwd: process.cwd(),
-      env: {},
-      timeoutMs: 1_000,
-      maxOutputBytes: 10_000,
-    })).rejects.toMatchObject({ reason: 'SPAWN_ERROR', osErrorCode: 'ENOENT' })
-  })
-
-  it('builds the disposable snapshot from tracked base plus the exact candidate patch only', async () => {
-    const fixture = await repoFixture('success')
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
-    await writeFile(join(fixture.root, BASE_FILE), candidate)
-    await writeFile(join(fixture.root, 'ignored-host.txt'), 'ignored host state\n')
-    await writeFile(join(fixture.root, 'untracked-host.txt'), 'untracked host state\n')
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
-    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
-    const workspace = await createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [BASE_FILE],
-      candidateDiff: diff,
-      maxFileBytes: 20_000,
-      parentDir: parent,
-    })
-    expect(await readFile(join(workspace.repoRoot, BASE_FILE), 'utf8')).toBe(candidate)
-    expect(await readFile(workspace.resolverHostsPath, 'utf8')).toBe(VALIDATION_HOSTS)
-    expect(await readFile(workspace.resolverNsswitchPath, 'utf8')).toBe(VALIDATION_NSSWITCH)
-    expect(await fileExists(join(workspace.repoRoot, 'ignored-host.txt'))).toBe(false)
-    expect(await fileExists(join(workspace.repoRoot, 'untracked-host.txt'))).toBe(false)
-    expect((await exec('git', ['rev-parse', 'HEAD'], { cwd: workspace.repoRoot })).stdout.trim()).toBe(fixture.baseSha)
-    expect(await canonicalDiff(workspace.repoRoot, [BASE_FILE])).toBe(diff)
-    await cleanupValidationWorkspace(workspace)
-    expect(await readdir(parent)).toEqual([])
-  })
-
-  it('mounts only a disposable workspace writable while Git metadata and dependencies stay read-only', async () => {
-    const fixture = await repoFixture('success')
-    const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    await writeFile(join(fixture.root, BASE_FILE), original.replace('// TODO missing barrels', "assert.ok('/observability')"))
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
-    const workspace = await createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [BASE_FILE],
-      candidateDiff: diff,
-      maxFileBytes: 20_000,
-    })
-    try {
-      const invocation = await buildValidationSandboxInvocation({
-        workspaceRoot: workspace.repoRoot,
-        dependencyRoot: workspace.dependencyRoot,
-        resolverHostsPath: workspace.resolverHostsPath,
-        resolverNsswitchPath: workspace.resolverNsswitchPath,
-        command,
-      })
-      const canonicalWorkspace = await realpath(workspace.repoRoot)
-      const canonicalOriginal = await realpath(fixture.root)
-      expect(invocation.command).toBe('/usr/bin/bwrap')
-      expect(invocation.cwd).toBe('/')
-      expect(invocation.env).toEqual({})
-      expect(invocation.args).toEqual(expect.arrayContaining([
-        '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
-        '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev',
-        '--cap-drop', 'ALL',
-        '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
-        '--dir', '/etc',
-        '--ro-bind', workspace.resolverHostsPath, '/etc/hosts',
-        '--ro-bind', workspace.resolverNsswitchPath, '/etc/nsswitch.conf',
-        '--bind', canonicalWorkspace, '/workspace',
-        '--ro-bind', join(canonicalWorkspace, '.git'), '/workspace/.git',
-        '--ro-bind', workspace.dependencyRoot, '/workspace/node_modules',
-        '--chdir', '/workspace',
-      ]))
-      expect(invocation.args).not.toEqual(expect.arrayContaining(['--bind', canonicalOriginal, '/workspace']))
-      expect(invocation.args).not.toEqual(expect.arrayContaining(['--ro-bind', canonicalOriginal, '/workspace']))
-      expect(invocation.args).not.toContain(fixture.artifactDir)
-      expect(invocation.args).not.toContain(fixture.harnessDir)
-      expect(invocation.args).not.toContain(process.env['HOME'])
-      expect(invocation.args).not.toContain(process.env['RUNNER_TEMP'])
-      expect(invocation.args).not.toContain('/etc/resolv.conf')
-      expect(await readlink(join(workspace.dependencyRoot, '@open-multi-agent/core'))).toBe('../../packages/core')
-    } finally {
-      await cleanupValidationWorkspace(workspace)
-    }
-  })
-
-  it('uses a fresh production snapshot per command and discards Vitest cache and build output', async () => {
-    const fixture = await repoFixture('success')
-    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
-    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
-    await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
-    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
-    const baseContract = productionValidationContract(fixture.baseSha, candidate, diff)
-    const first = baseContract.validationCommands[0]!
-    const workspaceRoots: string[] = []
-    const runner = new StrictMockValidationSandboxRunner(false, undefined, undefined, async workspaceRoot => {
-      const vitestCache = join(workspaceRoot, 'packages/otel/node_modules/.vite/vitest/results.json')
-      const buildOutput = join(workspaceRoot, 'packages/otel/dist/index.js')
-      if (workspaceRoots.length > 0) {
-        expect(await fileExists(vitestCache)).toBe(false)
-        expect(await fileExists(buildOutput)).toBe(false)
-      }
-      workspaceRoots.push(workspaceRoot)
-      await mkdir(join(workspaceRoot, 'packages/otel/node_modules/.vite/vitest'), { recursive: true })
-      await mkdir(join(workspaceRoot, 'packages/otel/dist'), { recursive: true })
-      await writeFile(vitestCache, '{"passed":true}\n')
-      await writeFile(buildOutput, 'export {}\n')
-    })
-    const results = await runProductionSandboxValidation({
-      contract: {
-        ...baseContract,
-        validationCommands: [
-          { ...first, id: 'otel-test' },
-          { ...first, id: 'otel-build' },
-        ],
-      },
-      repoRoot: fixture.root,
-      sandboxProcessRunner: runner,
-      workspaceParentDir: parent,
-      sourceEnvironment: { PATH: process.env['PATH'] },
-    })
-
-    expect(results.map(result => result.id)).toEqual(['otel-test', 'otel-build'])
-    expect(new Set(workspaceRoots).size).toBe(2)
-    expect(await readdir(parent)).toEqual([])
-    expect(await fileExists(join(fixture.root, 'packages/otel/node_modules/.vite/vitest/results.json'))).toBe(false)
-    expect(await fileExists(join(fixture.root, 'packages/otel/dist/index.js'))).toBe(false)
-  })
-
-  it('rejects policy attempts to override protected or credential environment names', async () => {
-    const fixture = await repoFixture('success')
-    const validCommand = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
-    for (const env of [{ HOME: '/host' }, { ACTIONS_RUNTIME_TOKEN: 'bad' }]) {
-      const command = { ...validCommand, env }
-      await expect(buildValidationSandboxInvocation({
-        workspaceRoot: fixture.root,
-        dependencyRoot: join(fixture.root, 'node_modules'),
-        resolverHostsPath: join(fixture.root, 'package.json'),
-        resolverNsswitchPath: join(fixture.root, 'package.json'),
-        command,
-      })).rejects.toThrow(/environment/)
-    }
-  })
-
-  it('fails closed before launch when fixed resolver policy files are changed', async () => {
-    const fixture = await repoFixture('success')
-    const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
-    const workspace = await createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [],
-      candidateDiff: '',
-      maxFileBytes: 20_000,
-    })
-    try {
-      await writeFile(workspace.resolverHostsPath, '127.0.0.1 attacker.invalid\n')
-      await expect(buildValidationSandboxInvocation({
-        workspaceRoot: workspace.repoRoot,
-        dependencyRoot: workspace.dependencyRoot,
-        resolverHostsPath: workspace.resolverHostsPath,
-        resolverNsswitchPath: workspace.resolverNsswitchPath,
-        command,
-      })).rejects.toThrow('fixed loopback policy')
-    } finally {
-      await cleanupValidationWorkspace(workspace)
-    }
-  })
-
-  it('fails closed without host fallback when Bubblewrap cannot start', async () => {
-    const fixture = await repoFixture('success')
-    await expect(runFixture(fixture, {
-      validationSandboxProcessRunner: new StrictMockValidationSandboxRunner(true),
-    })).rejects.toThrow('VALIDATION_SANDBOX_UNAVAILABLE')
-    const artifact = await expectFailedArtifact(fixture, 'VALIDATION_SANDBOX_UNAVAILABLE')
-    expect(artifact.validationResults).toEqual([])
-  })
-
-  it('emits bounded, redacted, machine-readable preflight evidence for the hosted failure path', async () => {
-    const fixture = await repoFixture('success')
-    const runner: SandboxProcessRunner = {
-      async run() {
-        return {
-          stdout: `checkout=${fixture.root}\n`,
-          stderr: `bwrap: setting up uid map: Permission denied\ntoken=unsafe-value\n/home/runner/private\n${'界'.repeat(1_000)}`,
-          exitCode: 1,
-        }
-      },
-    }
-    const error = await preflightValidationSandbox({ repoRoot: fixture.root, runner })
-      .catch(value => value as unknown)
-    expect(error).toBeInstanceOf(ValidationSandboxPreflightError)
-    expect(error).toMatchObject({
-      diagnostic: {
-        status: 'SANDBOX_UNAVAILABLE',
-        reasonCode: 'BWRAP_EXIT_NONZERO',
-        exitCode: 1,
-        osErrorCode: null,
-        stdout: 'checkout=<repo>',
-      },
-    })
-    const diagnostic = (error as ValidationSandboxPreflightError).diagnostic
-    expect(diagnostic.stderr).toContain('Permission denied')
-    expect(diagnostic.stderr).toContain('[REDACTED]')
-    expect(diagnostic.stderr).not.toContain('unsafe-value')
-    expect(diagnostic.stderr).not.toContain('/home/runner')
-    expect(diagnostic.stderr.endsWith('<truncated>')).toBe(true)
-    expect(Buffer.byteLength(diagnostic.stderr)).toBeLessThanOrEqual(2_013)
-    expect(JSON.parse(JSON.stringify(diagnostic))).toEqual(diagnostic)
-  })
-
-  it('preflights disposable source and cache writes, then discards the entire snapshot', async () => {
-    const fixture = await repoFixture('success')
-    const parent = await mkdtemp(join(tmpdir(), 'oma-preflight-parent-'))
-    const runner = new StrictMockValidationSandboxRunner()
-    await preflightValidationSandbox({
-      repoRoot: fixture.root,
-      runner,
-      workspaceParentDir: parent,
-    })
-    expect(runner.viteTemporaryWorkspaces).toHaveLength(1)
-    const preflightInvocation = runner.invocations[0]!
-    expect(preflightInvocation.args.some(value => value.includes("lookup('localhost', { all: true })"))).toBe(true)
-    expect(preflightInvocation.args.some(value => value.includes('.oma-validation-preflight-cache'))).toBe(true)
-    expect(preflightInvocation.args).not.toContain('--size')
-    expect(runner.viteTemporaryWorkspaces[0]).not.toBe(await realpath(fixture.root))
-    expect((await readdir(join(fixture.root, 'packages/core'))).some(name => name.includes('.timestamp-'))).toBe(false)
-    expect(await fileExists(join(fixture.root, '.oma-validation-preflight-cache/output.txt'))).toBe(false)
-    expect(await readdir(parent)).toEqual([])
-  })
-
   it('fails closed when Bubblewrap starts but its sandbox setup exits nonzero', async () => {
     const fixture = await repoFixture('success')
     await expect(runFixture(fixture, {
@@ -1083,6 +600,7 @@ describe('Issue #491 mock success path and artifact integrity', () => {
     expect(artifact.allowedPaths).toEqual([BASE_FILE])
     expect(artifact.changedPaths).toEqual([BASE_FILE])
     expect(artifact.validationResults[0]?.success).toBe(true)
+    expect(artifact.validationResults[0]).not.toHaveProperty('environment')
     expect(artifact.turns).toBe(4)
     expect(verifyArtifactHash(artifact)).toBe(true)
     const patch = await readFile(join(fixture.artifactDir, 'change.patch'), 'utf8')
@@ -1117,7 +635,7 @@ describe('Issue #491 mock success path and artifact integrity', () => {
   }, 15_000)
 
   it('does not persist arbitrary event labels that could contain secrets', async () => {
-    const { parseHarnessStream } = await import('../src/runner.js')
+    const { parseHarnessStream } = await import('@open-multi-agent/maintainer-runtime')
     const summary = parseHarnessStream([
       JSON.stringify({ type: FAKE_KEY, subtype: FAKE_KEY }),
       JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 1 }),
@@ -1126,21 +644,6 @@ describe('Issue #491 mock success path and artifact integrity', () => {
     expect(summary.events).toContain('unknown')
   })
 })
-
-function productionValidationContract(baseSha: string, candidate: string, candidateDiff: string) {
-  return {
-    schemaVersion: 1,
-    contract: 'oma-maintainer-sandbox-validation-v1',
-    baseSha,
-    changedFiles: [{
-      path: BASE_FILE,
-      contentHash: createHash('sha256').update(candidate).digest('hex'),
-    }],
-    candidateDiff,
-    validationCommands: prepareCanaryRequest({ ...snapshot(), baseSha }, policy()).validationCommands,
-    limits: { maxFileBytes: 20_000, maxValidationOutputBytes: 100_000 },
-  }
-}
 
 async function repoFixture(mode: string, terminalEvents?: readonly Record<string, unknown>[]) {
   const root = await mkdtemp(join(tmpdir(), 'oma-harness-test-'))
@@ -1262,8 +765,4 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-async function canonicalDiff(repoRoot: string, paths: readonly string[], baseSha?: string): Promise<string> {
-  return (await exec('git', canonicalGitDiffArgs({ baseSha, paths }), { cwd: repoRoot })).stdout
 }

@@ -42,6 +42,7 @@
       "worktreeHead",
       "worktreeChangedPaths",
       "worktreeAfterHashes",
+      "validatedCandidateDiff",
       "reviewerAcceptance"
     ],
     "prohibitedActions": [

@@ -1,25 +1,10 @@
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { NodeCommandRunner } from '@open-multi-agent/maintainer-bot'
-import { z } from 'zod'
+import { readMaintainerRuntimeCodingContract } from './artifacts.js'
 import { buildHarnessEnvironment } from './environment.js'
-import { buildHarnessArgs, buildHarnessSettings, spawnHarness } from './runner.js'
-
-const productionContractSchema = z.object({
-  schemaVersion: z.literal(1),
-  contract: z.literal('oma-maintainer-claude-code-backend-v1'),
-  baseSha: z.string().regex(/^[0-9a-f]{40}$/),
-  allowedPaths: z.array(z.string().min(1).max(500)).min(1).max(100),
-  protectedPaths: z.array(z.string().min(1).max(500)).max(100),
-  model: z.literal('deepseek-v4-flash'),
-  claudeCodeVersion: z.literal('2.1.220'),
-  limits: z.object({
-    timeoutMs: z.number().int().positive().max(45 * 60_000),
-    maxTurns: z.number().int().positive().max(50),
-    maxProcessOutputBytes: z.number().int().positive().max(10_000_000),
-  }),
-})
+import { buildHarnessArgs, buildHarnessSettings, spawnHarness } from './claude-code.js'
 
 export function takeProductionProviderKey(environment: NodeJS.ProcessEnv): string {
   const name = 'DEEPSEEK_API_KEY'
@@ -40,9 +25,7 @@ export async function runProductionClaudeCodeBackend(options: {
   readonly claudeArgsPrefix?: readonly string[]
 }): Promise<{ turns: number; terminationReason: string; safeEventCount: number }> {
   if (Buffer.byteLength(options.prompt) > 200_000) throw new Error('OMA coding prompt exceeds the production harness limit.')
-  const contract = productionContractSchema.parse(
-    JSON.parse(await readFile(resolve(options.contractPath), 'utf8')),
-  )
+  const contract = await readMaintainerRuntimeCodingContract(resolve(options.contractPath))
   const repoRoot = resolve(options.repoRoot)
   const runner = new NodeCommandRunner()
   const [head, status] = await Promise.all([
@@ -64,7 +47,7 @@ export async function runProductionClaudeCodeBackend(options: {
     repoRoot,
     artifactDir,
     controlDir,
-    allowedPaths: contract.allowedPaths,
+    allowedScopes: contract.allowedScopes,
   })
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
   const environment = buildHarnessEnvironment({
@@ -78,17 +61,11 @@ export async function runProductionClaudeCodeBackend(options: {
       prefix: options.claudeArgsPrefix,
       settingsPath,
       repoRoot,
-      allowedPaths: contract.allowedPaths,
+      allowedScopes: contract.allowedScopes,
       policy: {
         model: contract.model,
         limits: {
-          wallClockMs: contract.limits.timeoutMs,
           maxTurns: contract.limits.maxTurns,
-          maxChangedFiles: contract.allowedPaths.length,
-          maxDiffBytes: 500_000,
-          maxFileBytes: 500_000,
-          maxProcessOutputBytes: contract.limits.maxProcessOutputBytes,
-          maxValidationOutputBytes: 1,
         },
       },
     }),

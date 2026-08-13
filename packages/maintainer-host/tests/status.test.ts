@@ -38,6 +38,8 @@ describe('single trusted BOT status comment', () => {
   it('accepts the GraphQL App slug actor form and ignores user and github-actions marker forgeries', async () => {
     const body = renderStatusComment(metadata(), 'Running deterministic checks.')
     expect(parseStatusComment(body)).toMatchObject({ status: 'RUNNING', runKey: 'c'.repeat(64) })
+    expect(body).toContain('OMA Maintainer Bot — STARTED')
+    expect(body).not.toContain('OMA Maintainer Bot — RUNNING')
     const forged = { ...botComment(1, body), user: { id: 99, login: 'attacker', type: 'User' } }
     const actionsForgery = githubActionsComment(2, body)
     const trusted = botComment(3, body)
