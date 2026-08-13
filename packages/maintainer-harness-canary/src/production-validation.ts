@@ -15,10 +15,9 @@ import { z } from 'zod'
 import type { SandboxProcessRunner } from './bounded-process.js'
 import { runValidationInSandbox } from './validation-sandbox.js'
 import {
-  assertValidationWorkspaceIntegrity,
+  assertValidationWorkspaceCandidate,
   cleanupValidationWorkspace,
   createValidationWorkspace,
-  type ValidationWorkspace,
 } from './validation-workspace.js'
 
 export const productionValidationContractSchema = z.object({
@@ -52,19 +51,17 @@ export async function runProductionSandboxValidation(options: {
   const repoRoot = await realpath(resolve(options.repoRoot))
   await assertSourceCandidate(repoRoot, contract)
 
-  let workspace: ValidationWorkspace | undefined
-  try {
-    workspace = await createValidationWorkspace({
+  const results: ValidationResult[] = []
+  for (const command of contract.validationCommands) {
+    const workspace = await createValidationWorkspace({
       sourceRepoRoot: repoRoot,
       baseSha: contract.baseSha,
       changedPaths: contract.changedFiles.map(file => file.path),
       candidateDiff: contract.candidateDiff,
       maxFileBytes: contract.limits.maxFileBytes,
-      scratchPaths: contract.validationCommands.flatMap(command => command.scratchPaths),
       parentDir: options.workspaceParentDir,
     })
-    const results: ValidationResult[] = []
-    for (const command of contract.validationCommands) {
+    try {
       const startedAt = Date.now()
       const result = await runValidationInSandbox({
         workspaceRoot: workspace.repoRoot,
@@ -91,13 +88,13 @@ export async function runProductionSandboxValidation(options: {
           unset: [...command.unsetEnv].sort(),
         },
       }))
+      await assertValidationWorkspaceCandidate(workspace, contract.limits.maxFileBytes)
+    } finally {
+      await cleanupValidationWorkspace(workspace)
     }
-    await assertValidationWorkspaceIntegrity(workspace, contract.limits.maxFileBytes)
-    await assertSourceCandidate(repoRoot, contract)
-    return results
-  } finally {
-    if (workspace !== undefined) await cleanupValidationWorkspace(workspace)
   }
+  await assertSourceCandidate(repoRoot, contract)
+  return results
 }
 
 async function assertSourceCandidate(

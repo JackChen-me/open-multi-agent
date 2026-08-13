@@ -47,27 +47,13 @@ describe('validation command schema', () => {
     })).toThrow(/credential-like/)
   })
 
-  it('accepts only distinct canonical scratch directories outside protected roots', () => {
-    expect(validationCommandSchema.parse({
-      id: 'otel-build', command: 'npm', args: ['run', 'build'],
-      scratchPaths: ['packages/otel/dist'],
-    }).scratchPaths).toEqual(['packages/otel/dist'])
+  it('rejects removed scratch-path exceptions and other unknown command controls', () => {
     expect(validationCommandSchema.parse({
       id: 'no-output', command: 'git', args: ['diff', '--check'],
-    }).scratchPaths).toEqual([])
-
-    for (const scratchPaths of [
-      ['packages/otel/dist', 'packages/otel/dist'],
-      ['packages/otel', 'packages/otel/dist'],
-      ['../outside'],
-      ['packages//otel/dist'],
-      ['.git/output'],
-      ['node_modules/cache'],
-      ['.env'],
-    ]) {
-      expect(() => validationCommandSchema.parse({
-        id: 'unsafe-output', command: 'npm', args: ['run', 'build'], scratchPaths,
-      })).toThrow(/scratch path/)
-    }
+    })).not.toHaveProperty('scratchPaths')
+    expect(() => validationCommandSchema.parse({
+      id: 'otel-build', command: 'npm', args: ['run', 'build'],
+      scratchPaths: ['packages/otel/dist'],
+    })).toThrow(/Unrecognized key/)
   })
 })

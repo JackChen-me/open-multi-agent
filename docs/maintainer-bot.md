@@ -109,15 +109,14 @@ backend never falls through to the other backend.
    edit capability. The model has no filesystem or shell tool.
 6. Legacy runs execute every preregistered validation command as argv with
    `shell: false` and a credential-stripped environment. Claude runs pass the
-   already scope-checked candidate to the shared canary validation CLI, which
-   rebuilds base plus the exact patch in a disposable snapshot and executes all
-   trusted commands only through fail-closed `/usr/bin/bwrap`, with no host
-   fallback. Trusted build commands may declare canonical, ignored scratch
-   directories; each is overmounted by a bounded 64 MiB `tmpfs` for that one
-   command and disappears before workspace-integrity checks. The production
-   preflight verifies this isolation on the runner. Candidate capture and
-   disposable-workspace integrity checks use the same fixed Git diff format
-   before comparing the patch byte for byte.
+   already scope-checked candidate to the shared canary validation runtime.
+   For each trusted command, the runtime creates a new disposable snapshot,
+   rebuilds the pinned base plus the exact frozen patch, executes that one
+   command only through fail-closed `/usr/bin/bwrap`, rechecks the tracked
+   candidate, and discards the entire snapshot. Commands never share a writable
+   checkout, so ordinary test caches and build output cannot contaminate the
+   next command or the candidate checkout. The production preflight verifies
+   this isolation on the runner, with no host fallback.
 7. A new OMA team and agent perform fresh-context review using only confirmed
    requirements, acceptance criteria, the final diff, validation evidence,
    bounded current-file snapshots, and relevant context. Implementer reasoning
@@ -343,12 +342,12 @@ best effort.
 Validation commands come only from trusted configuration. Issue or model text
 cannot choose an executable, argv, cwd, or timeout. All registered commands
 run, results and skipped checks are recorded, and failed or truncated evidence
-blocks proposal eligibility. A validation scratch path must be absent from the
-pinned candidate, ignored by that checkout, outside protected roots, and an
-empty regular-directory mountpoint. Undeclared or persistent output still fails
-the full filesystem manifest check. On the Claude path, the actual candidate
-checkout is never mounted as the validation workspace, and validation-created
-tracked or ignored side effects cannot flow back into it. The current-file repair snapshots are non-symlink
+blocks proposal eligibility. On the Claude path, each command receives a fresh
+copy of the pinned base plus the same frozen candidate patch. The actual
+candidate checkout is never mounted as the validation workspace; every command
+copy is removed in a `finally` path, so validation-created tracked, ignored, or
+untracked side effects cannot reach another command or the final Draft PR. The
+current-file repair snapshots are non-symlink
 regular files, path checked, per-file bounded, and capped at 180 KB total.
 
 DeepSeek inference is remote. The minimum relevant public-repository context —

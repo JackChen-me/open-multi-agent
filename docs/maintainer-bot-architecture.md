@@ -11,7 +11,7 @@ autonomous-maintenance platform.
 | Control and write plane | deterministic `@open-multi-agent/maintainer-host` | exact label/event admission, App identity and repository-scope verification, durable claim/idempotency, concurrency, base/revision pinning, target-path authority, status, final safe-output revalidation, branch/commit/push, and at most one Draft PR | model reasoning, repository coding, approval, merge, release, or publication |
 | Orchestration plane | OMA in `@open-multi-agent/maintainer-bot` | admitted task sequencing, global timeout and budgets, coding-worker dispatch, deterministic validation boundary, fresh independent review, state/artifact handoff, and bounded diagnostics | hold GitHub/npm/SSH credentials, grant authorization, or create a PR |
 | Coding execution plane | Claude Code with DeepSeek | dynamically read the checked-out repository, edit only the exact authorized paths, and return bounded completion evidence as the OMA coding worker | GitHub lifecycle actions, network tools, shell, delegation, commits, branches, pushes, validation claims, or credentials other than its provider key |
-| Validation plane | deterministic canary harness contract | reject unsafe status/path/file/diff output, rebuild base plus the exact candidate patch in a disposable snapshot, and run preregistered argv only through fixed fail-closed Bubblewrap; bind the reviewed diff and file hashes to the proposal | run Claude-path validation on the host checkout, fall back when sandbox setup fails, or let the model choose commands |
+| Validation plane | deterministic canary harness contract | reject unsafe status/path/file/diff output, rebuild base plus the exact candidate patch in a fresh disposable snapshot for each preregistered argv, and run it only through fixed fail-closed Bubblewrap; bind the reviewed diff and file hashes to the proposal | share writable validation state between commands, run Claude-path validation on the host checkout, fall back when sandbox setup fails, or let the model choose commands |
 | Decision plane | human maintainer | review ordinary PR CI and the Draft PR, then decide whether to merge | delegate merge authority to the bot |
 
 The GitHub App installation token is present only in the host `prepare` and
@@ -36,10 +36,12 @@ network, delegation, MCP, and out-of-scope edit capabilities remain denied.
    editor, or tool loop.
 5. Deterministic code inspects the actual worktree and rejects deletion, rename,
    symlink, size, protected-path, or target-scope violations before writing a
-   bounded validation contract. The shared canary harness rebuilds the pinned
-   base plus that exact patch in a disposable clone and runs every trusted
-   command through fixed `/usr/bin/bwrap`; sandbox, resolver, snapshot, scope,
-   output, or integrity failure has no host fallback and produces no proposal.
+   bounded validation contract. The shared canary runtime rebuilds the pinned
+   base plus that exact patch in a fresh disposable clone for each trusted
+   command and runs that command through fixed `/usr/bin/bwrap`. The clone is
+   discarded before the next command, so caches and build output cannot cross
+   command boundaries; sandbox, resolver, snapshot, scope, output, or tracked
+   candidate-integrity failure has no host fallback and produces no proposal.
 6. OMA gives an independent reviewer only confirmed requirements, the final
    bounded diff/current files, and deterministic validation evidence. It does
    not receive the coding transcript.

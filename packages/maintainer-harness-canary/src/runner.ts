@@ -23,10 +23,9 @@ import {
 import { computeCanarySnapshotRevision, deriveValidationCommands } from './request.js'
 import { runValidationInSandbox, ValidationSandboxError } from './validation-sandbox.js'
 import {
-  assertValidationWorkspaceIntegrity,
+  assertValidationWorkspaceCandidate,
   cleanupValidationWorkspace,
   createValidationWorkspace,
-  type ValidationWorkspace,
 } from './validation-workspace.js'
 import {
   canaryArtifactSchema,
@@ -207,29 +206,20 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
       throw asFailure('scope_validation', 'SCOPE_VIOLATION', error)
     }
 
-    let validationWorkspace: ValidationWorkspace | undefined
     try {
       assertHostProviderIsolation(options)
       await assertArtifactDirectory(artifactDir, [])
-      validationWorkspace = await createValidationWorkspace({
+      validationResults = await runValidations({
+        commands: request.validationCommands,
         sourceRepoRoot: repoRoot,
         baseSha: request.baseSha,
         changedPaths,
         candidateDiff: diff,
         maxFileBytes: policy.limits.maxFileBytes,
-        scratchPaths: request.validationCommands.flatMap(command => command.scratchPaths),
-        parentDir: options.validationWorkspaceParentDir,
-      })
-      validationResults = await runValidations({
-        commands: request.validationCommands,
-        workspaceRoot: validationWorkspace.repoRoot,
-        dependencyRoot: validationWorkspace.dependencyRoot,
-        resolverHostsPath: validationWorkspace.resolverHostsPath,
-        resolverNsswitchPath: validationWorkspace.resolverNsswitchPath,
+        workspaceParentDir: options.validationWorkspaceParentDir,
         maxOutputBytes: policy.limits.maxValidationOutputBytes,
         sandboxProcessRunner: options.validationSandboxProcessRunner,
       })
-      await assertValidationWorkspaceIntegrity(validationWorkspace, policy.limits.maxFileBytes)
       if (validationResults.some(result => !result.success || result.truncated)) {
         throw new Error('One or more trusted canary validations failed or produced truncated evidence.')
       }
@@ -256,8 +246,6 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
         throw new CanaryFailure('deterministic_validation', reasonCode, error.message)
       }
       throw asFailure('deterministic_validation', 'VALIDATION_FAILED', error)
-    } finally {
-      if (validationWorkspace !== undefined) await cleanupValidationWorkspace(validationWorkspace)
     }
 
     const durationMs = Math.max(0, now() - startedAt)
@@ -706,40 +694,55 @@ function parseAndValidateStatus(value: string, request: CanaryRequest, policy: C
 
 async function runValidations(options: {
   readonly commands: readonly ValidationCommand[]
-  readonly workspaceRoot: string
-  readonly dependencyRoot: string
-  readonly resolverHostsPath: string
-  readonly resolverNsswitchPath: string
+  readonly sourceRepoRoot: string
+  readonly baseSha: string
+  readonly changedPaths: readonly string[]
+  readonly candidateDiff: string
+  readonly maxFileBytes: number
+  readonly workspaceParentDir?: string
   readonly maxOutputBytes: number
   readonly sandboxProcessRunner?: SandboxProcessRunner
 }) {
   const results = []
   for (const command of options.commands) {
-    const startedAt = Date.now()
-    await resolveValidationCwd(options.workspaceRoot, command.cwd)
-    const result = await runValidationInSandbox({
-      workspaceRoot: options.workspaceRoot,
-      dependencyRoot: options.dependencyRoot,
-      resolverHostsPath: options.resolverHostsPath,
-      resolverNsswitchPath: options.resolverNsswitchPath,
-      command,
-      maxOutputBytes: options.maxOutputBytes,
-      runner: options.sandboxProcessRunner,
+    const workspace = await createValidationWorkspace({
+      sourceRepoRoot: options.sourceRepoRoot,
+      baseSha: options.baseSha,
+      changedPaths: options.changedPaths,
+      candidateDiff: options.candidateDiff,
+      maxFileBytes: options.maxFileBytes,
+      parentDir: options.workspaceParentDir,
     })
-    // Resolve again after execution to defend against future command schema or cwd handling changes.
-    await resolveValidationCwd(options.workspaceRoot, command.cwd)
-    const stdout = sanitizeEvidence(result.stdout, options.workspaceRoot, options.maxOutputBytes)
-    const stderr = sanitizeEvidence(result.stderr, options.workspaceRoot, options.maxOutputBytes)
-    results.push({
-      id: command.id,
-      command: sanitizeEvidence(renderCommand(command.command, command.args), options.workspaceRoot, options.maxOutputBytes).text,
-      success: result.exitCode === 0,
-      exitCode: result.exitCode,
-      durationMs: Math.max(0, Date.now() - startedAt),
-      stdout: stdout.text,
-      stderr: stderr.text,
-      truncated: stdout.truncated || stderr.truncated,
-    })
+    try {
+      const startedAt = Date.now()
+      await resolveValidationCwd(workspace.repoRoot, command.cwd)
+      const result = await runValidationInSandbox({
+        workspaceRoot: workspace.repoRoot,
+        dependencyRoot: workspace.dependencyRoot,
+        resolverHostsPath: workspace.resolverHostsPath,
+        resolverNsswitchPath: workspace.resolverNsswitchPath,
+        command,
+        maxOutputBytes: options.maxOutputBytes,
+        runner: options.sandboxProcessRunner,
+      })
+      // Resolve again after execution to defend against future command schema or cwd handling changes.
+      await resolveValidationCwd(workspace.repoRoot, command.cwd)
+      await assertValidationWorkspaceCandidate(workspace, options.maxFileBytes)
+      const stdout = sanitizeEvidence(result.stdout, workspace.repoRoot, options.maxOutputBytes)
+      const stderr = sanitizeEvidence(result.stderr, workspace.repoRoot, options.maxOutputBytes)
+      results.push({
+        id: command.id,
+        command: sanitizeEvidence(renderCommand(command.command, command.args), workspace.repoRoot, options.maxOutputBytes).text,
+        success: result.exitCode === 0,
+        exitCode: result.exitCode,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        truncated: stdout.truncated || stderr.truncated,
+      })
+    } finally {
+      await cleanupValidationWorkspace(workspace)
+    }
   }
   return results
 }

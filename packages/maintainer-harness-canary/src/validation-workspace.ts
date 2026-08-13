@@ -1,11 +1,9 @@
-import { readFile, readdir, readlink, realpath, rm, lstat, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { readFile, realpath, rm, lstat, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 import {
   canonicalGitDiffArgs,
   NodeCommandRunner,
-  canonicalJson,
-  sha256,
 } from '@open-multi-agent/maintainer-bot'
 
 export interface ValidationWorkspace {
@@ -17,19 +15,10 @@ export interface ValidationWorkspace {
   readonly baseSha: string
   readonly changedPaths: readonly string[]
   readonly candidateDiff: string
-  readonly manifest: readonly WorkspaceManifestEntry[]
 }
 
 export const VALIDATION_HOSTS = '127.0.0.1 localhost\n'
 export const VALIDATION_NSSWITCH = 'hosts: files\n'
-
-interface WorkspaceManifestEntry {
-  readonly path: string
-  readonly type: 'directory' | 'file' | 'symlink'
-  readonly size?: number
-  readonly hash?: string
-  readonly target?: string
-}
 
 export async function createValidationWorkspace(options: {
   readonly sourceRepoRoot: string
@@ -37,7 +26,6 @@ export async function createValidationWorkspace(options: {
   readonly changedPaths: readonly string[]
   readonly candidateDiff: string
   readonly maxFileBytes: number
-  readonly scratchPaths?: readonly string[]
   readonly parentDir?: string
 }): Promise<ValidationWorkspace> {
   const sourceRepoRoot = await realpath(resolve(options.sourceRepoRoot))
@@ -65,17 +53,15 @@ export async function createValidationWorkspace(options: {
 
     if (options.candidateDiff.length > 0) {
       await writeFile(patchPath, options.candidateDiff, { mode: 0o600 })
+      await commandRunner.run('git', ['apply', '--check', '--binary', '--whitespace=nowarn', '--', patchPath], {
+        cwd: repoRoot,
+        env: gitEnvironment,
+      })
       await commandRunner.run('git', ['apply', '--binary', '--whitespace=nowarn', '--', patchPath], {
         cwd: repoRoot,
         env: gitEnvironment,
       })
     }
-    await prepareScratchMountpoints(
-      commandRunner,
-      repoRoot,
-      gitEnvironment,
-      options.scratchPaths ?? [],
-    )
     await mkdir(join(repoRoot, 'node_modules'))
     const dependencyRoot = await realpath(resolve(sourceRepoRoot, 'node_modules'))
     const workspace = {
@@ -87,9 +73,8 @@ export async function createValidationWorkspace(options: {
       baseSha: options.baseSha,
       changedPaths: [...options.changedPaths].sort(),
       candidateDiff: options.candidateDiff,
-      manifest: await buildWorkspaceManifest(repoRoot),
     }
-    await assertValidationWorkspaceIntegrity(workspace, options.maxFileBytes)
+    await assertValidationWorkspaceCandidate(workspace, options.maxFileBytes)
     return workspace
   } catch (error) {
     await rm(containerRoot, { recursive: true, force: true })
@@ -97,45 +82,7 @@ export async function createValidationWorkspace(options: {
   }
 }
 
-async function prepareScratchMountpoints(
-  commandRunner: NodeCommandRunner,
-  repoRoot: string,
-  environment: NodeJS.ProcessEnv,
-  scratchPaths: readonly string[],
-): Promise<void> {
-  for (const scratchPath of [...new Set(scratchPaths)].sort()) {
-    const absolute = resolveWorkspacePath(repoRoot, scratchPath)
-    try {
-      await lstat(absolute)
-      throw new Error('Validation scratch path must not already exist in the candidate snapshot.')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    }
-    await assertRegularDirectoryChain(repoRoot, scratchPath)
-    const ignored = await commandRunner.run(
-      'git',
-      ['check-ignore', '--quiet', '--no-index', '--', `${scratchPath}/`],
-      { cwd: repoRoot, env: environment, allowFailure: true },
-    )
-    if (ignored.exitCode !== 0) {
-      throw new Error('Validation scratch path must be ignored by the pinned repository checkout.')
-    }
-    await mkdir(absolute, { mode: 0o700 })
-  }
-}
-
-async function assertRegularDirectoryChain(repoRoot: string, scratchPath: string): Promise<void> {
-  const parts = scratchPath.split('/')
-  for (let index = 1; index < parts.length; index += 1) {
-    const parent = resolveWorkspacePath(repoRoot, parts.slice(0, index).join('/'))
-    const info = await lstat(parent)
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new Error('Validation scratch path parent must be a regular repository directory.')
-    }
-  }
-}
-
-export async function assertValidationWorkspaceIntegrity(
+export async function assertValidationWorkspaceCandidate(
   workspace: ValidationWorkspace,
   maxFileBytes: number,
 ): Promise<void> {
@@ -143,21 +90,21 @@ export async function assertValidationWorkspaceIntegrity(
   const gitEnvironment = validationGitEnvironment(workspace.containerRoot)
   await assertResolverIntegrity(workspace)
   await assertHead(commandRunner, workspace.repoRoot, gitEnvironment, workspace.baseSha)
-  const status = await commandRunner.run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+  const status = await commandRunner.run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=no'], {
     cwd: workspace.repoRoot,
     env: gitEnvironment,
   })
   const statusPaths = parseSnapshotStatus(status.stdout)
-  if (canonicalJson(statusPaths) !== canonicalJson([...workspace.changedPaths].sort())) {
-    throw new Error('Validation changed the disposable workspace path set.')
+  if (JSON.stringify(statusPaths) !== JSON.stringify([...workspace.changedPaths].sort())) {
+    throw new Error('Disposable validation workspace path set differs from the frozen candidate.')
   }
   for (const path of statusPaths) {
     const info = await lstat(resolveWorkspacePath(workspace.repoRoot, path))
     if (!info.isFile() || info.isSymbolicLink()) {
-      throw new Error('Disposable validation workspace contains a changed non-regular file.')
+      throw new Error('Disposable validation workspace candidate contains a changed non-regular file.')
     }
     if (info.size > maxFileBytes) {
-      throw new Error('Disposable validation workspace contains an oversized changed file.')
+      throw new Error('Disposable validation workspace candidate contains an oversized changed file.')
     }
   }
   const diff = statusPaths.length === 0
@@ -167,11 +114,7 @@ export async function assertValidationWorkspaceIntegrity(
         env: gitEnvironment,
       })).stdout
   if (diff !== workspace.candidateDiff) {
-    throw new Error('Validation changed the disposable workspace candidate patch.')
-  }
-  const manifest = await buildWorkspaceManifest(workspace.repoRoot)
-  if (canonicalJson(manifest) !== canonicalJson(workspace.manifest)) {
-    throw new Error('Validation left filesystem changes in the disposable workspace.')
+    throw new Error('Disposable validation workspace patch differs from the frozen candidate.')
   }
 }
 
@@ -229,37 +172,6 @@ function parseSnapshotStatus(value: string): string[] {
     paths.push(field.slice(3))
   }
   return [...new Set(paths)].sort()
-}
-
-async function buildWorkspaceManifest(repoRoot: string): Promise<WorkspaceManifestEntry[]> {
-  const entries: WorkspaceManifestEntry[] = []
-  await walk(repoRoot, '')
-  return entries.sort((left, right) => left.path.localeCompare(right.path))
-
-  async function walk(root: string, relativeRoot: string): Promise<void> {
-    const children = await readdir(root, { withFileTypes: true })
-    for (const child of children) {
-      if (relativeRoot.length === 0 && (child.name === '.git' || child.name === 'node_modules')) continue
-      const childRelative = relativeRoot.length === 0 ? child.name : `${relativeRoot}/${child.name}`
-      const childPath = join(root, child.name)
-      const info = await lstat(childPath)
-      if (info.isSymbolicLink()) {
-        entries.push({ path: childRelative, type: 'symlink', target: await readlink(childPath) })
-      } else if (info.isDirectory()) {
-        entries.push({ path: childRelative, type: 'directory' })
-        await walk(childPath, childRelative)
-      } else if (info.isFile()) {
-        entries.push({
-          path: childRelative,
-          type: 'file',
-          size: info.size,
-          hash: sha256(await readFile(childPath)),
-        })
-      } else {
-        throw new Error('Disposable validation workspace contains a special filesystem entry.')
-      }
-    }
-  }
 }
 
 function resolveWorkspacePath(repoRoot: string, path: string): string {

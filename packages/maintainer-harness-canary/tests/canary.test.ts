@@ -34,7 +34,6 @@ import {
   type SandboxProcessRunner,
   VALIDATION_HOSTS,
   VALIDATION_NSSWITCH,
-  VALIDATION_SCRATCH_MAX_BYTES,
   ValidationSandboxPreflightError,
 } from '../src/index.js'
 
@@ -126,10 +125,6 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
       '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--cap-drop', 'ALL', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
     ]))
-    for (const scratchPath of args.filter((value, index) =>
-      args[index - 1] === '--tmpfs' && value.startsWith('/workspace/'))) {
-      expect(scratchPath).toMatch(/^\/workspace\/[A-Za-z0-9._/-]+$/)
-    }
     const hostsBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/hosts')
     const nsswitchBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/nsswitch.conf')
     expect(hostsBind).toBeGreaterThanOrEqual(0)
@@ -162,6 +157,8 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
       await writeFile(temporary, 'export default {}\n')
       this.viteTemporaryWorkspaces.push(hostRepo)
       await unlink(temporary)
+      await mkdir(join(hostRepo, '.oma-validation-preflight-cache'), { recursive: true })
+      await writeFile(join(hostRepo, '.oma-validation-preflight-cache/output.txt'), 'ephemeral\n')
     }
     await this.mutateWorkspace?.(hostRepo)
     return {
@@ -428,7 +425,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
   })
 
-  it('fails closed without host fallback and cannot return sandbox pollution to the source checkout', async () => {
+  it('fails closed without host fallback and discards ordinary sandbox side effects', async () => {
     const fixture = await repoFixture('success')
     const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
     const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
@@ -441,7 +438,7 @@ describe('fail-closed deterministic validation sandbox', () => {
       sandboxProcessRunner: new StrictMockValidationSandboxRunner(true),
       sourceEnvironment: { PATH: process.env['PATH'] },
     })).rejects.toThrow(/Bubblewrap/)
-    await expect(runProductionSandboxValidation({
+    const results = await runProductionSandboxValidation({
       contract,
       repoRoot: fixture.root,
       sandboxProcessRunner: new StrictMockValidationSandboxRunner(false, undefined, undefined, async workspace => {
@@ -449,7 +446,9 @@ describe('fail-closed deterministic validation sandbox', () => {
         await writeFile(join(workspace, 'dist/host-pollution.txt'), 'blocked\n')
       }),
       sourceEnvironment: { PATH: process.env['PATH'] },
-    })).rejects.toThrow(/disposable workspace/)
+    })
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({ success: true })
     expect(await fileExists(join(fixture.root, 'dist/host-pollution.txt'))).toBe(false)
     expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
   })
@@ -579,64 +578,48 @@ describe('fail-closed deterministic validation sandbox', () => {
     }
   })
 
-  it('mounts only trusted ignored build outputs on bounded per-command tmpfs', async () => {
+  it('uses a fresh production snapshot per command and discards Vitest cache and build output', async () => {
     const fixture = await repoFixture('success')
-    const command = {
-      ...prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!,
-      scratchPaths: ['dist'],
-    }
-    const workspace = await createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [],
-      candidateDiff: '',
-      maxFileBytes: 20_000,
-      scratchPaths: command.scratchPaths,
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
+    await writeFile(join(fixture.root, BASE_FILE), candidate)
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
+    const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
+    const baseContract = productionValidationContract(fixture.baseSha, candidate, diff)
+    const first = baseContract.validationCommands[0]!
+    const workspaceRoots: string[] = []
+    const runner = new StrictMockValidationSandboxRunner(false, undefined, undefined, async workspaceRoot => {
+      const vitestCache = join(workspaceRoot, 'packages/otel/node_modules/.vite/vitest/results.json')
+      const buildOutput = join(workspaceRoot, 'packages/otel/dist/index.js')
+      if (workspaceRoots.length > 0) {
+        expect(await fileExists(vitestCache)).toBe(false)
+        expect(await fileExists(buildOutput)).toBe(false)
+      }
+      workspaceRoots.push(workspaceRoot)
+      await mkdir(join(workspaceRoot, 'packages/otel/node_modules/.vite/vitest'), { recursive: true })
+      await mkdir(join(workspaceRoot, 'packages/otel/dist'), { recursive: true })
+      await writeFile(vitestCache, '{"passed":true}\n')
+      await writeFile(buildOutput, 'export {}\n')
     })
-    try {
-      const invocation = await buildValidationSandboxInvocation({
-        workspaceRoot: workspace.repoRoot,
-        dependencyRoot: workspace.dependencyRoot,
-        resolverHostsPath: workspace.resolverHostsPath,
-        resolverNsswitchPath: workspace.resolverNsswitchPath,
-        command,
-      })
-      expect(invocation.args).toEqual(expect.arrayContaining([
-        '--size', String(VALIDATION_SCRATCH_MAX_BYTES), '--tmpfs', '/workspace/dist',
-      ]))
-      expect(await readdir(join(workspace.repoRoot, 'dist'))).toEqual([])
-      await writeFile(join(workspace.repoRoot, 'dist/untrusted-host-output'), 'blocked\n')
-      await expect(buildValidationSandboxInvocation({
-        workspaceRoot: workspace.repoRoot,
-        dependencyRoot: workspace.dependencyRoot,
-        resolverHostsPath: workspace.resolverHostsPath,
-        resolverNsswitchPath: workspace.resolverNsswitchPath,
-        command,
-      })).rejects.toThrow(/must be empty/)
-      await unlink(join(workspace.repoRoot, 'dist/untrusted-host-output'))
-    } finally {
-      await cleanupValidationWorkspace(workspace)
-    }
-  })
+    const results = await runProductionSandboxValidation({
+      contract: {
+        ...baseContract,
+        validationCommands: [
+          { ...first, id: 'otel-test' },
+          { ...first, id: 'otel-build' },
+        ],
+      },
+      repoRoot: fixture.root,
+      sandboxProcessRunner: runner,
+      workspaceParentDir: parent,
+      sourceEnvironment: { PATH: process.env['PATH'] },
+    })
 
-  it('rejects scratch paths that exist in the candidate or are not ignored by the pinned checkout', async () => {
-    const fixture = await repoFixture('success')
-    await expect(createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [],
-      candidateDiff: '',
-      maxFileBytes: 20_000,
-      scratchPaths: ['packages/core'],
-    })).rejects.toThrow(/must not already exist/)
-    await expect(createValidationWorkspace({
-      sourceRepoRoot: fixture.root,
-      baseSha: fixture.baseSha,
-      changedPaths: [],
-      candidateDiff: '',
-      maxFileBytes: 20_000,
-      scratchPaths: ['unignored-output'],
-    })).rejects.toThrow(/must be ignored/)
+    expect(results.map(result => result.id)).toEqual(['otel-test', 'otel-build'])
+    expect(new Set(workspaceRoots).size).toBe(2)
+    expect(await readdir(parent)).toEqual([])
+    expect(await fileExists(join(fixture.root, 'packages/otel/node_modules/.vite/vitest/results.json'))).toBe(false)
+    expect(await fileExists(join(fixture.root, 'packages/otel/dist/index.js'))).toBe(false)
   })
 
   it('rejects policy attempts to override protected or credential environment names', async () => {
@@ -652,22 +635,6 @@ describe('fail-closed deterministic validation sandbox', () => {
         command,
       })).rejects.toThrow(/environment/)
     }
-  })
-
-  it('rejects policy scratch paths that overlap protected canary paths', async () => {
-    const fixture = await repoFixture('success')
-    const selectedPolicy = policy()
-    const rule = selectedPolicy.validationRules[0]!
-    const command = rule.validationCommands[0]!
-    const unsafePolicy = {
-      ...selectedPolicy,
-      protectedPaths: [...selectedPolicy.protectedPaths, 'packages/core/generated'],
-      validationRules: [{
-        ...rule,
-        validationCommands: [{ ...command, scratchPaths: ['packages/core/generated/dist'] }],
-      }],
-    }
-    await expect(runFixture(fixture, { policy: unsafePolicy })).rejects.toThrow(/scratch paths cannot overlap protected/)
   })
 
   it('fails closed before launch when fixed resolver policy files are changed', async () => {
@@ -736,7 +703,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(JSON.parse(JSON.stringify(diagnostic))).toEqual(diagnostic)
   })
 
-  it('preflights disposable sibling writes and bounded scratch output, then cleans them', async () => {
+  it('preflights disposable source and cache writes, then discards the entire snapshot', async () => {
     const fixture = await repoFixture('success')
     const parent = await mkdtemp(join(tmpdir(), 'oma-preflight-parent-'))
     const runner = new StrictMockValidationSandboxRunner()
@@ -748,11 +715,11 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(runner.viteTemporaryWorkspaces).toHaveLength(1)
     const preflightInvocation = runner.invocations[0]!
     expect(preflightInvocation.args.some(value => value.includes("lookup('localhost', { all: true })"))).toBe(true)
-    expect(preflightInvocation.args).toEqual(expect.arrayContaining([
-      '--size', String(VALIDATION_SCRATCH_MAX_BYTES), '--tmpfs', '/workspace/dist',
-    ]))
+    expect(preflightInvocation.args.some(value => value.includes('.oma-validation-preflight-cache'))).toBe(true)
+    expect(preflightInvocation.args).not.toContain('--size')
     expect(runner.viteTemporaryWorkspaces[0]).not.toBe(await realpath(fixture.root))
     expect((await readdir(join(fixture.root, 'packages/core'))).some(name => name.includes('.timestamp-'))).toBe(false)
+    expect(await fileExists(join(fixture.root, '.oma-validation-preflight-cache/output.txt'))).toBe(false)
     expect(await readdir(parent)).toEqual([])
   })
 
@@ -765,7 +732,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(artifact.validationResults[0]).toMatchObject({ success: false, exitCode: 125 })
   })
 
-  it('runs ordered policy commands in one disposable snapshot and cleans it after success', async () => {
+  it('runs ordered policy commands in distinct disposable snapshots and cleans each after success', async () => {
     const fixture = await repoFixture('success')
     const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
     const selectedPolicy = policy()
@@ -790,7 +757,7 @@ describe('fail-closed deterministic validation sandbox', () => {
       const bind = invocation.args.findIndex((value, index) => value === '--bind' && invocation.args[index + 2] === '/workspace')
       return invocation.args[bind + 1]
     })
-    expect(new Set(workspaceSources).size).toBe(1)
+    expect(new Set(workspaceSources).size).toBe(2)
     expect(await readdir(parent)).toEqual([])
   })
 
@@ -800,9 +767,6 @@ describe('fail-closed deterministic validation sandbox', () => {
     }],
     ['HEAD', async (workspaceRoot: string) => {
       await writeFile(join(workspaceRoot, '.git/HEAD'), `${'f'.repeat(40)}\n`)
-    }],
-    ['path set', async (workspaceRoot: string) => {
-      await writeFile(join(workspaceRoot, 'validation-extra.txt'), 'unexpected\n')
     }],
     ['file type', async (workspaceRoot: string) => {
       await unlink(join(workspaceRoot, BASE_FILE))
