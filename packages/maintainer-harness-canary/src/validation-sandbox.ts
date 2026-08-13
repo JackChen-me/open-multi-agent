@@ -22,6 +22,7 @@ import {
 
 export const BUBBLEWRAP_PATH = '/usr/bin/bwrap'
 export const SANDBOX_REPO_ROOT = '/workspace'
+export const VALIDATION_SCRATCH_MAX_BYTES = 64 * 1024 * 1024
 
 const PROTECTED_ENVIRONMENT_NAMES = new Set([
   'PATH',
@@ -84,6 +85,7 @@ export async function buildValidationSandboxInvocation(options: {
   const dependencyRoot = await realpath(resolve(options.dependencyRoot))
   const resolverHostsPath = await resolveValidationResolverFile(options.resolverHostsPath, VALIDATION_HOSTS)
   const resolverNsswitchPath = await resolveValidationResolverFile(options.resolverNsswitchPath, VALIDATION_NSSWITCH)
+  await assertScratchMountpoints(workspaceRoot, options.command)
   const gitMetadataRoot = await realpath(resolve(workspaceRoot, '.git'))
   const hostCwd = await realpath(resolve(workspaceRoot, options.command.cwd))
   const cwdRelation = relative(workspaceRoot, hostCwd)
@@ -109,6 +111,10 @@ export async function buildValidationSandboxInvocation(options: {
     ...options.command.env,
   }
   for (const name of options.command.unsetEnv) delete sandboxEnvironment[name]
+  const scratchMounts = options.command.scratchPaths.flatMap(scratchPath => [
+    '--size', String(VALIDATION_SCRATCH_MAX_BYTES),
+    '--tmpfs', `${SANDBOX_REPO_ROOT}/${scratchPath}`,
+  ])
 
   const args = [
     '--die-with-parent',
@@ -135,6 +141,7 @@ export async function buildValidationSandboxInvocation(options: {
     '--bind', workspaceRoot, SANDBOX_REPO_ROOT,
     '--ro-bind', gitMetadataRoot, `${SANDBOX_REPO_ROOT}/.git`,
     '--ro-bind', dependencyRoot, `${SANDBOX_REPO_ROOT}/node_modules`,
+    ...scratchMounts,
     '--chdir', sandboxCwd,
     '--clearenv',
     ...Object.entries(sandboxEnvironment).flatMap(([name, value]) => ['--setenv', name, value]),
@@ -163,6 +170,27 @@ async function resolveValidationResolverFile(path: string, expected: string): Pr
     throw new ValidationSandboxError('Validation resolver configuration differs from the fixed loopback policy.')
   }
   return canonicalPath
+}
+
+async function assertScratchMountpoints(
+  workspaceRoot: string,
+  command: ValidationCommand,
+): Promise<void> {
+  if (command.scratchPaths.length === 0) return
+  for (const scratchPath of command.scratchPaths) {
+    const absolute = resolve(workspaceRoot, scratchPath)
+    const relation = relative(workspaceRoot, absolute)
+    if (relation === '..' || relation.startsWith(`..${sep}`) || relation.startsWith(sep)) {
+      throw new ValidationSandboxError('Validation scratch path resolves outside the repository.')
+    }
+    const info = await lstat(absolute)
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new ValidationSandboxError('Validation scratch mountpoint must be a regular directory.')
+    }
+    if ((await readdir(absolute)).length !== 0) {
+      throw new ValidationSandboxError('Validation scratch mountpoint must be empty before execution.')
+    }
+  }
 }
 
 export async function runValidationInSandbox(options: {
@@ -205,12 +233,14 @@ export async function preflightValidationSandbox(options: {
 const { realpathSync, unlinkSync, writeFileSync } = require('node:fs')
 const { lookup } = require('node:dns').promises
 const temporary = '/workspace/packages/core/vitest.config.ts.timestamp-oma-preflight.mjs'
+const scratchOutput = '/workspace/dist/oma-validation-preflight.txt'
 ;(async () => {
   try {
     writeFileSync(temporary, 'export default {}\\n')
   } finally {
     unlinkSync(temporary)
   }
+  writeFileSync(scratchOutput, 'ephemeral\\n')
   if (realpathSync('/workspace/node_modules/@open-multi-agent/core') !== '/workspace/packages/core') {
     throw new Error('Workspace dependency symlink escaped the disposable snapshot.')
   }
@@ -227,6 +257,7 @@ const temporary = '/workspace/packages/core/vitest.config.ts.timestamp-oma-prefl
     timeoutMs: 30_000,
     env: {},
     unsetEnv: [],
+    scratchPaths: ['dist'],
   }
   let result: CommandResult
   let workspace: ValidationWorkspace | undefined
@@ -237,6 +268,7 @@ const temporary = '/workspace/packages/core/vitest.config.ts.timestamp-oma-prefl
       changedPaths: [],
       candidateDiff: '',
       maxFileBytes: Number.MAX_SAFE_INTEGER,
+      scratchPaths: command.scratchPaths,
       parentDir: options.workspaceParentDir,
     })
     result = await runValidationInSandbox({

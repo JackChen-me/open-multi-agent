@@ -56,6 +56,20 @@ describe('trusted production policy and command registry', () => {
       'otel-test',
       'otel-build',
     ])
+    const validationCommands = buildProductionConfig(policy, [path]).validationCommands
+    expect(validationCommands.find(command => command.id === 'otel-build')?.scratchPaths)
+      .toEqual(['packages/otel/dist'])
+    expect(validationCommands.find(command => command.id === 'otel-test')?.scratchPaths)
+      .toEqual([])
+
+    for (const [id, scratchPath] of [
+      ['core-build', 'packages/core/dist'],
+      ['otel-build', 'packages/otel/dist'],
+      ['maintainer-bot-build', 'packages/maintainer-bot/dist'],
+    ] as const) {
+      expect(policy.validationRegistry.find(command => command.id === id)?.scratchPaths)
+        .toEqual([scratchPath])
+    }
 
     expect(() => resolveTargetWorkspaces(policy, ['packages/otel/package.json']))
       .toThrow(/outside the trusted production allowlist/)
@@ -162,6 +176,23 @@ describe('trusted production policy and command registry', () => {
       .toThrow(/literal, not globs/)
     expect(() => productionPolicySchema.parse({ ...policy, allowedPaths: ['packages/core', 'packages/core'] }))
       .toThrow(/allowed paths must be unique/)
+  })
+
+  it('rejects unsafe validation scratch paths in trusted production policy', async () => {
+    const policy = await productionPolicy()
+    const fixedProtectedRegistry = policy.validationRegistry.map(command =>
+      command.id === 'otel-build'
+        ? { ...command, scratchPaths: ['.env'] }
+        : command)
+    expect(() => productionPolicySchema.parse({ ...policy, validationRegistry: fixedProtectedRegistry }))
+      .toThrow(/scratch path/)
+
+    const policyProtectedRegistry = policy.validationRegistry.map(command =>
+      command.id === 'otel-build'
+        ? { ...command, scratchPaths: ['packages/maintainer-host/generated'] }
+        : command)
+    expect(() => productionPolicySchema.parse({ ...policy, validationRegistry: policyProtectedRegistry }))
+      .toThrow(/scratch path/)
   })
 
   it('uses Claude Code by default and can roll back to the legacy engine', async () => {

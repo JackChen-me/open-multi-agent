@@ -34,6 +34,7 @@ import {
   type SandboxProcessRunner,
   VALIDATION_HOSTS,
   VALIDATION_NSSWITCH,
+  VALIDATION_SCRATCH_MAX_BYTES,
   ValidationSandboxPreflightError,
 } from '../src/index.js'
 
@@ -125,6 +126,10 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
       '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--cap-drop', 'ALL', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
     ]))
+    for (const scratchPath of args.filter((value, index) =>
+      args[index - 1] === '--tmpfs' && value.startsWith('/workspace/'))) {
+      expect(scratchPath).toMatch(/^\/workspace\/[A-Za-z0-9._/-]+$/)
+    }
     const hostsBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/hosts')
     const nsswitchBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/nsswitch.conf')
     expect(hostsBind).toBeGreaterThanOrEqual(0)
@@ -574,6 +579,66 @@ describe('fail-closed deterministic validation sandbox', () => {
     }
   })
 
+  it('mounts only trusted ignored build outputs on bounded per-command tmpfs', async () => {
+    const fixture = await repoFixture('success')
+    const command = {
+      ...prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!,
+      scratchPaths: ['dist'],
+    }
+    const workspace = await createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [],
+      candidateDiff: '',
+      maxFileBytes: 20_000,
+      scratchPaths: command.scratchPaths,
+    })
+    try {
+      const invocation = await buildValidationSandboxInvocation({
+        workspaceRoot: workspace.repoRoot,
+        dependencyRoot: workspace.dependencyRoot,
+        resolverHostsPath: workspace.resolverHostsPath,
+        resolverNsswitchPath: workspace.resolverNsswitchPath,
+        command,
+      })
+      expect(invocation.args).toEqual(expect.arrayContaining([
+        '--size', String(VALIDATION_SCRATCH_MAX_BYTES), '--tmpfs', '/workspace/dist',
+      ]))
+      expect(await readdir(join(workspace.repoRoot, 'dist'))).toEqual([])
+      await writeFile(join(workspace.repoRoot, 'dist/untrusted-host-output'), 'blocked\n')
+      await expect(buildValidationSandboxInvocation({
+        workspaceRoot: workspace.repoRoot,
+        dependencyRoot: workspace.dependencyRoot,
+        resolverHostsPath: workspace.resolverHostsPath,
+        resolverNsswitchPath: workspace.resolverNsswitchPath,
+        command,
+      })).rejects.toThrow(/must be empty/)
+      await unlink(join(workspace.repoRoot, 'dist/untrusted-host-output'))
+    } finally {
+      await cleanupValidationWorkspace(workspace)
+    }
+  })
+
+  it('rejects scratch paths that exist in the candidate or are not ignored by the pinned checkout', async () => {
+    const fixture = await repoFixture('success')
+    await expect(createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [],
+      candidateDiff: '',
+      maxFileBytes: 20_000,
+      scratchPaths: ['packages/core'],
+    })).rejects.toThrow(/must not already exist/)
+    await expect(createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [],
+      candidateDiff: '',
+      maxFileBytes: 20_000,
+      scratchPaths: ['unignored-output'],
+    })).rejects.toThrow(/must be ignored/)
+  })
+
   it('rejects policy attempts to override protected or credential environment names', async () => {
     const fixture = await repoFixture('success')
     const validCommand = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
@@ -587,6 +652,22 @@ describe('fail-closed deterministic validation sandbox', () => {
         command,
       })).rejects.toThrow(/environment/)
     }
+  })
+
+  it('rejects policy scratch paths that overlap protected canary paths', async () => {
+    const fixture = await repoFixture('success')
+    const selectedPolicy = policy()
+    const rule = selectedPolicy.validationRules[0]!
+    const command = rule.validationCommands[0]!
+    const unsafePolicy = {
+      ...selectedPolicy,
+      protectedPaths: [...selectedPolicy.protectedPaths, 'packages/core/generated'],
+      validationRules: [{
+        ...rule,
+        validationCommands: [{ ...command, scratchPaths: ['packages/core/generated/dist'] }],
+      }],
+    }
+    await expect(runFixture(fixture, { policy: unsafePolicy })).rejects.toThrow(/scratch paths cannot overlap protected/)
   })
 
   it('fails closed before launch when fixed resolver policy files are changed', async () => {
@@ -655,7 +736,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(JSON.parse(JSON.stringify(diagnostic))).toEqual(diagnostic)
   })
 
-  it('preflights a Vite-style sibling write only in the disposable workspace and cleans it', async () => {
+  it('preflights disposable sibling writes and bounded scratch output, then cleans them', async () => {
     const fixture = await repoFixture('success')
     const parent = await mkdtemp(join(tmpdir(), 'oma-preflight-parent-'))
     const runner = new StrictMockValidationSandboxRunner()
@@ -667,6 +748,9 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(runner.viteTemporaryWorkspaces).toHaveLength(1)
     const preflightInvocation = runner.invocations[0]!
     expect(preflightInvocation.args.some(value => value.includes("lookup('localhost', { all: true })"))).toBe(true)
+    expect(preflightInvocation.args).toEqual(expect.arrayContaining([
+      '--size', String(VALIDATION_SCRATCH_MAX_BYTES), '--tmpfs', '/workspace/dist',
+    ]))
     expect(runner.viteTemporaryWorkspaces[0]).not.toBe(await realpath(fixture.root))
     expect((await readdir(join(fixture.root, 'packages/core'))).some(name => name.includes('.timestamp-'))).toBe(false)
     expect(await readdir(parent)).toEqual([])
@@ -1101,7 +1185,7 @@ async function repoFixture(mode: string, terminalEvents?: readonly Record<string
   const capturePath = join(harnessDir, 'capture.json')
   await mkdir(join(root, 'packages/core/tests'), { recursive: true })
   await mkdir(join(root, 'packages/core/src'), { recursive: true })
-  await writeFile(join(root, '.gitignore'), 'node_modules/\nignored-host.txt\n')
+  await writeFile(join(root, '.gitignore'), 'node_modules/\ndist/\nignored-host.txt\n')
   const distantContext = Array.from({ length: 18 }, (_, index) => `// stable context ${index + 1}`).join('\n')
   await writeFile(join(root, BASE_FILE), `import test from 'node:test'\nimport assert from 'node:assert/strict'\n\n${distantContext}\n\ntest('subpaths', () => {\n  assert.ok('existing')\n  // TODO missing barrels\n})\n`)
   await writeFile(join(root, 'packages/core/src/extra.ts'), 'export const extra = true\n')

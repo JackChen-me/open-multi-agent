@@ -154,7 +154,8 @@
       "command": "npm",
       "args": ["run", "build", "-w", "@open-multi-agent/core"],
       "cwd": ".",
-      "timeoutMs": 600000
+      "timeoutMs": 600000,
+      "scratchPaths": ["packages/core/dist"]
     },
     {
       "id": "otel-lint",
@@ -175,7 +176,8 @@
       "command": "npm",
       "args": ["run", "build", "-w", "@open-multi-agent/otel"],
       "cwd": ".",
-      "timeoutMs": 600000
+      "timeoutMs": 600000,
+      "scratchPaths": ["packages/otel/dist"]
     },
     {
       "id": "create-runtime-ambient",
@@ -240,7 +242,8 @@
       "command": "npm",
       "args": ["run", "build", "-w", "@open-multi-agent/maintainer-bot"],
       "cwd": ".",
-      "timeoutMs": 600000
+      "timeoutMs": 600000,
+      "scratchPaths": ["packages/maintainer-bot/dist"]
     }
   ],
   "context": {

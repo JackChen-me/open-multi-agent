@@ -37,6 +37,7 @@ export async function createValidationWorkspace(options: {
   readonly changedPaths: readonly string[]
   readonly candidateDiff: string
   readonly maxFileBytes: number
+  readonly scratchPaths?: readonly string[]
   readonly parentDir?: string
 }): Promise<ValidationWorkspace> {
   const sourceRepoRoot = await realpath(resolve(options.sourceRepoRoot))
@@ -69,6 +70,12 @@ export async function createValidationWorkspace(options: {
         env: gitEnvironment,
       })
     }
+    await prepareScratchMountpoints(
+      commandRunner,
+      repoRoot,
+      gitEnvironment,
+      options.scratchPaths ?? [],
+    )
     await mkdir(join(repoRoot, 'node_modules'))
     const dependencyRoot = await realpath(resolve(sourceRepoRoot, 'node_modules'))
     const workspace = {
@@ -87,6 +94,44 @@ export async function createValidationWorkspace(options: {
   } catch (error) {
     await rm(containerRoot, { recursive: true, force: true })
     throw error
+  }
+}
+
+async function prepareScratchMountpoints(
+  commandRunner: NodeCommandRunner,
+  repoRoot: string,
+  environment: NodeJS.ProcessEnv,
+  scratchPaths: readonly string[],
+): Promise<void> {
+  for (const scratchPath of [...new Set(scratchPaths)].sort()) {
+    const absolute = resolveWorkspacePath(repoRoot, scratchPath)
+    try {
+      await lstat(absolute)
+      throw new Error('Validation scratch path must not already exist in the candidate snapshot.')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    await assertRegularDirectoryChain(repoRoot, scratchPath)
+    const ignored = await commandRunner.run(
+      'git',
+      ['check-ignore', '--quiet', '--no-index', '--', `${scratchPath}/`],
+      { cwd: repoRoot, env: environment, allowFailure: true },
+    )
+    if (ignored.exitCode !== 0) {
+      throw new Error('Validation scratch path must be ignored by the pinned repository checkout.')
+    }
+    await mkdir(absolute, { mode: 0o700 })
+  }
+}
+
+async function assertRegularDirectoryChain(repoRoot: string, scratchPath: string): Promise<void> {
+  const parts = scratchPath.split('/')
+  for (let index = 1; index < parts.length; index += 1) {
+    const parent = resolveWorkspacePath(repoRoot, parts.slice(0, index).join('/'))
+    const info = await lstat(parent)
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error('Validation scratch path parent must be a regular repository directory.')
+    }
   }
 }
 

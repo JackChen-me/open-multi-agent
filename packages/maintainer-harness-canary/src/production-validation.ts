@@ -60,6 +60,7 @@ export async function runProductionSandboxValidation(options: {
       changedPaths: contract.changedFiles.map(file => file.path),
       candidateDiff: contract.candidateDiff,
       maxFileBytes: contract.limits.maxFileBytes,
+      scratchPaths: contract.validationCommands.flatMap(command => command.scratchPaths),
       parentDir: options.workspaceParentDir,
     })
     const results: ValidationResult[] = []

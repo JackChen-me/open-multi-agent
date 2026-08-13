@@ -4,6 +4,7 @@ import {
   controlPlaneRequestSchema,
   maintainerConfigSchema,
   normalizeRepoPath,
+  pathWithin,
   validationCommandSchema,
 } from '@open-multi-agent/maintainer-bot'
 
@@ -214,6 +215,18 @@ export const productionPolicySchema = z.object({
   policy.workspaces.forEach((workspace, index) => {
     unique(workspace.validationIds, ['workspaces', index, 'validationIds'], 'workspace validation ids')
     unique(workspace.pathRules.map(rule => rule.path), ['workspaces', index, 'pathRules'], 'workspace path rules')
+  })
+  policy.validationRegistry.forEach((command, commandIndex) => {
+    command.scratchPaths.forEach((scratchPath, scratchIndex) => {
+      if (policy.protectedPaths.some(protectedPath =>
+        pathWithin(scratchPath, protectedPath) || pathWithin(protectedPath, scratchPath))) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['validationRegistry', commandIndex, 'scratchPaths', scratchIndex],
+          message: 'validation scratch paths cannot overlap protected repository paths',
+        })
+      }
+    })
   })
   const registryIds = new Set(policy.validationRegistry.map(command => command.id))
   if (registryIds.size !== policy.validationRegistry.length) {

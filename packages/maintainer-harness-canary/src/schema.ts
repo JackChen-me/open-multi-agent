@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { validationCommandSchema } from '@open-multi-agent/maintainer-bot'
+import { pathWithin, validationCommandSchema } from '@open-multi-agent/maintainer-bot'
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/)
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/)
@@ -26,6 +26,21 @@ export const canaryPolicySchema = z.object({
     maxProcessOutputBytes: z.number().int().positive().max(10_000_000),
     maxValidationOutputBytes: z.number().int().positive().max(200_000),
   }),
+}).superRefine((policy, context) => {
+  policy.validationRules.forEach((rule, ruleIndex) => {
+    rule.validationCommands.forEach((command, commandIndex) => {
+      command.scratchPaths.forEach((scratchPath, scratchIndex) => {
+        if (policy.protectedPaths.some(protectedPath =>
+          pathWithin(scratchPath, protectedPath) || pathWithin(protectedPath, scratchPath))) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['validationRules', ruleIndex, 'validationCommands', commandIndex, 'scratchPaths', scratchIndex],
+            message: 'validation scratch paths cannot overlap protected repository paths',
+          })
+        }
+      })
+    })
+  })
 })
 
 export type CanaryPolicy = z.infer<typeof canaryPolicySchema>

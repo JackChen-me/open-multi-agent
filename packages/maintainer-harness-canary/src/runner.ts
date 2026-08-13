@@ -217,6 +217,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
         changedPaths,
         candidateDiff: diff,
         maxFileBytes: policy.limits.maxFileBytes,
+        scratchPaths: request.validationCommands.flatMap(command => command.scratchPaths),
         parentDir: options.validationWorkspaceParentDir,
       })
       validationResults = await runValidations({

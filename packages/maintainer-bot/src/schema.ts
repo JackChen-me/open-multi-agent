@@ -3,6 +3,28 @@ import { z } from 'zod'
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/)
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/)
 const repoPath = z.string().trim().min(1).max(500)
+const scratchPath = z.string().min(1).max(500).superRefine((value, context) => {
+  const parts = value.split('/')
+  if (
+    value !== value.trim()
+    || value.includes('\\')
+    || value.startsWith('/')
+    || value.endsWith('/')
+    || value.includes('\0')
+    || parts.some(part => part.length === 0 || part === '.' || part === '..')
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'validation scratch paths must be canonical repository-relative paths',
+    })
+  }
+  if (parts.some(part => ['.git', 'node_modules', '.env', '.npmrc', '.claude'].includes(part))) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'validation scratch paths cannot overlap protected repository roots',
+    })
+  }
+})
 const environmentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)
 const boundedLine = z.string().trim().min(1).max(1_000).refine(
   value => !/[\r\n]/.test(value),
@@ -173,6 +195,7 @@ export const validationCommandSchema = z.object({
   timeoutMs: z.number().int().positive().max(30 * 60_000).default(10 * 60_000),
   env: z.record(environmentName, z.string().max(2_000)).default({}),
   unsetEnv: z.array(environmentName).max(100).default([]),
+  scratchPaths: z.array(scratchPath).max(20).default([]),
 }).superRefine((command, context) => {
   for (const name of Object.keys(command.env)) {
     if (/(?:TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH_SOCK)/i.test(name)) {
@@ -196,6 +219,26 @@ export const validationCommandSchema = z.object({
       path: ['unsetEnv'],
       message: 'validation unsetEnv entries must be unique',
     })
+  }
+  if (new Set(command.scratchPaths).size !== command.scratchPaths.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['scratchPaths'],
+      message: 'validation scratch paths must be unique',
+    })
+  }
+  for (let leftIndex = 0; leftIndex < command.scratchPaths.length; leftIndex += 1) {
+    const left = command.scratchPaths[leftIndex]!
+    for (let rightIndex = leftIndex + 1; rightIndex < command.scratchPaths.length; rightIndex += 1) {
+      const right = command.scratchPaths[rightIndex]!
+      if (left.startsWith(`${right}/`) || right.startsWith(`${left}/`)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['scratchPaths', rightIndex],
+          message: 'validation scratch paths cannot overlap',
+        })
+      }
+    }
   }
 })
 
