@@ -404,7 +404,7 @@ async function runToProposal(localGitConfigKeys?: readonly string[]) {
   const repoRoot = await fixtureRepo()
   const runner = repositoryRunner(repoRoot, localGitConfigKeys)
   const github = new FakeGitHub()
-  const policy = await productionPolicy()
+  const policy = { ...await productionPolicy(), executionBackend: 'legacy' as const }
   const event = labelEvent()
   const activation = await prepareActivation({
     event,
@@ -454,7 +454,7 @@ async function runClaudeToProposal() {
   const repoRoot = await fixtureRepo()
   const runner = repositoryRunner(repoRoot)
   const github = new FakeGitHub()
-  const policy = { ...await productionPolicy(), executionBackend: 'claude-code' as const }
+  const policy = await productionPolicy()
   const event = labelEvent()
   const activation = await prepareActivation({
     event, github, runner, repoRoot, policy,

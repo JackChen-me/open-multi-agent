@@ -6,7 +6,7 @@
   "agentReadyLabel": "agent-ready",
   "policyVersion": "maintainer-activation-v1",
   "promptVersion": "maintainer-prompts-v1",
-  "executionBackend": "legacy",
+  "executionBackend": "claude-code",
   "model": "deepseek-v4-flash",
   "claudeCode": {
     "version": "2.1.220",

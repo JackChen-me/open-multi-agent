@@ -107,11 +107,8 @@ Lost `RUNNING` claims remain human-recovery cases rather than automatic resume.
 
 ## Supervised beta activation
 
-The checked-in production policy remains `legacy`. A future supervised beta is
-enabled by a separately reviewed change of the one selector to `claude-code`.
-Before that change lands, maintainers must confirm the existing provider Secret,
-dedicated GitHub App writer configuration, pinned Claude installation, Ubuntu
-sandbox preflight, and ordinary workflow CI in the target repository. No
-Secret, repository variable, permission, label, Issue, or Actions setting is
-changed by this implementation. Local scripted tests are not live model or
-canary evidence.
+The checked-in production policy selects `claude-code` for the supervised beta.
+Rollback requires a separately reviewed change of the same selector to
+`legacy`; there is no runtime fallback. This policy activation does not change
+any Secret, repository variable, permission, label, Issue, or Actions setting.
+Local scripted tests are not live model or canary evidence.
