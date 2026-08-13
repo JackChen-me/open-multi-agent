@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
+import { canonicalGitDiffArgs } from '../src/command.js'
 import { hashJson, sha256 } from '../src/hash.js'
 import { collectReviewBundle } from '../src/review-bundle.js'
 import { contextManifestSchema } from '../src/schema.js'
@@ -61,6 +62,10 @@ describe('fresh reviewer evidence bundle', () => {
       expect.objectContaining({ path: 'packages/demo/src/new.ts', contentHash: sha256('export const added = true\n') }),
     ]))
     expect(bundle.relevantContext.map(source => source.locator)).toContain('AGENTS.md')
+    expect(runner.calls.find(call => call.args[0] === 'diff')?.args).toEqual(canonicalGitDiffArgs({
+      baseSha: authorizedRequest().baseSha,
+      paths: ['packages/demo'],
+    }))
   })
 
   it('rejects unexpected protected changes before review', async () => {

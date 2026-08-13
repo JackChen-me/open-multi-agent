@@ -22,6 +22,36 @@ export interface CommandRunner {
   ): Promise<CommandResult>
 }
 
+const CANONICAL_GIT_DIFF_OPTIONS = [
+  '--binary',
+  '--no-ext-diff',
+  '--no-color',
+  '--no-renames',
+  '--no-textconv',
+  '--full-index',
+  '--unified=5',
+  '--no-indent-heuristic',
+  '--diff-algorithm=myers',
+  '--src-prefix=a/',
+  '--dst-prefix=b/',
+] as const
+
+export function canonicalGitDiffArgs(options: {
+  readonly baseSha?: string
+  readonly paths: readonly string[]
+}): string[] {
+  if (options.paths.length === 0) {
+    throw new Error('Canonical Git diff requires at least one path.')
+  }
+  return [
+    'diff',
+    ...CANONICAL_GIT_DIFF_OPTIONS,
+    ...(options.baseSha === undefined ? [] : [options.baseSha]),
+    '--',
+    ...options.paths,
+  ]
+}
+
 export class CommandError extends Error {
   readonly command: string
   readonly args: readonly string[]

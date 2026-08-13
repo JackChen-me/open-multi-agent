@@ -112,7 +112,8 @@ backend never falls through to the other backend.
    already scope-checked candidate to the shared canary validation CLI, which
    rebuilds base plus the exact patch in a disposable snapshot and executes all
    trusted commands only through fail-closed `/usr/bin/bwrap`, with no host
-   fallback.
+   fallback. Candidate capture and disposable-workspace integrity checks use
+   the same fixed Git diff format before comparing the patch byte for byte.
 7. A new OMA team and agent perform fresh-context review using only confirmed
    requirements, acceptance criteria, the final diff, validation evidence,
    bounded current-file snapshots, and relevant context. Implementer reasoning

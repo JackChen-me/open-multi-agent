@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import type { CommandResult } from '@open-multi-agent/maintainer-bot'
+import { canonicalGitDiffArgs, type CommandResult } from '@open-multi-agent/maintainer-bot'
 import {
   assertHarnessCredentialIsolation,
   BoundedProcessError,
@@ -386,7 +386,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
     const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
     await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE], fixture.baseSha)
     const runner = new StrictMockValidationSandboxRunner()
     const results = await runProductionSandboxValidation({
       contract: productionValidationContract(fixture.baseSha, candidate, diff),
@@ -401,12 +401,34 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
   })
 
+  it('preserves a #501-shaped two-hunk patch across disposable validation', async () => {
+    const fixture = await repoFixture('success')
+    const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
+    const candidate = original
+      .replace("import test from 'node:test'", "import test from 'node:test' // first distant edit")
+      .replace('// TODO missing barrels', "assert.ok('/observability') // second distant edit")
+    await writeFile(join(fixture.root, BASE_FILE), candidate)
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE], fixture.baseSha)
+    expect(diff.match(/^@@/gm)).toHaveLength(2)
+
+    const results = await runProductionSandboxValidation({
+      contract: productionValidationContract(fixture.baseSha, candidate, diff),
+      repoRoot: fixture.root,
+      sandboxProcessRunner: new StrictMockValidationSandboxRunner(),
+      sourceEnvironment: { PATH: process.env['PATH'] },
+    })
+
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({ id: 'focused-subpath-test', success: true })
+    expect(await readFile(join(fixture.root, BASE_FILE), 'utf8')).toBe(candidate)
+  })
+
   it('fails closed without host fallback and cannot return sandbox pollution to the source checkout', async () => {
     const fixture = await repoFixture('success')
     const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
     const candidate = original.replace('// TODO missing barrels', "assert.ok('/observability')")
     await writeFile(join(fixture.root, BASE_FILE), candidate)
-    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
     const contract = productionValidationContract(fixture.baseSha, candidate, diff)
     await expect(runProductionSandboxValidation({
       contract,
@@ -479,7 +501,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     await writeFile(join(fixture.root, BASE_FILE), candidate)
     await writeFile(join(fixture.root, 'ignored-host.txt'), 'ignored host state\n')
     await writeFile(join(fixture.root, 'untracked-host.txt'), 'untracked host state\n')
-    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
     const parent = await mkdtemp(join(tmpdir(), 'oma-validation-parent-'))
     const workspace = await createValidationWorkspace({
       sourceRepoRoot: fixture.root,
@@ -495,7 +517,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     expect(await fileExists(join(workspace.repoRoot, 'ignored-host.txt'))).toBe(false)
     expect(await fileExists(join(workspace.repoRoot, 'untracked-host.txt'))).toBe(false)
     expect((await exec('git', ['rev-parse', 'HEAD'], { cwd: workspace.repoRoot })).stdout.trim()).toBe(fixture.baseSha)
-    expect((await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: workspace.repoRoot })).stdout).toBe(diff)
+    expect(await canonicalDiff(workspace.repoRoot, [BASE_FILE])).toBe(diff)
     await cleanupValidationWorkspace(workspace)
     expect(await readdir(parent)).toEqual([])
   })
@@ -505,7 +527,7 @@ describe('fail-closed deterministic validation sandbox', () => {
     const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
     const original = await readFile(join(fixture.root, BASE_FILE), 'utf8')
     await writeFile(join(fixture.root, BASE_FILE), original.replace('// TODO missing barrels', "assert.ok('/observability')"))
-    const diff = (await exec('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', BASE_FILE], { cwd: fixture.root })).stdout
+    const diff = await canonicalDiff(fixture.root, [BASE_FILE])
     const workspace = await createValidationWorkspace({
       sourceRepoRoot: fixture.root,
       baseSha: fixture.baseSha,
@@ -1080,7 +1102,8 @@ async function repoFixture(mode: string, terminalEvents?: readonly Record<string
   await mkdir(join(root, 'packages/core/tests'), { recursive: true })
   await mkdir(join(root, 'packages/core/src'), { recursive: true })
   await writeFile(join(root, '.gitignore'), 'node_modules/\nignored-host.txt\n')
-  await writeFile(join(root, BASE_FILE), `import test from 'node:test'\nimport assert from 'node:assert/strict'\n\ntest('subpaths', () => {\n  assert.ok('existing')\n  // TODO missing barrels\n})\n`)
+  const distantContext = Array.from({ length: 18 }, (_, index) => `// stable context ${index + 1}`).join('\n')
+  await writeFile(join(root, BASE_FILE), `import test from 'node:test'\nimport assert from 'node:assert/strict'\n\n${distantContext}\n\ntest('subpaths', () => {\n  assert.ok('existing')\n  // TODO missing barrels\n})\n`)
   await writeFile(join(root, 'packages/core/src/extra.ts'), 'export const extra = true\n')
   await exec('git', ['init', '-q'], { cwd: root })
   await exec('git', ['config', 'user.name', 'Canary Test'], { cwd: root })
@@ -1191,4 +1214,8 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function canonicalDiff(repoRoot: string, paths: readonly string[], baseSha?: string): Promise<string> {
+  return (await exec('git', canonicalGitDiffArgs({ baseSha, paths }), { cwd: repoRoot })).stdout
 }

@@ -4,6 +4,7 @@ import { lstat, mkdir, mkdtemp, readdir, realpath, rename, writeFile } from 'nod
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
+  canonicalGitDiffArgs,
   NodeCommandRunner,
   canonicalJson,
   hashJson,
@@ -195,7 +196,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
       changedPaths = parseAndValidateStatus(status.stdout, request, policy)
       if (changedPaths.length === 0) throw new Error('Harness completed without a candidate patch.')
       await assertNoSymlinksOrOversize(changedPaths, repoRoot, policy.limits.maxFileBytes)
-      const diffResult = await commandRunner.run('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', ...changedPaths], { cwd: repoRoot })
+      const diffResult = await commandRunner.run('git', canonicalGitDiffArgs({ paths: changedPaths }), { cwd: repoRoot })
       diff = diffResult.stdout
       const diffBytes = Buffer.byteLength(diff)
       if (diffBytes === 0) throw new Error('Harness changed paths but produced no tracked diff.')
@@ -237,7 +238,7 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
       const finalPaths = parseAndValidateStatus(finalStatus.stdout, request, policy)
       if (canonicalJson(finalPaths) !== canonicalJson(changedPaths)) throw new Error('Validation changed the candidate path set.')
       await assertNoSymlinksOrOversize(finalPaths, repoRoot, policy.limits.maxFileBytes)
-      const finalDiff = await commandRunner.run('git', ['diff', '--binary', '--no-ext-diff', '--no-color', '--', ...finalPaths], { cwd: repoRoot })
+      const finalDiff = await commandRunner.run('git', canonicalGitDiffArgs({ paths: finalPaths }), { cwd: repoRoot })
       if (finalDiff.stdout !== diff) throw new Error('Validation changed the candidate patch.')
       await assertArtifactDirectory(artifactDir, [])
     } catch (error) {

@@ -2,6 +2,7 @@ import { readFile, readdir, readlink, realpath, rm, lstat, mkdir, mkdtemp, write
 import { tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 import {
+  canonicalGitDiffArgs,
   NodeCommandRunner,
   canonicalJson,
   sha256,
@@ -116,9 +117,10 @@ export async function assertValidationWorkspaceIntegrity(
   }
   const diff = statusPaths.length === 0
     ? ''
-    : (await commandRunner.run('git', [
-        'diff', '--binary', '--no-ext-diff', '--no-color', '--', ...statusPaths,
-      ], { cwd: workspace.repoRoot, env: gitEnvironment })).stdout
+    : (await commandRunner.run('git', canonicalGitDiffArgs({ paths: statusPaths }), {
+        cwd: workspace.repoRoot,
+        env: gitEnvironment,
+      })).stdout
   if (diff !== workspace.candidateDiff) {
     throw new Error('Validation changed the disposable workspace candidate patch.')
   }

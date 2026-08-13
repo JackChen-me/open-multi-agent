@@ -1,7 +1,7 @@
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { relative, sep } from 'node:path'
 import { z } from 'zod'
-import type { CommandRunner } from './command.js'
+import { canonicalGitDiffArgs, type CommandRunner } from './command.js'
 import { sha256 } from './hash.js'
 import {
   assertApprovedEditPath,
@@ -75,14 +75,10 @@ export async function collectReviewBundle(
 
   const tracked = await options.runner.run(
     'git',
-    [
-      'diff',
-      '--no-ext-diff',
-      '--unified=5',
-      options.request.baseSha,
-      '--',
-      ...options.manifest.approvedEditScopes.map(scope => normalizeRepoPath(scope.path)),
-    ],
+    canonicalGitDiffArgs({
+      baseSha: options.request.baseSha,
+      paths: options.manifest.approvedEditScopes.map(scope => normalizeRepoPath(scope.path)),
+    }),
     { cwd: options.repoRoot, maxOutputChars: (options.maxDiffChars ?? 300_000) + 1 },
   )
   let diff = tracked.stdout
