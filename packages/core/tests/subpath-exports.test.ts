@@ -47,4 +47,30 @@ describe('subpath export barrels', () => {
     expect(typeof mod.writeEvalReport).toBe('function')
     expect(typeof mod.FileEvalStore).toBe('function')
   })
+
+  it('/observability exposes trace sinks and run materialization', async () => {
+    const mod = await import('../src/observability/index.js')
+    expect(typeof mod.BatchingTraceSink).toBe('function')
+    expect(typeof mod.CompositeSink).toBe('function')
+    expect(typeof mod.materializeRun).toBe('function')
+    expect(typeof mod.buildExecutionReceipt).toBe('function')
+  })
+
+  it('/observability/file exposes the file trace store', async () => {
+    const mod = await import('../src/observability/file.js')
+    expect(typeof mod.FileTraceStore).toBe('function')
+    expect(typeof mod.FILE_TRACE_STORE_FORMAT).toBe('string')
+  })
+
+  it('/acp exposes the ACP agent backend', async () => {
+    const mod = await import('../src/acp.js')
+    expect(typeof mod.AcpBackend).toBe('function')
+    expect(typeof mod.createAcpBackend).toBe('function')
+  })
+
+  it('/process exposes the process agent backend', async () => {
+    const mod = await import('../src/process.js')
+    expect(typeof mod.ProcessBackend).toBe('function')
+    expect(typeof mod.createProcessBackend).toBe('function')
+  })
 })
