@@ -29,6 +29,11 @@ export const pipelineTraceArtifactSchema = z.object({
   issueNumber: z.number().int().positive(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/),
   claudeCodeTokenUsage: claudeCodeTokenUsageSchema,
+  omaTokenUsage: z.object({
+    input_tokens: z.number().int().nonnegative(),
+    output_tokens: z.number().int().nonnegative(),
+  }).strict(),
+  estimatedCostUsd: z.number().finite().nonnegative(),
   events: z.array(pipelineTraceEventSchema).max(10),
 }).strict()
 
@@ -56,11 +61,21 @@ export class PipelineTraceWriter {
       issueNumber: options.issueNumber,
       baseSha: options.baseSha,
       claudeCodeTokenUsage: options.claudeCodeTokenUsage,
+      omaTokenUsage: { input_tokens: 0, output_tokens: 0 },
+      estimatedCostUsd: 0,
       events: [],
     })
   }
 
-  async record(stage: PipelineTraceStage, status: PipelineTraceStatus, now: () => Date): Promise<void> {
+  async record(
+    stage: PipelineTraceStage,
+    status: PipelineTraceStatus,
+    now: () => Date,
+    metrics?: {
+      readonly tokenUsage: { readonly input_tokens: number; readonly output_tokens: number }
+      readonly estimatedCostUsd: number
+    },
+  ): Promise<void> {
     const event = pipelineTraceEventSchema.parse({ stage, status, at: now().toISOString() })
     const prior = this.artifact.events.at(-1)
     if (status === 'start') {
@@ -69,6 +84,10 @@ export class PipelineTraceWriter {
       throw new Error('Pipeline trace completion must close the active stage.')
     }
     this.artifact.events.push(event)
+    if (metrics !== undefined) {
+      this.artifact.omaTokenUsage = { ...metrics.tokenUsage }
+      this.artifact.estimatedCostUsd = metrics.estimatedCostUsd
+    }
     pipelineTraceArtifactSchema.parse(this.artifact)
     await atomicWriteJson(this.path, this.artifact)
   }
