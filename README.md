@@ -127,6 +127,14 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 
 Using `open-multi-agent` in production or a side project? [Open a discussion](https://github.com/open-multi-agent/open-multi-agent/discussions) and we will list it here. Built an integration? The [integration guide](packages/core/examples/integrations/README.md) covers how to get listed. For a deep integration, see the [Featured partner program](docs/featured-partner.md).
 
+## Sponsors
+
+Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technical decisions or model recommendations.
+
+**Providers**
+
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](docs/providers-atlascloud.md).
+
 ## When OMA fits
 
 OMA is designed for TypeScript teams that want the task graph to emerge from the goal at runtime.
