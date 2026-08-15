@@ -289,7 +289,7 @@ See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/d
 
 Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technical decisions or model recommendations.
 
-- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers/atlascloud.md).
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud.md).
 
 ## Production
 
