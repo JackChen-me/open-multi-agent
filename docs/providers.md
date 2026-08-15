@@ -64,9 +64,12 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 | Qwen (DashScope) | `provider: 'openai'` + `baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1'` | `DASHSCOPE_API_KEY` | `qwen-plus` | See [`providers/qwen`](../packages/core/examples/providers/qwen.ts). |
 | Moonshot AI (Kimi) | `provider: 'openai'` + `baseURL: 'https://api.moonshot.ai/v1'` | `MOONSHOT_API_KEY` | `kimi-k2.5` | See [`providers/moonshot`](../packages/core/examples/providers/moonshot.ts). |
 | LiteLLM (proxy) | `provider: 'openai'` + `baseURL: 'http://localhost:4000/v1'` + `apiKey` | `LITELLM_API_KEY` (if proxy auth enabled) | any model on your proxy | [LiteLLM](https://github.com/BerriAI/litellm) unifies 100+ providers (OpenAI, Anthropic, Azure, Bedrock, Vertex, etc.) behind one OpenAI-compatible endpoint. Run `litellm --config config.yaml` and point `baseURL` at the proxy. |
-| Atlas Cloud | `provider: 'openai'` + `baseURL: 'https://api.atlascloud.ai/v1'` + `apiKey` | `ATLASCLOUD_API_KEY` | `deepseek-v3` | Hosted aggregator serving DeepSeek, Qwen, Kimi, GLM, MiniMax, Doubao, Grok, and hosted Claude and Gemini behind one endpoint. Paid sponsor of `open-multi-agent`; see the [Atlas Cloud setup guide](providers-atlascloud.md). |
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
+
+### Sponsor listing
+
+[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan) is a paid sponsor of `open-multi-agent`; sponsorship does not affect technical decisions or model recommendations. It is reachable through the same OpenAI-compatible path (`provider: 'openai'` + `baseURL: 'https://api.atlascloud.ai/v1'` + `apiKey`) and is listed here as a sponsor rather than an OMA-verified provider. See the [Atlas Cloud setup guide](providers-atlascloud.md).
 
 OMA registers JSON-schema `function` tools. If an OpenAI-compatible response
 contains the separate `custom` tool-call variant, the adapter raises

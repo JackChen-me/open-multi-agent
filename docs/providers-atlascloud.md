@@ -38,7 +38,7 @@ const agent: AgentConfig = {
   provider: 'openai',
   baseURL: 'https://api.atlascloud.ai/v1',
   apiKey: process.env.ATLASCLOUD_API_KEY,
-  model: 'deepseek-v3', // pick a current ID from the model library
+  model: 'deepseek-v4-flash-0731', // pick a current ID from the model library
   systemPrompt: 'Analyze data and produce concise reports.',
   tools: ['bash', 'file_read', 'file_write'],
 }
@@ -57,9 +57,9 @@ console.log(result.output)
 
 Atlas Cloud serves hundreds of models across LLM, image, and video modalities; OMA orchestrates the text LLMs. The catalog changes often, so treat Atlas Cloud's own listing as the source of truth instead of pinning versions here. Browse the [model library](https://www.atlascloud.ai/models/llm) for the current catalog and copy a model's exact ID string into the `model` field.
 
-Current families include DeepSeek, Qwen (Alibaba), Kimi (MoonshotAI), GLM (Zhipu), MiniMax, Doubao (ByteDance), and Grok (xAI), alongside hosted Claude and Gemini.
+Current families include DeepSeek, Qwen (Alibaba), Kimi (MoonshotAI), GLM (Zhipu), MiniMax, Doubao (ByteDance), and Grok (xAI).
 
-Because Atlas Cloud serves every model behind one OpenAI-compatible endpoint, a single Atlas Cloud key lets an OMA team mix model families across agents, including hosted Claude and Gemini, through the same `provider: 'openai'` + `baseURL` setup above, with no per-vendor wiring.
+Because Atlas Cloud serves every model behind one OpenAI-compatible endpoint, a single Atlas Cloud key lets an OMA team mix model families across agents through the same `provider: 'openai'` + `baseURL` setup above, with no per-vendor wiring.
 
 Atlas Cloud's image and video generation models are not text LLMs and are outside OMA's agent-orchestration scope.
 

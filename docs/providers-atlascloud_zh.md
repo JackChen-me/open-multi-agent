@@ -38,7 +38,7 @@ const agent: AgentConfig = {
   provider: 'openai',
   baseURL: 'https://api.atlascloud.ai/v1',
   apiKey: process.env.ATLASCLOUD_API_KEY,
-  model: 'deepseek-v3', // 从模型库中选取当前可用的 ID
+  model: 'deepseek-v4-flash-0731', // 从模型库中选取当前可用的 ID
   systemPrompt: 'Analyze data and produce concise reports.',
   tools: ['bash', 'file_read', 'file_write'],
 }
@@ -57,9 +57,9 @@ console.log(result.output)
 
 Atlas Cloud 提供覆盖 LLM、图像与视频模态的数百款模型，其中 OMA 编排的是文本 LLM。模型目录更新频繁，因此请以 Atlas Cloud 官方列表为准，不在此固定版本号。可浏览[模型库](https://www.atlascloud.ai/models/llm)查看当前目录，并将模型的精确 ID 字符串填入 `model` 字段。
 
-当前覆盖的模型家族包括 DeepSeek、Qwen（阿里）、Kimi（月之暗面）、GLM（智谱）、MiniMax、豆包（字节跳动）、Grok（xAI），以及托管的 Claude 与 Gemini。
+当前覆盖的模型家族包括 DeepSeek、Qwen（阿里）、Kimi（月之暗面）、GLM（智谱）、MiniMax、豆包（字节跳动）、Grok（xAI）。
 
-由于 Atlas Cloud 将所有模型统一置于同一个 OpenAI 兼容端点之后，单个 Atlas Cloud key 即可让一个 OMA team 在不同 agent 间混用多个模型家族（含托管的 Claude 与 Gemini），全部通过上述 `provider: 'openai'` + `baseURL` 配置完成，无需逐厂商单独接线。
+由于 Atlas Cloud 将所有模型统一置于同一个 OpenAI 兼容端点之后，单个 Atlas Cloud key 即可让一个 OMA team 在不同 agent 间混用多个模型家族，全部通过上述 `provider: 'openai'` + `baseURL` 配置完成，无需逐厂商单独接线。
 
 Atlas Cloud 的图像与视频生成模型并非文本 LLM，不在 OMA 的 agent 编排范围内。
 
