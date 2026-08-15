@@ -151,4 +151,68 @@ describe('renderTeamRunDashboard', () => {
     expect(html).toContain('class="masthead-primary"')
     expect(html).toContain('class="run-context"')
   })
+
+  it('renders one linked routing summary from the decision and execution receipt', () => {
+    const html = renderTeamRunDashboard({
+      success: true,
+      tasks: [{
+        id: 'short-circuit',
+        title: 'Short-circuit: alpha',
+        assignee: 'alpha',
+        status: 'completed',
+        dependsOn: [],
+        metrics: {
+          startMs: 1,
+          endMs: 2,
+          durationMs: 1,
+          tokenUsage: { input_tokens: 1, output_tokens: 1 },
+          toolCalls: [],
+          retries: 0,
+        },
+      }],
+      agentResults: new Map(),
+      totalTokenUsage: { input_tokens: 1, output_tokens: 1 },
+      routingDecision: {
+        decisionId: 'decision-1',
+        receiptId: 'receipt-1',
+        traceSpanId: 'routing-span-1',
+        source: 'router',
+        mode: 'single',
+        reasons: ['The goal is a single action.'],
+        routerVersion: 'deterministic-v1',
+      },
+    })
+
+    const start = html.indexOf('id="oma-data">') + 'id="oma-data">'.length
+    const end = html.indexOf('</script>', start)
+    const parsed = JSON.parse(html.slice(start, end)) as {
+      routing: {
+        decision: { source: string; routerVersion?: string }
+        receipt: {
+          id?: string
+          routingDecisionId?: string
+          routingDecisionSpanId?: string
+          rolesExecuted: string[]
+        }
+      }
+    }
+
+    expect(parsed.routing.decision).toMatchObject({
+      source: 'router',
+      routerVersion: 'deterministic-v1',
+    })
+    expect(parsed.routing.receipt).toMatchObject({
+      id: 'receipt-1',
+      routingDecisionId: 'decision-1',
+      routingDecisionSpanId: 'routing-span-1',
+      rolesExecuted: ['alpha'],
+    })
+    expect(html).toContain('id="routingSummary" class="routing-summary"')
+    expect(html).toContain('.routing-summary.visible')
+    expect(html).toContain('.kind-dot.routing')
+    expect(html).toContain('.wf-bar.kind-routing')
+    expect(html).toContain("routingCard('Decided'")
+    expect(html).toContain("routingCard('Why'")
+    expect(html).toContain("routingCard('Actually ran'")
+  })
 })

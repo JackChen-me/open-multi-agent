@@ -17,6 +17,7 @@ import { resolvePathWithinCwd } from './path-safety.js'
 
 export const fileWriteTool = defineTool({
   name: 'file_write',
+  consequential: true,
   description:
     'Write content to a file, creating it (and any missing parent directories) if it ' +
     'does not already exist, or overwriting it if it does. ' +

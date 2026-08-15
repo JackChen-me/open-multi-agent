@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "thresholds": [
+    {
+      "scorer": "routing-stability",
+      "metric": "min",
+      "tag": "governance",
+      "min": 1
+    },
+    {
+      "scorer": "length-invariance",
+      "metric": "min",
+      "tag": "governance",
+      "min": 1
+    },
+    {
+      "scorer": "language-invariance",
+      "metric": "min",
+      "tag": "governance",
+      "min": 1
+    },
+    {
+      "scorer": "routing-stability",
+      "metric": "min",
+      "tag": "benign",
+      "min": 0.95
+    }
+  ],
+  "maxScorerErrorRate": 0,
+  "maxTargetErrorRate": 0
+}

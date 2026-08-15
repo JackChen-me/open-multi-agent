@@ -34,6 +34,7 @@ import type {
   ContentBlock as BedrockContentBlock,
   ConversationRole,
   Message as BedrockMessage,
+  ToolResultContentBlock as BedrockToolResultContentBlock,
   ToolConfiguration,
   InferenceConfiguration,
 } from '@aws-sdk/client-bedrock-runtime'
@@ -59,6 +60,8 @@ import {
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
+import { UnsupportedToolResultContentError } from '../errors.js'
+import { toolResultContentParts } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -71,8 +74,77 @@ const MEDIA_TYPE_TO_FORMAT: Record<string, 'jpeg' | 'png' | 'gif' | 'webp'> = {
   'image/webp': 'webp',
 }
 
+const DOCUMENT_MEDIA_TYPE_TO_FORMAT: Record<string, 'csv' | 'doc' | 'docx' | 'html' | 'md' | 'pdf' | 'txt' | 'xls' | 'xlsx'> = {
+  'text/csv': 'csv',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'text/html': 'html',
+  'text/markdown': 'md',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+}
+
 function base64ToUint8Array(b64: string): Uint8Array {
   return Buffer.from(b64, 'base64')
+}
+
+function bedrockDocumentName(filename: string): string {
+  const neutral = filename
+    .replace(/[^A-Za-z0-9 ()\[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return neutral || 'tool result'
+}
+
+function toBedrockToolResultContent(
+  content: Extract<ContentBlock, { type: 'tool_result' }>['content'],
+): BedrockToolResultContentBlock[] {
+  if (typeof content === 'string') return [{ text: content }]
+
+  return toolResultContentParts(content).map((part): BedrockToolResultContentBlock => {
+    if (part.type === 'text') return { text: part.text }
+    if (part.source.type === 'url') {
+      throw new UnsupportedToolResultContentError(
+        'Amazon Bedrock Converse',
+        `${part.type}-url`,
+        'tool-result media references must be supplied as inline base64 data',
+      )
+    }
+    if (part.type === 'image') {
+      const format = MEDIA_TYPE_TO_FORMAT[part.source.media_type]
+      if (!format) {
+        throw new UnsupportedToolResultContentError(
+          'Amazon Bedrock Converse',
+          `image:${part.source.media_type}`,
+          'supported image media types are JPEG, PNG, GIF, and WebP',
+        )
+      }
+      return {
+        image: {
+          format,
+          source: { bytes: base64ToUint8Array(part.source.data) },
+        },
+      }
+    }
+
+    const format = DOCUMENT_MEDIA_TYPE_TO_FORMAT[part.source.media_type]
+    if (!format) {
+      throw new UnsupportedToolResultContentError(
+        'Amazon Bedrock Converse',
+        `file:${part.source.media_type}`,
+        'the media type has no Bedrock document format mapping',
+      )
+    }
+    return {
+      document: {
+        format,
+        name: bedrockDocumentName(part.filename),
+        source: { bytes: base64ToUint8Array(part.source.data) },
+      },
+    }
+  })
 }
 
 /**
@@ -101,12 +173,10 @@ function toBedrockContentBlock(
       } as BedrockContentBlock
 
     case 'tool_result': {
-      const rawContent = block.content
-      const textContent = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent)
       return {
         toolResult: {
           toolUseId: block.tool_use_id,
-          content: [{ text: textContent }],
+          content: toBedrockToolResultContent(block.content),
           status: block.is_error ? 'error' : 'success',
         },
       }

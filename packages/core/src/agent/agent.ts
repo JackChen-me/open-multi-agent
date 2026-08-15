@@ -36,12 +36,18 @@
  * ```
  */
 
+import { isDeepStrictEqual } from 'node:util'
+
 import type {
   ExternalAgentBackendConfig,
   AgentConfig,
+  AgentPromptInput,
+  AgentRunInput,
   AgentState,
   AgentRunResult,
   BeforeRunHookContext,
+  BeforeRunHookResult,
+  ContentBlock,
   LLMMessage,
   StreamEvent,
   TokenUsage,
@@ -54,18 +60,30 @@ import { emitTrace, generateSpanId } from '../utils/trace.js'
 import { mergeAbortSignals } from '../utils/abort.js'
 import { createRunIdentity } from '../observability/identity.js'
 import { classifyRunFailure, statusOnly } from '../observability/status.js'
+import { DurableApprovalError } from '../approval/durable.js'
 import { createTraceRuntime } from '../observability/runtime.js'
-import { TokenBudgetExceededError } from '../errors.js'
+import {
+  InvalidMessageError,
+  StructuredOutputValidationError,
+  TokenBudgetExceededError,
+} from '../errors.js'
+import { assertValidMessages } from '../llm/validate.js'
 import type { ToolDefinition as FrameworkToolDefinition, ToolRegistry } from '../tool/framework.js'
 import type { ToolExecutor } from '../tool/executor.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import { createAdapter } from '../llm/adapter.js'
+import { normalizeEgressPolicy, rejectUnsupportedEgress } from '../llm/egress.js'
 import { AgentRunner, type AgentBackend, type RunnerOptions, type RunOptions, type RunResult } from './runner.js'
 import {
   buildStructuredOutputInstruction,
   extractJSON,
   validateOutput,
 } from './structured-output.js'
+import {
+  copyMessages,
+  prepareAgentPromptInput,
+  prepareAgentRunInput,
+} from './input.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -122,9 +140,14 @@ export class Agent {
           `or run it through OpenMultiAgent to inherit 'defaultModel'.`,
       )
     }
-    this.config = config
+    const egressPolicy = normalizeEgressPolicy(config.egressPolicy)
+    this.config = egressPolicy === undefined
+      ? config
+      : { ...config, egressPolicy }
     this._toolRegistry = toolRegistry
     this._toolExecutor = toolExecutor
+    if (config.history) assertValidMessages(config.history)
+    this.messageHistory = config.history ? copyMessages(config.history) : []
 
     this.state = {
       status: 'idle',
@@ -159,9 +182,29 @@ export class Agent {
     }
 
     const provider = this.config.provider ?? 'anthropic'
-    const adapter =
-      this.config.adapter ??
-      (await createAdapter(provider, this.config.apiKey, this.config.baseURL, this.config.region))
+    let adapter = this.config.adapter
+    if (adapter !== undefined) {
+      rejectUnsupportedEgress(
+        this.config.egressPolicy,
+        adapter.name,
+        'custom and AI SDK adapters do not expose an enforceable request transport or target contract to OMA.',
+      )
+    } else {
+      adapter = this.config.egressPolicy === undefined
+        ? await createAdapter(
+            provider,
+            this.config.apiKey,
+            this.config.baseURL,
+            this.config.region,
+          )
+        : await createAdapter(
+            provider,
+            this.config.apiKey,
+            this.config.baseURL,
+            this.config.region,
+            this.config.egressPolicy,
+          )
+    }
 
     // Append structured-output instructions when an outputSchema is configured.
     let effectiveSystemPrompt = this.config.systemPrompt
@@ -192,6 +235,9 @@ export class Agent {
       allowedTools: this.config.tools,
       disallowedTools: this.config.disallowedTools,
       ...(this.config.onToolCall !== undefined ? { onToolCall: this.config.onToolCall } : {}),
+      ...(this.config.shellExecutor !== undefined
+        ? { shellExecutor: this.config.shellExecutor }
+        : {}),
       cwd: this.config.cwd,
       agentName: this.name,
       agentRole: this.config.systemPrompt?.slice(0, 50) ?? 'assistant',
@@ -263,42 +309,38 @@ export class Agent {
   // -------------------------------------------------------------------------
 
   /**
-   * Run `prompt` in a fresh conversation (history is NOT used).
+   * Run a string prompt or complete message list in a fresh conversation
+   * (persistent history is NOT used).
    *
-   * Equivalent to constructing a brand-new messages array `[{ role:'user', … }]`
-   * and calling the runner once. The agent's persistent history is not modified.
+   * A string is shorthand for `[{ role:'user', content:[{ type:'text', … }] }]`.
+   * A structured list is defensively copied before execution. The agent's
+   * persistent history is not modified.
    *
    * Use this for one-shot queries where past context is irrelevant.
    */
-  async run(prompt: string, runOptions?: Partial<RunOptions>): Promise<AgentRunResult> {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: [{ type: 'text', text: prompt }] },
-    ]
-
+  async run(input: AgentRunInput, runOptions?: Partial<RunOptions>): Promise<AgentRunResult> {
+    const { messages } = prepareAgentRunInput(input, this.config.backend)
     return this.executeRun(messages, runOptions)
   }
 
   /**
-   * Run `prompt` as part of the ongoing conversation.
+   * Run a string or structured user turn as part of the ongoing conversation.
    *
-   * Appends the user message to the persistent history, runs the agent, then
-   * appends the resulting messages to the history for the next call.
+   * A `ContentBlock[]` is appended as exactly one user message. The input and
+   * resulting messages are defensively copied into persistent history for the
+   * next call.
    *
    * Use this for multi-turn interactions.
    */
   // TODO(#18): accept optional RunOptions to forward trace context
-  async prompt(message: string): Promise<AgentRunResult> {
-    const userMessage: LLMMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: message }],
-    }
-
+  async prompt(input: AgentPromptInput): Promise<AgentRunResult> {
+    const { message: userMessage } = prepareAgentPromptInput(input, this.config.backend)
     this.messageHistory.push(userMessage)
 
-    const result = await this.executeRun([...this.messageHistory])
+    const result = await this.executeRun(copyMessages(this.messageHistory))
 
     // Persist the new messages into history so the next `prompt` sees them.
-    for (const msg of result.messages) {
+    for (const msg of copyMessages(result.messages)) {
       this.messageHistory.push(msg)
     }
 
@@ -306,16 +348,14 @@ export class Agent {
   }
 
   /**
-   * Stream a fresh-conversation response, yielding {@link StreamEvent}s.
+   * Stream a fresh-conversation response from a string or complete message list,
+   * yielding {@link StreamEvent}s.
    *
    * Like {@link run}, this does not use or update the persistent history.
    */
-  async *stream(prompt: string, runOptions?: Partial<RunOptions>): AsyncGenerator<StreamEvent> {
-    const messages: LLMMessage[] = [
-      { role: 'user', content: [{ type: 'text', text: prompt }] },
-    ]
-
-    yield* this.executeStream(messages, runOptions)
+  stream(input: AgentRunInput, runOptions?: Partial<RunOptions>): AsyncGenerator<StreamEvent> {
+    const { messages } = prepareAgentRunInput(input, this.config.backend)
+    return this.executeStream(messages, runOptions)
   }
 
   // -------------------------------------------------------------------------
@@ -329,7 +369,7 @@ export class Agent {
 
   /** Return a copy of the persistent message history. */
   getHistory(): LLMMessage[] {
-    return [...this.messageHistory]
+    return copyMessages(this.messageHistory)
   }
 
   /**
@@ -413,11 +453,9 @@ export class Agent {
 
     try {
       // --- beforeRun hook ---
-      if (this.config.beforeRun) {
+      if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
         failureKind = 'callback'
-        const hookCtx = this.buildBeforeRunHookContext(messages)
-        const modified = await this.config.beforeRun(hookCtx)
-        this.applyHookContext(messages, modified, hookCtx.prompt)
+        await this.applyBeforeRunHook(messages)
         failureKind = undefined
       }
 
@@ -458,6 +496,19 @@ export class Agent {
       const result = await backend.run(messages, runOptions)
       this.state.tokenUsage = addUsage(this.state.tokenUsage, result.tokenUsage)
 
+      if (result.suspended) {
+        const suspendedResult = this.toAgentRunResult(
+          result,
+          false,
+          undefined,
+          identity,
+          statusOnly('suspended', 'Durable approval required before execution can continue.'),
+        )
+        this.transitionTo('completed')
+        this.emitAgentTrace(runOptions, agentStartMs, suspendedResult)
+        return suspendedResult
+      }
+
       if (result.budgetExceeded) {
         const budgetError = new TokenBudgetExceededError(
           this.name,
@@ -484,26 +535,6 @@ export class Agent {
         return budgetResult
       }
 
-      // --- Structured output validation ---
-      if (this.config.outputSchema) {
-        let validated = await this.validateStructuredOutput(
-          messages,
-          result,
-          backend,
-          runOptions,
-          identity,
-        )
-        // --- afterRun hook ---
-        if (this.config.afterRun) {
-          failureKind = 'callback'
-          validated = await this.config.afterRun(validated)
-          failureKind = undefined
-        }
-        validated = this.ensureAgentOutcome(validated, identity)
-        this.emitAgentTrace(runOptions, agentStartMs, validated)
-        return validated
-      }
-
       let agentResult: AgentRunResult
       if (timeoutSignal?.aborted) {
         const timeoutError = new Error(
@@ -517,6 +548,7 @@ export class Agent {
         agentResult = this.toAgentRunResult(
           result, false, undefined, identity, classified.status, classified.errorInfo,
         )
+        agentResult = { ...agentResult, error: timeoutError }
       } else if (callerAbort?.aborted && result.aborted) {
         const abortError = new Error('Run cancelled by caller.')
         abortError.name = 'AbortError'
@@ -524,6 +556,49 @@ export class Agent {
         agentResult = this.toAgentRunResult(
           result, false, undefined, identity, classified.status, classified.errorInfo,
         )
+        agentResult = { ...agentResult, error: abortError }
+      } else if (this.config.outputSchema) {
+        agentResult = await this.validateStructuredOutput(
+          messages,
+          result,
+          backend,
+          runOptions,
+          identity,
+        )
+
+        // The schema retry uses the same whole-run signal. A backend may
+        // return a late, valid response after that signal fires, so re-check
+        // the deadline before reporting structured success.
+        if (timeoutSignal?.aborted) {
+          const timeoutError = new Error(
+            `Agent "${this.name}" exceeded whole-run timeout of ${this.config.timeoutMs}ms`,
+          )
+          timeoutError.name = 'TimeoutError'
+          const classified = classifyRunFailure(timeoutError, {
+            kind: 'timeout',
+            statusCode: 'timeout',
+          })
+          agentResult = {
+            ...agentResult,
+            success: false,
+            status: classified.status,
+            errorInfo: classified.errorInfo,
+            structured: undefined,
+            error: timeoutError,
+          }
+        } else if (callerAbort?.aborted) {
+          const abortError = new Error('Run cancelled by caller.')
+          abortError.name = 'AbortError'
+          const classified = classifyRunFailure(abortError)
+          agentResult = {
+            ...agentResult,
+            success: false,
+            status: classified.status,
+            errorInfo: classified.errorInfo,
+            structured: undefined,
+            error: abortError,
+          }
+        }
       } else {
         agentResult = this.toAgentRunResult(
           result, true, undefined, identity, statusOnly('ok'),
@@ -549,6 +624,8 @@ export class Agent {
         ? classifyRunFailure(error, { kind: 'timeout', statusCode: 'timeout' })
         : callerAbort?.aborted
           ? classifyRunFailure(error, { kind: 'cancellation', statusCode: 'cancelled' })
+          : error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
           : classifyRunFailure(error, {
               ...(failureKind !== undefined ? { kind: failureKind } : {}),
               provider: this.config.provider,
@@ -676,6 +753,32 @@ export class Agent {
     // which is required by Anthropic's API for subsequent prompt() calls.
     const mergedMessages = [...result.messages, errorFeedbackMessage, ...retryResult.messages]
     const mergedToolCalls = [...result.toolCalls, ...retryResult.toolCalls]
+    const mergedTokens = mergedTokenUsage.input_tokens + mergedTokenUsage.output_tokens
+    const budgetExceeded = retryResult.budgetExceeded
+      || (this.config.maxTokenBudget !== undefined && mergedTokens > this.config.maxTokenBudget)
+
+    if (budgetExceeded) {
+      this.transitionTo('completed')
+      const budgetError = new TokenBudgetExceededError(
+        this.name,
+        mergedTokens,
+        this.config.maxTokenBudget ?? 0,
+      )
+      const classified = classifyRunFailure(budgetError)
+      return {
+        success: false,
+        identity,
+        status: classified.status,
+        errorInfo: classified.errorInfo,
+        output: retryResult.output,
+        messages: mergedMessages,
+        tokenUsage: mergedTokenUsage,
+        toolCalls: mergedToolCalls,
+        structured: undefined,
+        budgetExceeded: true,
+        error: budgetError,
+      }
+    }
 
     try {
       const parsed = extractJSON(retryResult.output)
@@ -690,12 +793,11 @@ export class Agent {
         tokenUsage: mergedTokenUsage,
         toolCalls: mergedToolCalls,
         structured: validated,
-        ...(retryResult.budgetExceeded ? { budgetExceeded: true } : {}),
       }
-    } catch {
+    } catch (cause) {
       // Retry also failed
       this.transitionTo('completed')
-      const validationError = new Error('Structured output validation failed after retry.')
+      const validationError = new StructuredOutputValidationError(cause)
       const classified = classifyRunFailure(validationError, { kind: 'validation' })
       return {
         success: false,
@@ -707,7 +809,7 @@ export class Agent {
         tokenUsage: mergedTokenUsage,
         toolCalls: mergedToolCalls,
         structured: undefined,
-        ...(retryResult.budgetExceeded ? { budgetExceeded: true } : {}),
+        error: validationError,
       }
     }
   }
@@ -741,21 +843,24 @@ export class Agent {
     })
     let agentTraceEmitted = false
     let effectiveTraceOptions: Partial<RunOptions> | undefined = callerOptions
+    let timeoutSignal: AbortSignal | undefined
+    let callerAbort: AbortSignal | undefined
+    let failureKind: TraceErrorKind | undefined
 
     try {
       // --- beforeRun hook ---
-      if (this.config.beforeRun) {
-        const hookCtx = this.buildBeforeRunHookContext(messages)
-        const modified = await this.config.beforeRun(hookCtx)
-        this.applyHookContext(messages, modified, hookCtx.prompt)
+      if (this.config.beforeRun && callerOptions?.resumeState === undefined) {
+        failureKind = 'callback'
+        await this.applyBeforeRunHook(messages)
+        failureKind = undefined
       }
 
       const backend = await this.getBackend()
       // Fresh timeout per stream call, same as executeRun.
-      const timeoutSignal = this.config.timeoutMs !== undefined && this.config.timeoutMs > 0
+      timeoutSignal = this.config.timeoutMs !== undefined && this.config.timeoutMs > 0
         ? AbortSignal.timeout(this.config.timeoutMs)
         : undefined
-      const callerAbort = callerOptions?.abortSignal
+      callerAbort = callerOptions?.abortSignal
       const effectiveAbort = timeoutSignal && callerAbort
         ? mergeAbortSignals(timeoutSignal, callerAbort)
         : timeoutSignal ?? callerAbort
@@ -782,16 +887,20 @@ export class Agent {
 
           const status = result.budgetExceeded
             ? statusOnly('budget_exhausted')
+            : result.suspended
+              ? statusOnly('suspended', 'Durable approval required before execution can continue.')
             : timeoutSignal?.aborted
               ? statusOnly('timeout')
               : callerAbort?.aborted && result.aborted
                 ? statusOnly('cancelled')
                 : statusOnly('ok')
           let agentResult = this.toAgentRunResult(
-            result, !result.budgetExceeded, undefined, identity, status,
+            result, !result.budgetExceeded && !result.suspended, undefined, identity, status,
           )
-          if (this.config.afterRun) {
+          if (this.config.afterRun && !result.suspended) {
+            failureKind = 'callback'
             agentResult = await this.config.afterRun(agentResult)
+            failureKind = undefined
           }
           agentResult = this.ensureAgentOutcome(agentResult, identity)
           this.transitionTo('completed')
@@ -803,12 +912,18 @@ export class Agent {
           const error = event.data instanceof Error
             ? event.data
             : new Error(String(event.data))
+          // Backend stream errors originate from the configured provider. Keep
+          // the source classification on the event so task retry can make an
+          // explicit failover decision without reclassifying a raw Error.
+          const classified = error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
+            : classifyRunFailure(error, { provider: this.config.provider })
           this.transitionToError(error)
           this.emitAgentTrace(runOptions, agentStartMs, {
             success: false,
             identity,
-            status: classifyRunFailure(error).status,
-            errorInfo: classifyRunFailure(error).errorInfo,
+            status: classified.status,
+            errorInfo: classified.errorInfo,
             output: error.message,
             messages: [],
             tokenUsage: ZERO_USAGE,
@@ -817,6 +932,8 @@ export class Agent {
             error,
           })
           agentTraceEmitted = true
+          yield { ...event, errorInfo: classified.errorInfo } satisfies StreamEvent
+          continue
         }
 
         yield event
@@ -824,12 +941,22 @@ export class Agent {
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
       this.transitionToError(error)
+      const classified = timeoutSignal?.aborted
+        ? classifyRunFailure(error, { kind: 'timeout', statusCode: 'timeout' })
+        : callerAbort?.aborted
+          ? classifyRunFailure(error, { kind: 'cancellation', statusCode: 'cancelled' })
+          : error instanceof DurableApprovalError
+            ? classifyRunFailure(error, { kind: 'validation' })
+          : classifyRunFailure(error, {
+              ...(failureKind !== undefined ? { kind: failureKind } : {}),
+              provider: this.config.provider,
+            })
       if (!agentTraceEmitted) {
         this.emitAgentTrace(effectiveTraceOptions, agentStartMs, {
           success: false,
           identity,
-          status: classifyRunFailure(error).status,
-          errorInfo: classifyRunFailure(error).errorInfo,
+          status: classified.status,
+          errorInfo: classified.errorInfo,
           output: error.message,
           messages: [],
           tokenUsage: ZERO_USAGE,
@@ -838,13 +965,35 @@ export class Agent {
           error,
         })
       }
-      yield { type: 'error', data: error } satisfies StreamEvent
+      yield { type: 'error', data: error, errorInfo: classified.errorInfo } satisfies StreamEvent
     }
   }
 
   // -------------------------------------------------------------------------
   // Hook helpers
   // -------------------------------------------------------------------------
+
+  private async applyBeforeRunHook(messages: LLMMessage[]): Promise<void> {
+    const hook = this.config.beforeRun
+    if (!hook) return
+
+    const hookCtx = this.buildBeforeRunHookContext(messages)
+    const originalHookMessages = copyMessages(hookCtx.messages)
+    const modified = await hook(hookCtx)
+
+    if (
+      this.config.backend !== undefined &&
+      modified.messages !== undefined &&
+      !isDeepStrictEqual(modified.messages, originalHookMessages)
+    ) {
+      throw new InvalidMessageError(
+        `The ${this.config.backend.kind} external backend accepts beforeRun.prompt rewrites only; ` +
+          'beforeRun.messages cannot be forwarded without loss.',
+      )
+    }
+
+    this.applyHookContext(messages, modified, hookCtx)
+  }
 
   /** Extract the prompt text from the last user message to build hook context. */
   private buildBeforeRunHookContext(messages: LLMMessage[]): BeforeRunHookContext {
@@ -860,26 +1009,52 @@ export class Agent {
     }
     // Strip hook functions to avoid circular self-references in the context
     const { beforeRun, afterRun, ...agentInfo } = this.config
-    return { prompt, agent: agentInfo as AgentConfig }
+    return {
+      prompt,
+      messages: copyMessages(messages),
+      agent: agentInfo as AgentConfig,
+    }
   }
 
   /**
    * Apply a (possibly modified) hook context back to the messages array.
    *
-   * Only text blocks in the last user message are replaced; non-text content
-   * (images, tool results) is preserved. The array element is replaced (not
-   * mutated in place) so that shallow copies of the original array (e.g. from
-   * `prompt()`) are not affected.
+   * A returned `messages` list replaces the complete run input first. A changed
+   * `prompt` then replaces text blocks in the last user message; non-text blocks
+   * retain their relative order. The caller's input and persistent prompt
+   * history are separate defensive copies.
    */
-  private applyHookContext(messages: LLMMessage[], ctx: BeforeRunHookContext, originalPrompt: string): void {
-    if (ctx.prompt === originalPrompt) return
+  private applyHookContext(
+    messages: LLMMessage[],
+    ctx: BeforeRunHookResult,
+    original: BeforeRunHookContext,
+  ): void {
+    if (typeof ctx.prompt !== 'string') {
+      throw new InvalidMessageError('beforeRun.prompt must be a string')
+    }
+
+    if (ctx.messages !== undefined) {
+      assertValidMessages(ctx.messages)
+      messages.splice(0, messages.length, ...copyMessages(ctx.messages))
+    }
+
+    if (ctx.prompt === original.prompt) return
 
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]!.role === 'user') {
-        const nonTextBlocks = messages[i]!.content.filter(b => b.type !== 'text')
+        const content = messages[i]!.content
+        const firstTextIndex = content.findIndex((block) => block.type === 'text')
+        const replacement = { type: 'text' as const, text: ctx.prompt }
+        const rewritten = firstTextIndex === -1
+          ? [replacement, ...content]
+          : content.reduce<ContentBlock[]>((blocks, block, index) => {
+              if (block.type !== 'text') blocks.push(block)
+              else if (index === firstTextIndex) blocks.push(replacement)
+              return blocks
+            }, [])
         messages[i] = {
           role: 'user',
-          content: [{ type: 'text', text: ctx.prompt }, ...nonTextBlocks],
+          content: rewritten,
         }
         break
       }
@@ -922,6 +1097,7 @@ export class Agent {
       structured,
       ...(result.loopDetected ? { loopDetected: true } : {}),
       ...(result.budgetExceeded ? { budgetExceeded: true } : {}),
+      ...(result.pendingApprovals ? { pendingApprovals: result.pendingApprovals } : {}),
     }
   }
 
@@ -970,6 +1146,9 @@ export class Agent {
         model: this.config.model!,
       },
       abortSignal,
+      ...(this.config.shellExecutor !== undefined
+        ? { shellExecutor: this.config.shellExecutor }
+        : {}),
       cwd: this.config.cwd === undefined ? defaultWorkspaceDir() : this.config.cwd,
       ...(this.config.credentials !== undefined ? { credentials: this.config.credentials } : {}),
     }

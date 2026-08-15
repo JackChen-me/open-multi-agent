@@ -12,7 +12,7 @@
  */
 
 import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -35,7 +35,15 @@ import type { StoredRun } from '../observability/store.js'
 import { FileTraceStore, FileTraceStoreError } from '../observability/file-store.js'
 import { emptyTraceSinkStats, type FlushResult, type TraceSink } from '../observability/sink.js'
 import type { SupportedProvider } from '../llm/adapter.js'
-import type { AgentRunResult, CoordinatorConfig, OrchestratorConfig, TeamConfig, TeamRunResult } from '../types.js'
+import { validateTaskMetadata } from '../task/metadata.js'
+import type {
+  AgentRunResult,
+  CoordinatorConfig,
+  OrchestratorConfig,
+  TaskMetadata,
+  TeamConfig,
+  TeamRunResult,
+} from '../types.js'
 
 // ---------------------------------------------------------------------------
 // Exit codes
@@ -178,7 +186,7 @@ export const PROVIDER_REFERENCE: ReadonlyArray<{
   { id: 'grok', apiKeyEnv: ['XAI_API_KEY'], baseUrlSupported: true },
   { id: 'minimax', apiKeyEnv: ['MINIMAX_API_KEY'], baseUrlSupported: true, notes: 'Global endpoint: https://api.minimax.io/v1 (default). China endpoint: https://api.minimaxi.com/v1. Set MINIMAX_BASE_URL to choose, or pass baseURL in agent config.' },
   { id: 'mimo', apiKeyEnv: ['MIMO_API_KEY', 'MIMO_BASE_URL'], baseUrlSupported: true, notes: 'OpenAI-compatible endpoint at https://api.xiaomimimo.com/v1 by default. Token Plan keys (tp-...) require the cluster base URL from your subscription page; set MIMO_BASE_URL or pass baseURL in agent config.' },
-  { id: 'deepseek', apiKeyEnv: ['DEEPSEEK_API_KEY'], baseUrlSupported: true, notes: 'OpenAI-compatible endpoint at https://api.deepseek.com/v1. Models: deepseek-v4-flash (default), deepseek-v4-pro (flagship); both support 1M context. Legacy deepseek-chat/deepseek-reasoner retire 2026-07-24.' },
+  { id: 'deepseek', apiKeyEnv: ['DEEPSEEK_API_KEY'], baseUrlSupported: true, notes: 'OpenAI-compatible endpoint at https://api.deepseek.com/v1. Models: deepseek-v4-flash (DeepSeek-V4-Flash-0731 public beta, default), deepseek-v4-pro (Preview API); both support 1M context. Legacy deepseek-chat/deepseek-reasoner were retired on 2026-07-24.' },
   { id: 'doubao', apiKeyEnv: ['ARK_API_KEY'], baseUrlSupported: true, notes: 'OpenAI-compatible Volcengine Ark endpoint at https://ark.cn-beijing.volces.com/api/v3. Set provider to doubao and choose a model available to your Ark key.' },
   { id: 'hunyuan', apiKeyEnv: ['HUNYUAN_API_KEY', 'HUNYUAN_BASE_URL'], baseUrlSupported: true, notes: 'OpenAI-compatible. Defaults to the current Tencent MaaS / TokenHub endpoint https://tokenhub.tencentmaas.com/v1 (sk-... keys, models like hy3-preview). The legacy Tencent Cloud endpoint https://api.hunyuan.cloud.tencent.com/v1 (models like hunyuan-turbos-latest) is being retired by Tencent (shutdown 2026-09-30); target it via HUNYUAN_BASE_URL until then. Tool calling verified on hy3-preview / hunyuan-turbos / hunyuan-functioncall.' },
   { id: 'qiniu', apiKeyEnv: ['QINIU_API_KEY'], baseUrlSupported: true, notes: 'OpenAI-compatible endpoint at https://api.qnaigc.com/v1. Set provider to qiniu and choose a model available to your key.' },
@@ -570,6 +578,10 @@ function asTaskSpecs(v: unknown, label: string): ReadonlyArray<{
   assignee?: string
   dependsOn?: string[]
   memoryScope?: 'dependencies' | 'all'
+  dependencyPayload?: 'output' | 'structured' | 'both'
+  role?: string
+  priority?: 'low' | 'normal' | 'high' | 'critical'
+  metadata?: TaskMetadata
   maxRetries?: number
   retryDelayMs?: number
   retryBackoff?: number
@@ -581,6 +593,10 @@ function asTaskSpecs(v: unknown, label: string): ReadonlyArray<{
     assignee?: string
     dependsOn?: string[]
     memoryScope?: 'dependencies' | 'all'
+    dependencyPayload?: 'output' | 'structured' | 'both'
+    role?: string
+    priority?: 'low' | 'normal' | 'high' | 'critical'
+    metadata?: TaskMetadata
     maxRetries?: number
     retryDelayMs?: number
     retryBackoff?: number
@@ -601,6 +617,34 @@ function asTaskSpecs(v: unknown, label: string): ReadonlyArray<{
     }
     if (item['memoryScope'] === 'all' || item['memoryScope'] === 'dependencies') {
       row.memoryScope = item['memoryScope']
+    }
+    if (
+      item['dependencyPayload'] === 'output'
+      || item['dependencyPayload'] === 'structured'
+      || item['dependencyPayload'] === 'both'
+    ) {
+      row.dependencyPayload = item['dependencyPayload']
+    }
+    if (typeof item['role'] === 'string') row.role = item['role']
+    if (
+      item['priority'] === 'low'
+      || item['priority'] === 'normal'
+      || item['priority'] === 'high'
+      || item['priority'] === 'critical'
+    ) {
+      row.priority = item['priority']
+    }
+    if (item['metadata'] !== undefined) {
+      if (!isObject(item['metadata'])) {
+        throw new OmaValidationError(`${label}[${i}].metadata: object expected`)
+      }
+      try {
+        row.metadata = validateTaskMetadata(item['metadata'] as TaskMetadata)!
+      } catch (error) {
+        throw new OmaValidationError(
+          `${label}[${i}].metadata: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
     }
     if (typeof item['maxRetries'] === 'number') row.maxRetries = item['maxRetries']
     if (typeof item['retryDelayMs'] === 'number') row.retryDelayMs = item['retryDelayMs']
@@ -635,12 +679,22 @@ export function serializeTeamRunResult(result: TeamRunResult, opts: CliJsonOptio
   for (const [k, v] of result.agentResults) {
     agentResults[k] = serializeAgentResult(v, opts.includeMessages)
   }
+  const taskResults: Record<string, unknown> | undefined = result.taskResults === undefined
+    ? undefined
+    : Object.fromEntries(
+        [...result.taskResults].map(([k, v]) => [
+          k,
+          serializeAgentResult(v, opts.includeMessages),
+        ]),
+      )
   return {
     success: result.success,
     goal: result.goal,
     tasks: result.tasks,
+    routingDecision: result.routingDecision,
     totalTokenUsage: result.totalTokenUsage,
     agentResults,
+    ...(taskResults !== undefined ? { taskResults } : {}),
   }
 }
 
@@ -1024,7 +1078,7 @@ const isMain = (() => {
   const argv1 = process.argv[1]
   if (!argv1) return false
   try {
-    return fileURLToPath(import.meta.url) === resolve(argv1)
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(argv1))
   } catch {
     return false
   }

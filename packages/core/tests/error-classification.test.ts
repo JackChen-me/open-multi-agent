@@ -1,10 +1,16 @@
 import { describe, it, expect } from 'vitest'
+import OpenAI from 'openai'
 import {
   isRetryableError,
+  InvalidTaskRequirementsError,
   TokenBudgetExceededError,
   InvalidMessageError,
   LLMCallTimeoutError,
+  StructuredOutputValidationError,
+  UnsupportedToolCallError,
+  UnsupportedToolResultContentError,
 } from '../src/errors.js'
+import { classifyRunFailure } from '../src/observability/status.js'
 
 describe('isRetryableError', () => {
   it('treats terminal 4xx client errors as non-retryable', () => {
@@ -37,9 +43,20 @@ describe('isRetryableError', () => {
     expect(isRetryableError({ statusCode: 503 })).toBe(true)
   })
 
-  it('classifies budget and invalid-message framework errors as terminal', () => {
+  it('classifies budget, invalid-message, and task-requirement errors as terminal', () => {
     expect(isRetryableError(new TokenBudgetExceededError('a', 100, 50))).toBe(false)
     expect(isRetryableError(new InvalidMessageError('bad'))).toBe(false)
+    expect(isRetryableError(new StructuredOutputValidationError())).toBe(false)
+    expect(isRetryableError(new UnsupportedToolCallError('openai', 'custom'))).toBe(false)
+    expect(isRetryableError(
+      new UnsupportedToolResultContentError('openai', 'file-url'),
+    )).toBe(false)
+    expect(isRetryableError(new InvalidTaskRequirementsError([{
+      code: 'NO_ELIGIBLE_AGENT',
+      taskId: 'task-1',
+      taskTitle: 'Restricted',
+      reasons: ['worker excluded'],
+    }]))).toBe(false)
   })
 
   it('classifies a per-call timeout as retryable', () => {
@@ -50,6 +67,23 @@ describe('isRetryableError', () => {
     const err = new Error('aborted')
     err.name = 'AbortError'
     expect(isRetryableError(err)).toBe(false)
+  })
+
+  it('classifies the OpenAI SDK APIUserAbortError as terminal', () => {
+    const err = new OpenAI.APIUserAbortError()
+    expect(isRetryableError(err)).toBe(false)
+  })
+
+  it('classifies the real OpenAI SDK abort as cancellation', () => {
+    const err = new OpenAI.APIUserAbortError()
+    expect(classifyRunFailure(err, { provider: 'openai' })).toMatchObject({
+      status: { code: 'cancelled' },
+      errorInfo: {
+        kind: 'cancellation',
+        retryable: false,
+        provider: 'openai',
+      },
+    })
   })
 
   it('ignores a non-numeric status (defaults to retryable)', () => {

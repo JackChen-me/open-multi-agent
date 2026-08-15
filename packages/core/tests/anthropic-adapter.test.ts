@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { textMsg, toolUseMsg, toolResultMsg, imageMsg, chatOpts, toolDef, collectEvents } from './helpers/llm-fixtures.js'
 import type { LLMMessage, LLMResponse, ReasoningBlock, StreamEvent, ToolUseBlock } from '../src/types.js'
+import { UnsupportedToolResultContentError } from '../src/errors.js'
 
 // ---------------------------------------------------------------------------
 // Mock the Anthropic SDK
@@ -8,16 +9,16 @@ import type { LLMMessage, LLMResponse, ReasoningBlock, StreamEvent, ToolUseBlock
 
 const mockCreate = vi.hoisted(() => vi.fn())
 const mockStream = vi.hoisted(() => vi.fn())
-
-vi.mock('@anthropic-ai/sdk', () => {
-  const AnthropicMock = vi.fn(() => ({
+const AnthropicMock = vi.hoisted(() =>
+  vi.fn(() => ({
     messages: {
       create: mockCreate,
       stream: mockStream,
     },
-  }))
-  return { default: AnthropicMock, Anthropic: AnthropicMock }
-})
+  })),
+)
+
+vi.mock('@anthropic-ai/sdk', () => ({ default: AnthropicMock, Anthropic: AnthropicMock }))
 
 import { AnthropicAdapter } from '../src/llm/anthropic.js'
 
@@ -55,6 +56,20 @@ describe('AnthropicAdapter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     adapter = new AnthropicAdapter('test-key')
+  })
+
+  it('injects a guarded fetch when an egress policy is configured', async () => {
+    new AnthropicAdapter('test-key', 'https://api.anthropic.com', {
+      mode: 'allowlist',
+      allowedOrigins: ['https://api.anthropic.com'],
+    })
+    const init = AnthropicMock.mock.calls.at(-1)?.[0] as { fetch?: typeof globalThis.fetch }
+
+    expect(init.fetch).toEqual(expect.any(Function))
+    await expect(init.fetch!('https://other.example/v1')).rejects.toMatchObject({
+      code: 'EGRESS_POLICY_DENIED',
+      origin: 'https://other.example',
+    })
   })
 
   // =========================================================================
@@ -117,6 +132,78 @@ describe('AnthropicAdapter', () => {
         content: 'result data',
         is_error: false,
       })
+    })
+
+    it('maps rich tool_result images and PDF files without dropping either', async () => {
+      mockCreate.mockResolvedValue(makeAnthropicResponse())
+
+      await adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'call_1',
+            content: [
+              { type: 'text', text: 'Rendered preview' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+              },
+              {
+                type: 'file',
+                filename: 'report.pdf',
+                source: {
+                  type: 'url',
+                  media_type: 'application/pdf',
+                  url: 'https://example.com/report.pdf',
+                },
+              },
+            ],
+          }],
+        }],
+        chatOpts(),
+      )
+
+      const sentContent = mockCreate.mock.calls[0][0].messages[0].content
+      expect(sentContent[0]).toEqual({
+        type: 'tool_result',
+        tool_use_id: 'call_1',
+        content: [
+          { type: 'text', text: 'Rendered preview' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+          },
+          { type: 'text', text: '[File attachment follows: report.pdf]' },
+        ],
+        is_error: undefined,
+      })
+      expect(sentContent[1]).toEqual({
+        type: 'document',
+        title: 'report.pdf',
+        source: { type: 'url', url: 'https://example.com/report.pdf' },
+      })
+    })
+
+    it('fails explicitly for a rich file type Anthropic cannot carry', async () => {
+      mockCreate.mockResolvedValue(makeAnthropicResponse())
+
+      await expect(adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'call_1',
+            content: [{
+              type: 'file',
+              filename: 'notes.txt',
+              source: { type: 'base64', media_type: 'text/plain', data: 'bm90ZXM=' },
+            }],
+          }],
+        }],
+        chatOpts(),
+      )).rejects.toThrow(UnsupportedToolResultContentError)
+      expect(mockCreate).not.toHaveBeenCalled()
     })
 
     it('converts image blocks to Anthropic format', async () => {

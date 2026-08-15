@@ -4,9 +4,23 @@ import { SharedMemory } from '../src/memory/shared.js'
 import { RedactingStore } from '../src/memory/redacting-store.js'
 import { InMemoryStore } from '../src/memory/store.js'
 import { Team } from '../src/team/team.js'
+import { APPROVAL_KEY_PREFIX } from '../src/approval/durable.js'
 import type { MemoryEntry, MemoryStore } from '../src/types.js'
 
 describe('SharedMemory', () => {
+  it('keeps checkpoint and approval records out of agent-visible memory', async () => {
+    const store = new InMemoryStore()
+    const mem = new SharedMemory(store)
+    await mem.write('agent', 'visible', 'value')
+    await store.set('__oma_checkpoint__/latest', '{"checkpoint":true}')
+    await store.set(`${APPROVAL_KEY_PREFIX}apr_test`, '{"approval":true}')
+
+    expect((await mem.listAll()).map((entry) => entry.key)).toEqual(['agent/visible'])
+    expect(await mem.read(`${APPROVAL_KEY_PREFIX}apr_test`)).toBeNull()
+    expect((await mem.snapshot()).entries.map((entry) => entry.key)).toEqual(['agent/visible'])
+    expect(await mem.getSummary()).not.toContain('approval')
+  })
+
   // -------------------------------------------------------------------------
   // Write & read
   // -------------------------------------------------------------------------

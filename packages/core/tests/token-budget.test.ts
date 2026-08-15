@@ -341,20 +341,32 @@ describe('token budget enforcement', () => {
       maxTokenBudget: 50,
       onProgress: e => events.push(e),
     })
+    let attempts = 0
+    const retryWorker: AgentConfig = {
+      ...agentConfig('retry-worker'),
+      afterRun: result => {
+        attempts += 1
+        return attempts === 1
+          ? { ...result, success: false, output: 'retryable application failure' }
+          : result
+      },
+    }
     const team = oma.createTeam('team-c', {
       name: 'team-c',
-      agents: [agentConfig('retry-worker', 1)],
+      agents: [retryWorker],
       sharedMemory: false,
     })
 
     const result = await oma.runTasks(team, [
-      { title: 'Retrying task', description: 'Will exceed internal budget', assignee: 'retry-worker', maxRetries: 1 },
+      { title: 'Retrying task', description: 'Fails once at the application layer', assignee: 'retry-worker', maxRetries: 1 },
       { title: 'Later task', description: 'Should be skipped', assignee: 'retry-worker', dependsOn: ['Retrying task'] },
     ])
 
     expect(result.totalTokenUsage.input_tokens + result.totalTokenUsage.output_tokens).toBe(70)
     expect(events.some(e => e.type === 'budget_exceeded')).toBe(true)
-    expect(events.some(e => e.type === 'error')).toBe(true)
+    expect(events.some(e => e.type === 'task_retry')).toBe(true)
+    expect(events.some(e => e.type === 'task_complete')).toBe(true)
+    expect(events.some(e => e.type === 'task_skipped')).toBe(true)
   })
 
   it('enforces orchestrator budget in runTeam', async () => {

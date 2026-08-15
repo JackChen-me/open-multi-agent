@@ -1,6 +1,6 @@
 {
   "name": "@open-multi-agent/otel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Optional OpenTelemetry adapter for @open-multi-agent/core TraceRecord v2.",
   "files": [
     "dist",
@@ -49,7 +49,7 @@
     "url": "https://github.com/open-multi-agent/open-multi-agent/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@open-multi-agent/core": "^1.11.0"

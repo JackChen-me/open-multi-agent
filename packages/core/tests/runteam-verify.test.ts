@@ -169,11 +169,16 @@ describe('runTeam verify hook integration', () => {
     expect(taskD!.verify).toBeUndefined()
   })
 
-  it('verify field in coordinator JSON is ignored when invalid (null, number, string)', async () => {
+  it('rejects an invalid coordinator verify field instead of silently dropping it', async () => {
     const worker = agent('worker')
     const judge = agent('judge')
 
     mockAdapterResponses = [
+      coordinatorPlan([
+        { title: 'Task E1', description: 'Do E1', assignee: 'worker', dependsOn: [], verify: null },
+        { title: 'Task E2', description: 'Do E2', assignee: 'worker', dependsOn: [], verify: 42 },
+        { title: 'Task E3', description: 'Do E3', assignee: 'worker', dependsOn: [], verify: 'yes' },
+      ]),
       coordinatorPlan([
         { title: 'Task E1', description: 'Do E1', assignee: 'worker', dependsOn: [], verify: null },
         { title: 'Task E2', description: 'Do E2', assignee: 'worker', dependsOn: [], verify: 42 },
@@ -189,9 +194,8 @@ describe('runTeam verify hook integration', () => {
       verifyJudges: [judge],
     })
 
-    expect(result.success).toBe(true)
-    for (const task of result.tasks ?? []) {
-      expect(task.verify).toBeUndefined()
-    }
+    expect(result.success).toBe(false)
+    expect(result.errorInfo).toMatchObject({ kind: 'validation', code: 'COORDINATOR_PLAN_INVALID' })
+    expect(result.tasks).toEqual([])
   })
 })

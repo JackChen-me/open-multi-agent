@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { fromOpenAICompletion } from '../src/llm/openai-common.js'
+import { UnsupportedToolCallError } from '../src/errors.js'
 import type { ChatCompletion } from 'openai/resources/chat/completions/index.js'
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,20 @@ const TOOL_NAMES = ['bash', 'file_read', 'file_write']
 // ---------------------------------------------------------------------------
 
 describe('fromOpenAICompletion fallback extraction', () => {
+  it('rejects custom OpenAI tool calls instead of dropping them', () => {
+    const completion = makeCompletion({
+      tool_calls: [{
+        id: 'custom_1',
+        type: 'custom',
+        custom: { name: 'shell', input: 'echo unsafe' },
+      }],
+      finish_reason: 'tool_calls',
+    })
+
+    expect(() => fromOpenAICompletion(completion, TOOL_NAMES, 'openai'))
+      .toThrow(UnsupportedToolCallError)
+  })
+
   it('returns normal tool_calls when present (no fallback)', () => {
     const completion = makeCompletion({
       content: 'Let me run a command.',

@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { z } from 'zod'
+import { AgentRunner } from '../src/agent/runner.js'
 import { Checkpoint, CHECKPOINT_KEY_PREFIX, isCheckpointKey } from '../src/memory/checkpoint.js'
+import { defineTool, ToolRegistry } from '../src/tool/framework.js'
+import { ToolExecutor } from '../src/tool/executor.js'
 import { InMemoryStore } from '../src/memory/store.js'
 import { RedactingStore } from '../src/memory/redacting-store.js'
 import { SharedMemory } from '../src/memory/shared.js'
@@ -13,6 +17,7 @@ import type {
   LLMChatOptions,
   LLMMessage,
   LLMResponse,
+  InFlightTaskCheckpoint,
   MemoryEntry,
   MemoryStore,
   OrchestratorEvent,
@@ -187,6 +192,123 @@ describe('checkpoint snapshots', () => {
     expect((await checkpoint.loadLatest())?.queue.completed).toEqual(['a'])
   })
 
+  it('rejects a v3 tool commit that does not match its pending call', async () => {
+    const store = new InMemoryStore()
+    const checkpoint = new Checkpoint(store)
+    const queue = new TaskQueue()
+    queue.add(task('a', { assignee: 'worker' }))
+    queue.update('a', { status: 'in_progress' })
+
+    await store.set(checkpoint.key, JSON.stringify({
+      version: 3,
+      mode: 'runTasks',
+      createdAt: new Date().toISOString(),
+      identity: {
+        runId: 'run-1',
+        attempt: 1,
+        lastTraceId: 'trace-1',
+        lastRootSpanId: 'span-1',
+      },
+      queue: queue.snapshot(),
+      completedTaskResults: [],
+      inFlightTasks: [{
+        taskId: 'a',
+        assignee: 'worker',
+        phase: 'executing_tools',
+        conversationMessages: [],
+        messages: [],
+        tokenUsage: { input_tokens: 1, output_tokens: 1 },
+        toolCalls: [],
+        turns: 1,
+        pendingToolCalls: [{
+          call: { type: 'tool_use', id: 'call-1', name: 'echo', input: {} },
+          commit: {
+            result: {
+              type: 'tool_result',
+              tool_use_id: 'different-call',
+              content: 'done',
+            },
+            record: { toolName: 'echo', input: {}, output: 'done', duration: 1 },
+          },
+        }],
+      }],
+    }))
+
+    await expect(checkpoint.loadLatest()).rejects.toThrow('is not a checkpoint snapshot')
+  })
+
+  it('round-trips rich tool-result messages through task checkpoint restore', async () => {
+    const store = new InMemoryStore()
+    const queue = new TaskQueue()
+    queue.add(task('first', { assignee: 'worker' }))
+    queue.add(task('second', { assignee: 'worker', dependsOn: ['first'] }))
+    queue.complete('first', 'first output')
+    const richContent = [
+      { type: 'text' as const, text: 'Rendered preview' },
+      {
+        type: 'image' as const,
+        source: {
+          type: 'base64' as const,
+          media_type: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+      {
+        type: 'file' as const,
+        filename: 'report.pdf',
+        source: {
+          type: 'url' as const,
+          media_type: 'application/pdf',
+          url: 'https://example.com/report.pdf',
+        },
+      },
+    ]
+    await new Checkpoint(store, {}).save({
+      version: 1,
+      mode: 'runTasks',
+      createdAt: new Date().toISOString(),
+      queue: queue.snapshot(),
+      completedTaskResults: [{
+        taskId: 'first',
+        assignee: 'worker',
+        result: 'first output',
+        agentResult: {
+          success: true,
+          output: 'first output',
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'tool_use', id: 'call-1', name: 'render', input: {} }],
+            },
+            {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'call-1', content: richContent }],
+            },
+          ],
+          tokenUsage: { input_tokens: 1, output_tokens: 1 },
+          toolCalls: [{
+            toolName: 'render',
+            input: {},
+            output: 'Rendered preview\n[image: image/png; inline data]\n[file: report.pdf; application/pdf; URL reference]',
+            duration: 1,
+          }],
+        },
+      }],
+    })
+    const pending = scriptedAdapter(['second output'])
+    const team = new Team({ name: 'team', agents: [worker('worker', pending.adapter)] })
+
+    const restored = await new OpenMultiAgent().restore(team, { checkpoint: { store } })
+
+    expect(pending.calls()).toBe(1)
+    const restoredResult = restored.taskResults?.get('first')
+    expect(restoredResult?.messages[1]?.content[0]).toEqual({
+      type: 'tool_result',
+      tool_use_id: 'call-1',
+      content: richContent,
+    })
+  })
+
   it('a RedactingStore-wrapped checkpoint masks secrets yet stays loadable', async () => {
     const inner = new AsyncMapStore()
     const checkpoint = new Checkpoint(new RedactingStore(inner), { runId: 'secret-run' })
@@ -336,6 +458,62 @@ describe('OpenMultiAgent checkpoint/restore', () => {
     expect((await resumedTeam.getSharedMemoryInstance()!.read('seed/note'))?.value).toEqual({ keep: true })
   })
 
+  it('restores requirements and validates pending work against the resumed roster', async () => {
+    const checkpointStore = new InMemoryStore()
+    const scripted = scriptedAdapter(['first output', 'must not run'])
+    const abort = new AbortController()
+    const orchestrator = new OpenMultiAgent({
+      onProgress(event) {
+        if (event.type === 'task_complete') abort.abort()
+      },
+    })
+    const initialTeam = new Team({
+      name: 'team',
+      agents: [{
+        ...worker('worker', scripted.adapter),
+        capabilities: ['typescript'],
+      }],
+    })
+    const constrainedTasks: RunTaskSpec[] = [
+      {
+        title: 'first',
+        description: 'do first',
+        assignee: 'worker',
+        requires: { requiredCapabilities: ['typescript'] },
+      },
+      {
+        title: 'second',
+        description: 'do second',
+        assignee: 'worker',
+        dependsOn: ['first'],
+        requires: { requiredCapabilities: ['typescript'] },
+      },
+    ]
+
+    await orchestrator.runTasks(initialTeam, constrainedTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store: checkpointStore },
+    })
+    expect(scripted.calls()).toBe(1)
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [worker('worker', scripted.adapter)],
+    })
+    await expect(orchestrator.restore(resumedTeam, {
+      checkpoint: { store: checkpointStore },
+    })).rejects.toMatchObject({
+      code: 'INVALID_TASK_REQUIREMENTS',
+      issues: [
+        expect.objectContaining({
+          code: 'ASSIGNEE_REQUIREMENTS_MISMATCH',
+          taskTitle: 'second',
+        }),
+      ],
+    })
+    expect(scripted.calls()).toBe(1)
+  })
+
   it('restore against an empty store starts a fresh task run', async () => {
     const store = new InMemoryStore()
     const scripted = scriptedAdapter(['fresh output'])
@@ -353,6 +531,31 @@ describe('OpenMultiAgent checkpoint/restore', () => {
     expect(scripted.calls()).toBe(1)
     expect(result.tasks?.[0]?.status).toBe('completed')
     expect((await store.list()).some((entry) => isCheckpointKey(entry.key))).toBe(true)
+  })
+
+  it('restore against an empty store preserves and validates task requirements', async () => {
+    const store = new InMemoryStore()
+    const scripted = scriptedAdapter(['must not run'])
+    const team = new Team({
+      name: 'team',
+      agents: [worker('worker', scripted.adapter)],
+      sharedMemoryStore: store,
+    })
+    const orchestrator = new OpenMultiAgent()
+
+    await expect(orchestrator.restore(team, [{
+      title: 'restricted',
+      description: 'requires a missing capability',
+      assignee: 'worker',
+      requires: { requiredCapabilities: ['missing'] },
+    }], { checkpoint: { store } })).rejects.toMatchObject({
+      code: 'INVALID_TASK_REQUIREMENTS',
+      issues: [
+        expect.objectContaining({ code: 'ASSIGNEE_REQUIREMENTS_MISMATCH' }),
+      ],
+    })
+
+    expect(scripted.calls()).toBe(0)
   })
 
   it('checkpoint/restore works with a custom async MemoryStore', async () => {
@@ -691,5 +894,434 @@ describe('runTeam restore synthesis', () => {
           (event.data as { kind?: string } | undefined)?.kind === 'synthesis_failed',
       ),
     ).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mid-task recovery conformance (#312)
+// ---------------------------------------------------------------------------
+//
+// End-to-end recovery cases from #312. The external commit log never
+// deduplicates, so these tests prove which tool calls execute versus replay.
+
+describe('mid-task recovery conformance (#312)', () => {
+  const recoveryTasks: RunTaskSpec[] = [
+    { title: 'first', description: 'do first', assignee: 'worker' },
+    { title: 'second', description: 'do second', assignee: 'worker', dependsOn: ['first'] },
+  ]
+
+  let toolUseSeq = 0
+  function toolUseResponse(name: string, input: Record<string, unknown>): LLMResponse {
+    toolUseSeq += 1
+    return {
+      id: `resp-tool-${name}-${toolUseSeq}`,
+      content: [{ type: 'tool_use', id: `tu-${name}-${toolUseSeq}`, name, input }],
+      model: 'mock-model',
+      stop_reason: 'tool_use',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }
+  }
+
+  /** Serves `steps` one per chat call, across the initial run and the resume. */
+  function sequencedAdapter(steps: LLMResponse[]) {
+    let calls = 0
+    const messageInputs: LLMMessage[][] = []
+    const adapter: LLMAdapter = {
+      name: 'recovery-fixture',
+      async chat(messages): Promise<LLMResponse> {
+        messageInputs.push(messages)
+        const step = steps[Math.min(calls, steps.length - 1)]!
+        calls += 1
+        return step
+      },
+      async *stream() {
+        yield { type: 'done' as const, data: textResponse('stream-unused', 'mock-model') }
+      },
+    }
+    return { adapter, calls: () => calls, messageInputs: () => messageInputs }
+  }
+
+  /**
+   * A tiny external system. Commits append and are never deduplicated, so the
+   * commit log IS the idempotency verdict: each label should appear exactly
+   * once in a correctly recovered world.
+   */
+  function externalWorld(onCommit?: (label: string, count: number) => void) {
+    const commits: string[] = []
+    const toolCallIds: Array<string | undefined> = []
+    let crashBeforeNextCommit: (() => void) | null = null
+    const tool = defineTool({
+      name: 'commit_effect',
+      description: 'Commit a labelled side effect to an external system.',
+      inputSchema: z.object({ label: z.string() }),
+      execute: async ({ label }, context) => {
+        toolCallIds.push(context.toolCallId)
+        if (crashBeforeNextCommit) {
+          const crash = crashBeforeNextCommit
+          crashBeforeNextCommit = null
+          crash()
+          // The process "died" before the effect committed: nothing appended.
+          return { data: 'crashed before commit', isError: true }
+        }
+        commits.push(label)
+        onCommit?.(label, commits.length)
+        return { data: `committed:${label}`, isError: false }
+      },
+    })
+    return {
+      tool,
+      commits,
+      toolCallIds,
+      crashBeforeNextCommit: (crash: () => void) => {
+        crashBeforeNextCommit = crash
+      },
+    }
+  }
+
+  function toolWorker(name: string, adapter: LLMAdapter, tool: ReturnType<typeof externalWorld>['tool']): AgentConfig {
+    return { ...worker(name, adapter), customTools: [tool] }
+  }
+
+  it('case 1 - clean resume: a completed task\'s committed effect replays as data, not by re-execution', async () => {
+    const store = new InMemoryStore()
+    const abort = new AbortController()
+    const world = externalWorld()
+    const scripted = sequencedAdapter([
+      toolUseResponse('commit_effect', { label: 'A' }), // first: turn 1 commits A
+      textResponse('first done', 'mock-model'), // first: turn 2 completes -> abort
+      textResponse('second done', 'mock-model'), // second: runs only on resume
+    ])
+    const orchestrator = new OpenMultiAgent({
+      onProgress(event) {
+        if (event.type === 'task_complete') abort.abort()
+      },
+    })
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+
+    await orchestrator.runTasks(team, recoveryTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store },
+    })
+    expect(world.commits).toEqual(['A'])
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+    const result = await orchestrator.restore(resumedTeam, { checkpoint: { store } })
+
+    expect(result.tasks?.map((record) => [record.title, record.status])).toEqual([
+      ['first', 'completed'],
+      ['second', 'completed'],
+    ])
+    // Expected idempotency outcome: the effect committed by the completed task
+    // is carried by the checkpoint as data; the external system never sees it
+    // a second time.
+    expect(world.commits).toEqual(['A'])
+  })
+
+  it('case 2 - committed effect: a finished tool call replays as data without re-execution', async () => {
+    const store = new InMemoryStore()
+    const abort = new AbortController()
+    const world = externalWorld((label, count) => {
+      // Crash immediately AFTER the commit lands, before the turn finishes.
+      if (label === 'B' && count === 1) abort.abort()
+    })
+    const scripted = sequencedAdapter([
+      textResponse('first done', 'mock-model'), // first completes -> checkpoint exists
+      toolUseResponse('commit_effect', { label: 'B' }), // second: commits B, then "crash"
+      textResponse('second done', 'mock-model'), // resume continues after the committed result
+    ])
+    const orchestrator = new OpenMultiAgent()
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+
+    await orchestrator.runTasks(team, recoveryTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store },
+    })
+    expect(world.commits).toEqual(['B'])
+    const persisted = await new Checkpoint(store).loadLatest()
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
+    expect(persisted.inFlightTasks).toHaveLength(1)
+    expect(persisted.inFlightTasks[0]).toMatchObject({
+      phase: 'awaiting_model',
+      turns: 1,
+      tokenUsage: { input_tokens: 1, output_tokens: 1 },
+    })
+    expect(JSON.stringify(persisted.inFlightTasks[0]?.conversationMessages))
+      .toContain('committed:B')
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+    const result = await orchestrator.restore(resumedTeam, { checkpoint: { store } })
+
+    expect(result.tasks?.every((record) => record.status === 'completed')).toBe(true)
+    // The restored model input contains the committed result and starts at the
+    // next turn. The external tool is not invoked a second time.
+    expect(world.commits).toEqual(['B'])
+    expect(world.toolCallIds).toHaveLength(1)
+    expect(scripted.calls()).toBe(3)
+    expect(JSON.stringify(scripted.messageInputs().at(-1))).toContain('committed:B')
+    expect(result.tasks?.find(record => record.title === 'second')?.metrics?.tokenUsage)
+      .toEqual({ input_tokens: 2, output_tokens: 2 })
+  })
+
+  it('case 3 - missing result: an in-flight call that never committed is safely re-run', async () => {
+    const store = new InMemoryStore()
+    const abort = new AbortController()
+    const world = externalWorld()
+    world.crashBeforeNextCommit(() => abort.abort())
+    const scripted = sequencedAdapter([
+      textResponse('first done', 'mock-model'), // first completes -> checkpoint exists
+      toolUseResponse('commit_effect', { label: 'C' }), // second: "crash" before commit
+      textResponse('second done', 'mock-model'), // resume runs missing call, then continues
+    ])
+    const orchestrator = new OpenMultiAgent()
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+
+    await orchestrator.runTasks(team, recoveryTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store },
+    })
+    expect(world.commits).toEqual([])
+    const persisted = await new Checkpoint(store).loadLatest()
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
+    expect(persisted.inFlightTasks[0]).toMatchObject({
+      phase: 'executing_tools',
+      turns: 1,
+    })
+    expect(persisted.inFlightTasks[0]?.pendingToolCalls).toHaveLength(1)
+    expect(persisted.inFlightTasks[0]?.pendingToolCalls?.[0]?.commit).toBeUndefined()
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+    const result = await orchestrator.restore(resumedTeam, { checkpoint: { store } })
+
+    expect(result.tasks?.every((record) => record.status === 'completed')).toBe(true)
+    // Expected idempotency outcome: nothing committed before the crash, so the
+    // conservative re-run is exactly correct - one commit, no loss. This
+    // expectation should SURVIVE #312 unchanged: a call with no commit record
+    // must still re-run.
+    expect(world.commits).toEqual(['C'])
+    expect(world.toolCallIds).toHaveLength(2)
+    expect(world.toolCallIds[0]).toBe(world.toolCallIds[1])
+    expect(scripted.calls()).toBe(3)
+  })
+
+  it('commits a returned tool result before invoking a fallible result callback', async () => {
+    const world = externalWorld()
+    const scripted = sequencedAdapter([
+      toolUseResponse('commit_effect', { label: 'callback' }),
+      textResponse('done after restore', 'mock-model'),
+    ])
+    const registry = new ToolRegistry()
+    registry.register(world.tool)
+    const executor = new ToolExecutor(registry)
+    const makeRunner = () => new AgentRunner(scripted.adapter, registry, executor, {
+      model: 'mock-model',
+      agentName: 'worker',
+      allowedTools: ['commit_effect'],
+    })
+    const initialMessages: LLMMessage[] = [{
+      role: 'user',
+      content: [{ type: 'text', text: 'do callback task' }],
+    }]
+    let runnerState: InFlightTaskCheckpoint | undefined
+    const checkpointOptions = {
+      taskId: 'callback-task',
+      traceAgent: 'worker',
+      onCheckpoint: (state: InFlightTaskCheckpoint) => {
+        runnerState = state
+      },
+    }
+
+    await expect(makeRunner().run(initialMessages, {
+      ...checkpointOptions,
+      onToolResult: () => {
+        throw new Error('result callback failed')
+      },
+    })).rejects.toThrow('result callback failed')
+
+    expect(world.commits).toEqual(['callback'])
+    expect(runnerState?.phase).toBe('executing_tools')
+    expect(runnerState?.pendingToolCalls?.[0]?.commit?.result.content)
+      .toBe('committed:callback')
+    if (!runnerState) throw new Error('expected a committed runner checkpoint')
+
+    const replayedResultCallback = vi.fn()
+    const resumed = await makeRunner().run(initialMessages, {
+      ...checkpointOptions,
+      resumeState: runnerState,
+      onToolResult: replayedResultCallback,
+    })
+
+    expect(resumed.output).toBe('done after restore')
+    expect(world.commits).toEqual(['callback'])
+    expect(replayedResultCallback).not.toHaveBeenCalled()
+    expect(scripted.calls()).toBe(2)
+  })
+
+  it('commits parallel tool calls independently and resumes only the missing call', async () => {
+    const store = new InMemoryStore()
+    const abort = new AbortController()
+    const commits: string[] = []
+    const tool = defineTool({
+      name: 'commit_effect',
+      description: 'Commit a labelled side effect to an external system.',
+      inputSchema: z.object({ label: z.string() }),
+      execute: async ({ label }) => {
+        commits.push(label)
+        if (label === 'P' && commits.length === 1) abort.abort()
+        return { data: `committed:${label}`, isError: false }
+      },
+    })
+    const parallelToolTurn: LLMResponse = {
+      id: 'resp-parallel-tools',
+      content: [
+        { type: 'tool_use', id: 'tu-parallel-p', name: 'commit_effect', input: { label: 'P' } },
+        { type: 'tool_use', id: 'tu-parallel-q', name: 'commit_effect', input: { label: 'Q' } },
+      ],
+      model: 'mock-model',
+      stop_reason: 'tool_use',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }
+    const scripted = sequencedAdapter([
+      textResponse('first done', 'mock-model'),
+      parallelToolTurn,
+      textResponse('second done', 'mock-model'),
+    ])
+    const orchestrator = new OpenMultiAgent()
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, tool)],
+      sharedMemoryStore: store,
+    })
+
+    await orchestrator.runTasks(team, recoveryTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store },
+    })
+    expect(commits).toEqual(['P'])
+
+    const persisted = await new Checkpoint(store).loadLatest()
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
+    const pending = persisted.inFlightTasks[0]?.pendingToolCalls
+    expect(pending?.map(call => [call.call.id, call.commit?.result.content])).toEqual([
+      ['tu-parallel-p', 'committed:P'],
+      ['tu-parallel-q', undefined],
+    ])
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, tool)],
+      sharedMemoryStore: store,
+    })
+    const result = await orchestrator.restore(resumedTeam, { checkpoint: { store } })
+
+    expect(result.tasks?.every(record => record.status === 'completed')).toBe(true)
+    expect(commits).toEqual(['P', 'Q'])
+    expect(scripted.calls()).toBe(3)
+    expect(JSON.stringify(scripted.messageInputs().at(-1))).toContain('committed:P')
+    expect(JSON.stringify(scripted.messageInputs().at(-1))).toContain('committed:Q')
+  })
+
+  it('case 4 - duplicate replay: restoring a final checkpoint twice performs no new work', async () => {
+    const store = new InMemoryStore()
+    const world = externalWorld()
+    const scripted = sequencedAdapter([
+      textResponse('first done', 'mock-model'),
+      toolUseResponse('commit_effect', { label: 'D' }),
+      textResponse('second done', 'mock-model'),
+    ])
+    const orchestrator = new OpenMultiAgent()
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+
+    await orchestrator.runTasks(team, recoveryTasks, { checkpoint: { store } })
+    const callsAfterRun = scripted.calls()
+    expect(world.commits).toEqual(['D'])
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      const resumedTeam = new Team({
+        name: 'team',
+        agents: [toolWorker('worker', scripted.adapter, world.tool)],
+        sharedMemoryStore: store,
+      })
+      const result = await orchestrator.restore(resumedTeam, { checkpoint: { store } })
+      expect(result.tasks?.every((record) => record.status === 'completed')).toBe(true)
+    }
+
+    // Expected idempotency outcome: replaying a final checkpoint is a pure
+    // read. No model calls, no tool executions, no new commits - however many
+    // times it happens.
+    expect(scripted.calls()).toBe(callsAfterRun)
+    expect(world.commits).toEqual(['D'])
+  })
+
+  it('persists the in-flight turn, tool commit, and queue boundary in checkpoint v4', async () => {
+    const store = new InMemoryStore()
+    const abort = new AbortController()
+    const world = externalWorld((label, count) => {
+      if (label === 'B' && count === 1) abort.abort()
+    })
+    const scripted = sequencedAdapter([
+      textResponse('first done', 'mock-model'),
+      toolUseResponse('commit_effect', { label: 'B' }),
+    ])
+    const orchestrator = new OpenMultiAgent()
+    const team = new Team({
+      name: 'team',
+      agents: [toolWorker('worker', scripted.adapter, world.tool)],
+      sharedMemoryStore: store,
+    })
+    await orchestrator.runTasks(team, recoveryTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store },
+    })
+    expect(world.commits).toEqual(['B'])
+
+    // Checkpoint v3 keeps both the completed task and the safe in-flight runner
+    // boundary, including the committed tool result that must be replayed.
+    const persisted = await new Checkpoint(store, {}).loadLatest()
+    expect(persisted).not.toBeNull()
+    expect(persisted?.version).toBe(4)
+    if (persisted?.version !== 4) throw new Error('expected checkpoint v4')
+    const snapshotJson = JSON.stringify(persisted)
+    expect(snapshotJson).toContain('first done') // preserved: completed result
+    expect(snapshotJson).toContain('committed:B') // preserved: per-call commit
+    expect(persisted.inFlightTasks).toHaveLength(1)
+    const inFlight = persisted.inFlightTasks[0]!
+    expect(inFlight).toMatchObject({
+      assignee: 'worker',
+      phase: 'awaiting_model',
+      turns: 1,
+    })
+    expect(persisted.queue.inProgress).toContain(inFlight.taskId)
+    expect(persisted.queue.completed).not.toContain(inFlight.taskId)
   })
 })

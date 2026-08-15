@@ -4,7 +4,8 @@
 
 /**
  * Combine two {@link AbortSignal}s so that aborting either one aborts the
- * returned signal. Works on Node 18+ (no `AbortSignal.any` required).
+ * returned signal. Works on supported Node 20+ releases without
+ * `AbortSignal.any`.
  */
 export function mergeAbortSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
   const controller = new AbortController()

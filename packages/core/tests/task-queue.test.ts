@@ -131,6 +131,146 @@ describe('TaskQueue', () => {
     expect(q.list().find((t) => t.id === 'c')!.status).toBe('failed')
   })
 
+  it('applies an append-only plan patch atomically and publishes events later', () => {
+    const q = new TaskQueue()
+    const readyHandler = vi.fn()
+    const skippedHandler = vi.fn()
+    q.on('task:ready', readyHandler)
+    q.on('task:skipped', skippedHandler)
+    q.add(task('source'))
+    q.add(task('old-downstream', { dependsOn: ['source'] }))
+    q.update('source', { status: 'in_progress' })
+    readyHandler.mockClear()
+
+    const applied = q.applyPlanPatch({
+      reason: 'Use a fallback source.',
+      supersedePending: ['old-downstream'],
+      addTasks: [
+        {
+          key: 'fallback',
+          title: 'Fallback',
+          description: 'Fetch from the fallback source.',
+          assignee: 'worker',
+        },
+        {
+          key: 'replacement',
+          title: 'Replacement',
+          description: 'Consume the fallback.',
+          assignee: 'worker',
+          dependsOn: ['fallback'],
+        },
+      ],
+    }, 'source', 'failure')
+
+    expect(q.getPlanRevision()).toBe(1)
+    expect(q.get('source')?.recoveredByRevision).toBe(1)
+    expect(q.get('old-downstream')?.status).toBe('skipped')
+    expect(q.get('old-downstream')?.supersededByRevision).toBe(1)
+    expect(q.get(applied.revision.addedTasks['fallback']!)?.status).toBe('pending')
+    expect(q.get(applied.revision.addedTasks['replacement']!)?.status).toBe('blocked')
+    expect(readyHandler).not.toHaveBeenCalled()
+    expect(skippedHandler).not.toHaveBeenCalled()
+
+    q.publishPlanRevision(applied.revision)
+    expect(readyHandler).toHaveBeenCalledTimes(1)
+    expect(skippedHandler).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects an invalid plan patch without changing the queue', () => {
+    const q = new TaskQueue()
+    q.add(task('source'))
+    q.add(task('downstream', { dependsOn: ['source'] }))
+    q.update('source', { status: 'in_progress' })
+    const before = q.snapshot()
+
+    expect(() => q.applyPlanPatch({
+      reason: 'Invalid repair.',
+      addTasks: [{
+        key: 'replacement',
+        title: 'Replacement',
+        description: 'Cannot depend on a missing task.',
+        dependsOn: ['missing'],
+      }],
+    }, 'source', 'failure')).toThrow('unknown dependency')
+
+    expect(q.snapshot()).toEqual(before)
+  })
+
+  it('rejects a patch outside the trigger outcome barrier', () => {
+    const q = new TaskQueue()
+    q.add(task('source'))
+    const before = q.snapshot()
+
+    expect(() => q.applyPlanPatch({
+      reason: 'Too early.',
+      addTasks: [{
+        key: 'replacement',
+        title: 'Replacement',
+        description: 'Must not be appended.',
+      }],
+    }, 'source', 'failure')).toThrow('must be in_progress')
+
+    expect(q.snapshot()).toEqual(before)
+  })
+
+  it('does not classify a failure as recovered without an appended replacement', () => {
+    const q = new TaskQueue()
+    q.add(task('source'))
+    q.add(task('downstream', { dependsOn: ['source'] }))
+    const before = q.snapshot()
+
+    expect(() => q.applyPlanPatch({
+      reason: 'Only retarget downstream.',
+      retargetPending: [{ taskId: 'downstream', assignee: 'worker-b' }],
+    }, 'source', 'failure')).toThrow('must append at least one replacement task')
+
+    expect(q.snapshot()).toEqual(before)
+  })
+
+  it('round-trips adaptive plan revisions through snapshot v2', () => {
+    const q = new TaskQueue()
+    q.add(task('source'))
+    q.update('source', { status: 'in_progress' })
+    const { revision } = q.applyPlanPatch({
+      reason: 'Add follow-up.',
+      addTasks: [{
+        key: 'follow-up',
+        title: 'Follow-up',
+        description: 'Continue after source.',
+        dependsOn: ['source'],
+      }],
+    }, 'source', 'success')
+    q.publishPlanRevision(revision)
+
+    const snapshot = q.snapshot()
+    expect(snapshot.version).toBe(2)
+    const restored = TaskQueue.fromSnapshot(snapshot)
+    expect(restored.getPlanRevision()).toBe(1)
+    expect(restored.getPlanRevisions()).toEqual([revision])
+    expect(restored.list()).toEqual(q.list())
+  })
+
+  it('rejects a corrupt adaptive revision sequence during restore', () => {
+    const q = new TaskQueue()
+    q.add(task('source'))
+    q.update('source', { status: 'in_progress' })
+    q.applyPlanPatch({
+      reason: 'Add follow-up.',
+      addTasks: [{
+        key: 'follow-up',
+        title: 'Follow-up',
+        description: 'Continue.',
+      }],
+    }, 'source', 'success')
+    const snapshot = q.snapshot()
+    if (snapshot.version !== 2) throw new Error('expected adaptive snapshot')
+
+    expect(() => TaskQueue.fromSnapshot({
+      ...snapshot,
+      planRevision: 2,
+    })).toThrow('invalid plan revision sequence')
+  })
+
   // -------------------------------------------------------------------------
   // Completion
   // -------------------------------------------------------------------------

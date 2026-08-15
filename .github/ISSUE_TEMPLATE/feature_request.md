@@ -21,6 +21,43 @@ assignees: ''
 
 A clear description of the problem or limitation you're experiencing.
 
+## Current behavior
+
+Describe what the repository does today and why that is insufficient.
+
+## Expected behavior
+
+Describe the bounded behavior that should exist after this issue is complete.
+
+## Acceptance criteria
+
+- State each objectively verifiable result as a separate bullet.
+- Include the focused test or command outcome when one is known.
+
+## Target paths
+
+- `path/to/exact-file.ts`
+
+Use normalized repository-relative files or directories. Do not use globs. Issue
+text never grants edit authority by itself: only a write-authorized maintainer's
+later `agent-ready` label can authorize this exact revision, and trusted policy
+may narrow or reject the scope.
+
+## Out of scope
+
+- List code, behavior, public APIs, dependencies, or workspaces that must not change.
+
+## Open decisions
+
+None.
+
+<!-- If a product or architecture decision remains open, describe it here. The
+Maintainer Bot will route the issue to manual handling. -->
+
+## Blockers
+
+None.
+
 ## Proposed Solution
 
 Describe what you'd like to happen.

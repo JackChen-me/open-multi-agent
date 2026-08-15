@@ -65,7 +65,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     button:focus-visible, input:focus-visible, select:focus-visible {
       outline: 2px solid var(--cyan); outline-offset: 2px;
     }
-    .shell { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0,1fr); }
+    .shell { height: 100vh; display: grid; grid-template-rows: auto auto auto auto minmax(0,1fr); }
     .masthead {
       min-width: 0; display: grid; border-bottom: 1px solid var(--line); background: rgba(7,10,14,.93);
     }
@@ -105,6 +105,15 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     .icon-btn:hover, .fit-btn:hover, .load-more:hover { border-color: var(--cyan); color: var(--cyan); }
     .warning-strip { display: none; padding: 9px 22px; gap: 8px; align-items: center; background: #251f12; border-bottom: 1px solid #5a4820; color: #ffd989; font: 12px/1.3 var(--mono); }
     .warning-strip.visible { display: flex; }
+    .routing-summary {
+      display: none; grid-template-columns: minmax(180px,.75fr) minmax(240px,1.25fr) minmax(260px,1.5fr);
+      border-bottom: 1px solid var(--line); background: rgba(18,24,35,.96);
+    }
+    .routing-summary.visible { display: grid; }
+    .routing-card { min-width: 0; padding: 11px 18px; border-right: 1px solid var(--line); }
+    .routing-card:last-child { border-right: 0; }
+    .routing-value { margin-top: 6px; font: 700 13px/1.35 var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+    .routing-meta { margin-top: 5px; font: 10px/1.35 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
     .toolbar {
       padding: 10px 18px; display: flex; align-items: end; gap: 9px; border-bottom: 1px solid var(--line);
       background: rgba(13,17,24,.96); overflow-x: auto;
@@ -123,7 +132,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       border-radius: var(--radius); padding: 0 10px; color: var(--ink); font: 12px/1 var(--mono);
     }
     .result-count { margin-left: auto; padding-bottom: 8px; white-space: nowrap; font: 11px/1 var(--mono); color: var(--muted); }
-    .workspace { grid-row: 4; min-height: 0; display: grid; grid-template-columns: minmax(0,1fr) 360px; }
+    .workspace { grid-row: 5; min-height: 0; display: grid; grid-template-columns: minmax(0,1fr) 360px; }
     .stage { min-width: 0; min-height: 0; position: relative; background: rgba(7,10,14,.58); }
     .view { position: absolute; inset: 0; min-height: 0; }
     .view[hidden] { display: none; }
@@ -182,6 +191,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     .kind-dot.tool { background: var(--amber); }
     .kind-dot.task { background: var(--mint); }
     .kind-dot.agent { background: var(--cyan); }
+    .kind-dot.routing { background: var(--coral); }
     .wf-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 11px/1.2 var(--mono); }
     .wf-kind { color: var(--faint); font-size: 9px; text-transform: uppercase; }
     .wf-track {
@@ -192,6 +202,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     .wf-bar.kind-llm { background: var(--violet); }
     .wf-bar.kind-tool { background: var(--amber); }
     .wf-bar.kind-task { background: var(--mint); }
+    .wf-bar.kind-routing { background: var(--coral); }
     .wf-bar.failed { background: var(--coral); }
     .wf-bar.incomplete { background: repeating-linear-gradient(90deg, var(--amber), var(--amber) 5px, transparent 5px, transparent 8px); border: 1px solid var(--amber); }
     .wf-unknown { position: absolute; left: 3px; top: 4px; color: var(--faint); font: 9px/1 var(--mono); }
@@ -212,6 +223,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
     .source-chip { color: var(--mint); }
     .status-ok, .status-completed { color: var(--mint); }
     .status-error, .status-failed, .status-timeout, .status-budget_exhausted, .status-rejected { color: var(--coral); }
+    .status-suspended { color: var(--amber); }
     .status-in_progress, .status-pending { color: var(--amber); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     @media (max-width: 940px) {
@@ -235,6 +247,9 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       .brand h1 { font-size: 20px; }
       .run-context { min-width: 0; max-width: none; width: 100%; margin-left: 0; grid-template-columns: 1fr; gap: 6px; }
       .toolbar { padding: 8px 10px; }
+      .routing-summary.visible { grid-template-columns: 1fr; max-height: 220px; overflow: auto; }
+      .routing-card { border-right: 0; border-bottom: 1px solid var(--line); }
+      .routing-card:last-child { border-bottom: 0; }
       .tab { min-width: 0; flex: 1; }
       .workspace { grid-template-rows: 520px auto; }
       .detail-grid { grid-template-columns: 1fr; }
@@ -259,6 +274,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       <div id="summaryGrid" class="summary-grid" aria-label="Run summary"></div>
     </header>
     <div id="warningStrip" class="warning-strip" role="status"></div>
+    <section id="routingSummary" class="routing-summary" aria-label="Routing decision and actual execution"></section>
     <div class="toolbar">
       <div class="tabs" role="tablist" aria-label="Run views">
         <button id="dagTab" class="tab" type="button" role="tab" aria-controls="dagView">DAG</button>
@@ -294,7 +310,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       var tasksById = new Map((payload.tasks || []).map(function (task) { return [task.id, task]; }));
       var state = { view: payload.defaultView || 'dag', selectedKey: null, selectedTaskId: null, collapsed: new Set(), waterfallLimit: 500, scale: 1, tx: 0, ty: 0, lastFocus: null };
       var els = {};
-      ['viewerTitle','summaryGrid','runId','copyRunId','copyStatus','warningStrip','dagTab','waterfallTab','dagView','waterfallView','searchInput','kindFilter','statusFilter','agentFilter','taskFilter','resetFilters','resultCount','dagViewport','dagCanvas','dagEdges','dagNodes','fitDag','resetDag','waterfallBody','details'].forEach(function (id) { els[id] = document.getElementById(id); });
+      ['viewerTitle','summaryGrid','runId','copyRunId','copyStatus','warningStrip','routingSummary','dagTab','waterfallTab','dagView','waterfallView','searchInput','kindFilter','statusFilter','agentFilter','taskFilter','resetFilters','resultCount','dagViewport','dagCanvas','dagEdges','dagNodes','fitDag','resetDag','waterfallBody','details'].forEach(function (id) { els[id] = document.getElementById(id); });
 
       function text(tag, value, className) { var node = document.createElement(tag); if (className) node.className = className; node.textContent = value == null ? '' : String(value); return node; }
       function fmtDuration(ms) { if (typeof ms !== 'number') return 'Unknown'; if (ms < 1) return ms.toFixed(2) + ' ms'; if (ms < 1000) return Math.round(ms) + ' ms'; if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s'; return (ms / 60000).toFixed(1) + ' min'; }
@@ -329,6 +345,25 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       }
       function populateSelect(select, values) { (values || []).forEach(function (value) { var option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option); }); }
       function metric(label, value, cls) { var box = document.createElement('div'); box.className = 'metric'; var display = text('strong', value, 'metric-value ' + (cls || '')); display.title = String(value); box.appendChild(text('span', label, 'metric-label')); box.appendChild(display); return box; }
+      function routingCard(label, value, meta) { var card = document.createElement('div'); card.className = 'routing-card'; card.appendChild(text('span',label,'metric-label')); card.appendChild(text('div',value,'routing-value')); if (meta) card.appendChild(text('div',meta,'routing-meta')); return card; }
+      function renderRoutingSummary() {
+        var routing = payload.routing; els.routingSummary.replaceChildren();
+        if (!routing || !routing.decision) { els.routingSummary.classList.remove('visible'); return; }
+        var decision = routing.decision; var receipt = routing.receipt;
+        var decisionMeta = [decision.routerVersion ? 'router ' + decision.routerVersion : null, decision.confidence != null ? 'confidence ' + decision.confidence : null].filter(Boolean).join(' · ');
+        var traceRoles = Array.from(new Set((payload.tasks || []).map(function (task) { return task.assignee; }).filter(Boolean)));
+        var traceDependencyCount = (payload.tasks || []).reduce(function (count, task) { return count + (task.dependsOn || []).length; },0);
+        var actual = receipt
+          ? receipt.mode + (receipt.rolesExecuted && receipt.rolesExecuted.length ? ' · ' + receipt.rolesExecuted.join(' → ') : ' · no executed roles')
+          : (traceRoles.length > 1 ? 'multi-agent' : 'single') + (traceRoles.length ? ' · ' + traceRoles.join(' → ') : ' · no executed roles');
+        var actualMeta = receipt
+          ? (receipt.dependencyEdges || []).length + ' dependency edge(s)' + (receipt.partial ? ' · partial evidence' : ' · complete evidence')
+          : traceDependencyCount + ' task dependency edge(s) · trace-derived evidence; ExecutionReceipt unavailable';
+        els.routingSummary.appendChild(routingCard('Decided',decision.mode + ' · ' + decision.source,decisionMeta));
+        els.routingSummary.appendChild(routingCard('Why',(decision.reasons || []).join(' · ') || 'No reason recorded','decision ' + decision.decisionId));
+        els.routingSummary.appendChild(routingCard('Actually ran',actual,actualMeta + (receipt && receipt.routingDecisionSpanId ? ' · span ' + receipt.routingDecisionSpanId : '')));
+        els.routingSummary.classList.add('visible');
+      }
       function renderSummary() {
         var summary = payload.summary || {};
         els.viewerTitle.textContent = payload.title || 'OMA Run Viewer';
@@ -429,6 +464,7 @@ export function renderRunViewer(input: RunViewerInput, options: RunViewerOptions
       var dragging = false, lastX = 0, lastY = 0; els.dagViewport.addEventListener('pointerdown',function (event) { if (event.target.closest('.dag-node')) return; dragging = true; lastX = event.clientX; lastY = event.clientY; els.dagViewport.classList.add('dragging'); els.dagViewport.setPointerCapture(event.pointerId); }); els.dagViewport.addEventListener('pointermove',function (event) { if (!dragging) return; state.tx += event.clientX - lastX; state.ty += event.clientY - lastY; lastX = event.clientX; lastY = event.clientY; applyDagTransform(); }); els.dagViewport.addEventListener('pointerup',function () { dragging = false; els.dagViewport.classList.remove('dragging'); });
       document.addEventListener('keydown',function (event) { if (event.key === 'Escape') { var returnFocus = state.lastFocus; state.selectedKey = null; state.selectedTaskId = null; renderDetails(null); if (state.view === 'dag') renderDag(); else renderWaterfall(); if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus(); } });
       renderSummary();
+      renderRoutingSummary();
       var initialSpan = (payload.spans || []).find(function (span) { return ['error','failed','timeout','budget_exhausted','rejected'].indexOf(span.status) !== -1; }) || (payload.spans || []).find(function (span) { return span.kind === 'run'; });
       if (initialSpan) selectSpan(initialSpan.key); else if ((payload.tasks || [])[0]) selectTask(payload.tasks[0].id);
       setView(state.view);

@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { Scheduler } from '../src/orchestrator/scheduler.js'
+import type { SchedulingStrategy } from '../src/orchestrator/scheduler.js'
 import { TaskQueue } from '../src/task/queue.js'
 import { createTask } from '../src/task/task.js'
-import type { AgentConfig, Task } from '../src/types.js'
+import type { AgentConfig, Task, TaskRequirements } from '../src/types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,7 +13,14 @@ function agent(name: string, systemPrompt?: string): AgentConfig {
   return { name, model: 'test-model', systemPrompt }
 }
 
-function pendingTask(title: string, opts?: { assignee?: string; dependsOn?: string[] }): Task {
+function pendingTask(
+  title: string,
+  opts?: {
+    assignee?: string
+    dependsOn?: string[]
+    requires?: TaskRequirements
+  },
+): Task {
   return createTask({ title, description: title, assignee: opts?.assignee, ...opts })
 }
 
@@ -60,7 +68,10 @@ describe('Scheduler: round-robin', () => {
 
   it('returns empty map when no agents', () => {
     const s = new Scheduler('round-robin')
-    const tasks = [pendingTask('t1')]
+    const tasks = [
+      pendingTask('t1'),
+      pendingTask('t2', { requires: {} }),
+    ]
     expect(s.schedule(tasks, []).size).toBe(0)
   })
 
@@ -140,15 +151,41 @@ describe('Scheduler: capability-match', () => {
     expect(assignments.get(tasks[1]!.id)).toBe('researcher')
   })
 
-  it('falls back to first agent when no keywords match', () => {
+  it('matches Chinese tasks to the corresponding Chinese agents', () => {
     const s = new Scheduler('capability-match')
-    const agents = [agent('alpha'), agent('beta')]
-    const tasks = [pendingTask('xyz')]
+    const agents = [
+      agent('营销专家', '制定品牌策略和市场推广方案'),
+      agent('代码评审员', '分析代码质量并生成评审报告'),
+      agent('数据分析师', '分析销售数据并生成趋势报告'),
+    ]
+    const tasks = [
+      pendingTask('分析代码质量并生成评审报告'),
+      pendingTask('分析销售数据并生成趋势报告'),
+      pendingTask('制定品牌策略和市场推广方案'),
+    ]
 
     const assignments = s.schedule(tasks, agents)
 
-    // When scores are tied (all 0), first agent wins
-    expect(assignments.size).toBe(1)
+    expect(assignments.get(tasks[0]!.id)).toBe('代码评审员')
+    expect(assignments.get(tasks[1]!.id)).toBe('数据分析师')
+    expect(assignments.get(tasks[2]!.id)).toBe('营销专家')
+  })
+
+  it('round-robins zero-score tasks and advances the cursor across calls', () => {
+    const s = new Scheduler('capability-match')
+    const agents = [agent('alpha'), agent('beta')]
+    const tasks = [
+      pendingTask('x'),
+      pendingTask('y'),
+      pendingTask('z'),
+    ]
+
+    const assignments = s.schedule(tasks, agents)
+    const nextTask = pendingTask('q')
+    const nextAssignments = s.schedule([nextTask], agents)
+
+    expect([...assignments.values()]).toEqual(['alpha', 'beta', 'alpha'])
+    expect(nextAssignments.get(nextTask.id)).toBe('beta')
   })
 })
 
@@ -180,6 +217,260 @@ describe('Scheduler: dependency-first', () => {
     const s = new Scheduler('dependency-first')
     const assignments = s.schedule([], [agent('a')])
     expect(assignments.size).toBe(0)
+  })
+})
+
+describe('Scheduler: compatibility strategies', () => {
+  it('preserves the established behavior of all four pre-composite strategies', () => {
+    const agents = [
+      agent('a', 'Research and analyze evidence'),
+      agent('b', 'Implement TypeScript code'),
+    ]
+
+    const roundRobinTasks = [pendingTask('one'), pendingTask('two')]
+    expect([
+      ...new Scheduler('round-robin')
+        .schedule(roundRobinTasks, agents)
+        .values(),
+    ]).toEqual(['a', 'b'])
+
+    const busy: Task = {
+      ...pendingTask('busy'),
+      status: 'in_progress',
+      assignee: 'a',
+    }
+    const leastBusyTask = pendingTask('new')
+    expect(
+      new Scheduler('least-busy')
+        .schedule([busy, leastBusyTask], agents)
+        .get(leastBusyTask.id),
+    ).toBe('b')
+
+    const capabilityTask = pendingTask('Implement TypeScript code')
+    expect(
+      new Scheduler('capability-match')
+        .schedule([capabilityTask], agents)
+        .get(capabilityTask.id),
+    ).toBe('b')
+
+    const critical = pendingTask('critical')
+    const ordinary = pendingTask('ordinary')
+    const dependent = { ...pendingTask('dependent'), dependsOn: [critical.id] }
+    expect([
+      ...new Scheduler('dependency-first')
+        .schedule([ordinary, critical, dependent], agents)
+        .keys(),
+    ][0]).toBe(critical.id)
+  })
+
+  it.each([
+    'round-robin',
+    'least-busy',
+    'capability-match',
+    'dependency-first',
+    'composite',
+  ] satisfies SchedulingStrategy[])(
+    '%s applies hard requirements before strategy-specific ranking',
+    (strategy) => {
+      const scheduler = new Scheduler(strategy)
+      const agents: AgentConfig[] = [
+        {
+          ...agent('ineligible'),
+          capabilities: ['typescript'],
+          tools: ['file_read'],
+          provider: 'openai',
+        },
+        {
+          ...agent('eligible'),
+          capabilities: ['typescript'],
+          tools: ['file_edit'],
+          provider: 'anthropic',
+        },
+      ]
+      const task = pendingTask('Restricted', {
+        requires: {
+          requiredTools: ['file_edit'],
+          requiredCapabilities: ['typescript'],
+          requiredBackend: 'llm',
+          requiredProvider: 'anthropic',
+        },
+      })
+
+      expect(scheduler.schedule([task], agents).get(task.id)).toBe('eligible')
+    },
+  )
+
+  it.each([
+    'round-robin',
+    'least-busy',
+    'capability-match',
+    'dependency-first',
+    'composite',
+  ] satisfies SchedulingStrategy[])(
+    '%s fails closed when no agent satisfies hard requirements',
+    (strategy) => {
+      const task = pendingTask('Restricted', {
+        requires: { requiredCapabilities: ['missing'] },
+      })
+
+      expect(() => new Scheduler(strategy).schedule([task], [agent('worker')]))
+        .toThrow('NO_ELIGIBLE_AGENT')
+    },
+  )
+})
+
+// ---------------------------------------------------------------------------
+// composite
+// ---------------------------------------------------------------------------
+
+describe('Scheduler: composite', () => {
+  it('prioritises the most critical task and selects its highest-fit eligible agent', () => {
+    const s = new Scheduler('composite')
+    const agents: AgentConfig[] = [
+      { ...agent('researcher'), capabilities: ['worker', 'research'] },
+      { ...agent('coder'), capabilities: ['worker', 'typescript'] },
+    ]
+    const low = pendingTask('General task')
+    const critical = pendingTask('Implement TypeScript service', {
+      requires: { requiredCapabilities: ['worker'] },
+    })
+    const dependentA = { ...pendingTask('Dependent A'), dependsOn: [critical.id] }
+    const dependentB = { ...pendingTask('Dependent B'), dependsOn: [critical.id] }
+
+    const assignments = s.schedule(
+      [low, critical, dependentA, dependentB],
+      agents,
+    )
+
+    expect([...assignments.keys()][0]).toBe(critical.id)
+    expect(assignments.get(critical.id)).toBe('coder')
+  })
+
+  it('prefers the lower-load agent when fit is tied', () => {
+    const s = new Scheduler('composite')
+    const agents = [agent('alpha'), agent('beta')]
+    const busy: Task = {
+      ...pendingTask('Existing work'),
+      status: 'in_progress',
+      assignee: 'alpha',
+    }
+    const task = pendingTask('Unrelated neutral task')
+
+    const assignments = s.schedule([busy, task], agents)
+
+    expect(assignments.get(task.id)).toBe('beta')
+  })
+
+  it('honours configured fit and load weights', () => {
+    const agents: AgentConfig[] = [
+      { ...agent('coder'), capabilities: ['typescript'] },
+      agent('idle'),
+    ]
+    const busy: Task = {
+      ...pendingTask('Existing work'),
+      status: 'in_progress',
+      assignee: 'coder',
+    }
+    const task = pendingTask('Implement TypeScript')
+
+    const fitOnly = new Scheduler('composite', {}, {
+      weights: { fit: 1, load: 0 },
+    }).schedule([busy, task], agents)
+    const loadOnly = new Scheduler('composite', {}, {
+      weights: { fit: 0, load: 1 },
+    }).schedule([busy, task], agents)
+
+    expect(fitOnly.get(task.id)).toBe('coder')
+    expect(loadOnly.get(task.id)).toBe('idle')
+  })
+
+  it('fails closed when nobody is eligible', () => {
+    const warnings: unknown[] = []
+    const s = new Scheduler('composite', {}, {
+      onWarning: (warning) => warnings.push(warning),
+    })
+    const agents = [agent('busy'), agent('idle')]
+    const busy: Task = {
+      ...pendingTask('Existing work'),
+      status: 'in_progress',
+      assignee: 'busy',
+    }
+    const task = pendingTask('Restricted task', {
+      requires: { requiredCapabilities: ['missing'] },
+    })
+
+    expect(() => s.schedule([busy, task], agents)).toThrow('NO_ELIGIBLE_AGENT')
+    expect(warnings).toEqual([])
+  })
+})
+
+describe('Scheduler: one ready task at a time', () => {
+  const agents = [
+    agent('researcher', 'Research and analyze evidence'),
+    agent('coder', 'Implement TypeScript code'),
+  ]
+
+  it('round-robin advances its cursor across single-task calls', () => {
+    const scheduler = new Scheduler('round-robin')
+    const first = pendingTask('first')
+    const second = pendingTask('second')
+
+    expect(scheduler.scheduleTask(first, agents, [first, second])).toBe('researcher')
+    expect(scheduler.scheduleTask(second, agents, [first, second])).toBe('coder')
+  })
+
+  it('least-busy reads current in-progress load from the full snapshot', () => {
+    const scheduler = new Scheduler('least-busy')
+    const busy: Task = {
+      ...pendingTask('busy'),
+      status: 'in_progress',
+      assignee: 'researcher',
+    }
+    const ready = pendingTask('ready')
+
+    expect(scheduler.scheduleTask(ready, agents, [busy, ready])).toBe('coder')
+  })
+
+  it('capability-match preserves hard eligibility for a single ready task', () => {
+    const scheduler = new Scheduler('capability-match')
+    const ready = pendingTask('Implement TypeScript code')
+    const impossible = pendingTask('Edit a file', {
+      requires: { requiredTools: ['file_edit'] },
+    })
+
+    expect(scheduler.scheduleTask(ready, agents, [ready])).toBe('coder')
+    expect(() => scheduler.scheduleTask(impossible, agents, [impossible]))
+      .toThrow('NO_ELIGIBLE_AGENT')
+  })
+
+  it('dependency-first assigns each ready task while retaining cursor fairness', () => {
+    const scheduler = new Scheduler('dependency-first')
+    const critical = pendingTask('critical')
+    const dependent = { ...pendingTask('dependent'), dependsOn: [critical.id] }
+    const later = pendingTask('later')
+
+    expect(scheduler.orderReadyTasks(
+      [later, critical],
+      [later, critical, dependent],
+    ).map((task) => task.id)).toEqual([critical.id, later.id])
+    expect(scheduler.scheduleTask(critical, agents, [critical, dependent, later]))
+      .toBe('researcher')
+    expect(scheduler.scheduleTask(later, agents, [critical, dependent, later]))
+      .toBe('coder')
+  })
+
+  it('composite reads current load from the full snapshot for one ready task', () => {
+    const scheduler = new Scheduler('composite', {}, {
+      weights: { fit: 0, load: 1 },
+    })
+    const busy: Task = {
+      ...pendingTask('busy'),
+      status: 'in_progress',
+      assignee: 'researcher',
+    }
+    const ready = pendingTask('ready')
+
+    expect(scheduler.scheduleTask(ready, agents, [busy, ready])).toBe('coder')
   })
 })
 

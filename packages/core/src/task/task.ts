@@ -7,7 +7,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ConsensusVerifyOptions, Task, TaskStatus } from '../types.js'
+import type {
+  ConsensusVerifyOptions,
+  Task,
+  TaskMetadata,
+  TaskRequirements,
+  TaskStatus,
+} from '../types.js'
+import { validateTaskMetadata } from './metadata.js'
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -32,14 +39,18 @@ export function createTask(input: {
   assignee?: string
   dependsOn?: string[]
   memoryScope?: 'dependencies' | 'all'
+  dependencyPayload?: 'output' | 'structured' | 'both'
   maxRetries?: number
   retryDelayMs?: number
   retryBackoff?: number
   role?: string
   priority?: 'low' | 'normal' | 'high' | 'critical'
+  metadata?: TaskMetadata
+  requires?: TaskRequirements
   verify?: ConsensusVerifyOptions
 }): Task {
   const now = new Date()
+  const metadata = validateTaskMetadata(input.metadata)
   return {
     id: randomUUID(),
     title: input.title,
@@ -48,6 +59,7 @@ export function createTask(input: {
     assignee: input.assignee,
     dependsOn: input.dependsOn ? [...input.dependsOn] : undefined,
     memoryScope: input.memoryScope,
+    dependencyPayload: input.dependencyPayload,
     result: undefined,
     createdAt: now,
     updatedAt: now,
@@ -56,6 +68,8 @@ export function createTask(input: {
     retryBackoff: input.retryBackoff,
     role: input.role,
     priority: input.priority,
+    metadata,
+    requires: input.requires,
     verify: input.verify,
   }
 }

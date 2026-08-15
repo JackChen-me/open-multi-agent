@@ -40,7 +40,9 @@ export interface ConsensusAgentDefaults {
   readonly defaultProvider: OrchestratorConfig['defaultProvider']
   readonly defaultBaseURL: OrchestratorConfig['defaultBaseURL']
   readonly defaultApiKey: OrchestratorConfig['defaultApiKey']
+  readonly egressPolicy: OrchestratorConfig['egressPolicy']
   readonly defaultCwd: OrchestratorConfig['defaultCwd']
+  readonly defaultShellExecutor: OrchestratorConfig['defaultShellExecutor']
   readonly onToolCall: OrchestratorConfig['onToolCall']
   readonly maxConcurrency: number
 }
@@ -325,7 +327,14 @@ export async function runTaskVerify(
   result: AgentRunResult,
   sharedMem: ReturnType<Team['getSharedMemoryInstance']>,
   ctx: RunContext,
-): Promise<AgentRunResult> {
+): Promise<{
+  readonly result: AgentRunResult
+  readonly verification: {
+    readonly verdict: 'accepted' | 'rejected'
+    readonly dissent: readonly string[]
+    readonly rounds: number
+  }
+}> {
   const verify = task.verify!
   const { team, config } = ctx
   const assigneeConfig = team.getAgents().find((a) => a.name === assignee)
@@ -362,7 +371,9 @@ export async function runTaskVerify(
       defaultProvider: config.defaultProvider,
       defaultBaseURL: config.defaultBaseURL,
       defaultApiKey: config.defaultApiKey,
+      egressPolicy: config.egressPolicy,
       defaultCwd: config.defaultCwd,
+      defaultShellExecutor: config.defaultShellExecutor,
       onToolCall: config.onToolCall,
       maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
     },
@@ -415,8 +426,15 @@ export async function runTaskVerify(
   const useRevision =
     consensus.verdict === 'accepted' && consensus.answer && consensus.answer !== result.output
   return {
-    ...result,
-    output: useRevision ? consensus.answer : result.output,
-    tokenUsage: addUsage(result.tokenUsage, consensus.tokenUsage),
+    result: {
+      ...result,
+      output: useRevision ? consensus.answer : result.output,
+      tokenUsage: addUsage(result.tokenUsage, consensus.tokenUsage),
+    },
+    verification: {
+      verdict: consensus.verdict,
+      dissent: [...consensus.dissent],
+      rounds: consensus.rounds,
+    },
   }
 }

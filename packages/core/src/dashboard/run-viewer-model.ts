@@ -1,4 +1,5 @@
 import type {
+  ExecutionRoutingDecisionRecord,
   RunStatusCode,
   StructuredTraceError,
   TaskStatus,
@@ -6,6 +7,10 @@ import type {
   TokenUsage,
   TraceAttributeValue,
 } from '../types.js'
+import {
+  buildExecutionReceipt,
+  type ExecutionReceipt,
+} from '../observability/execution-receipt.js'
 import type { MaterializedSpan, StoredRun } from '../observability/store.js'
 import type { SpanEndRecord } from '../observability/records.js'
 import { TRACE_STORE_SCHEMA_MAJOR } from '../observability/store.js'
@@ -140,6 +145,11 @@ export interface RunViewerSummary {
   readonly providers: readonly string[]
 }
 
+export interface RunViewerRoutingSummary {
+  readonly decision: ExecutionRoutingDecisionRecord
+  readonly receipt?: ExecutionReceipt
+}
+
 export interface RunViewerModel {
   readonly schemaVersion: 1
   readonly generatedAt: string
@@ -147,6 +157,7 @@ export interface RunViewerModel {
   readonly defaultView: 'dag' | 'waterfall'
   readonly sourceMode: RunViewerSourceMode
   readonly summary: RunViewerSummary
+  readonly routing?: RunViewerRoutingSummary
   readonly tasks: readonly RunViewerTask[]
   readonly spans: readonly RunViewerSpan[]
   readonly dag: RunViewerDagLayout
@@ -178,6 +189,13 @@ const SAFE_FACT_KEYS: Readonly<Record<string, string>> = {
   'oma.retry.attempt': 'Retry attempt',
   'oma.retry.delay_ms': 'Retry delay (ms)',
   'oma.retry.max_attempts': 'Retry max attempts',
+  'oma.routing.confidence': 'Routing confidence',
+  'oma.routing.decision_id': 'Routing decision ID',
+  'oma.routing.mode': 'Routing mode',
+  'oma.routing.receipt_id': 'Execution receipt ID',
+  'oma.routing.reasons': 'Routing reasons',
+  'oma.routing.router_version': 'Router version',
+  'oma.routing.source': 'Routing source',
   'oma.stream.type': 'Stream type',
   'oma.task.retries': 'Task retries',
   'oma.tool.is_error': 'Tool error',
@@ -217,9 +235,45 @@ function numberAttr(
 }
 
 function safeScalar(value: TraceAttributeValue | undefined): string | number | boolean | undefined {
+  if (Array.isArray(value)) return value.join('; ')
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
     ? value
     : undefined
+}
+
+function traceRoutingDecision(run: StoredRun | undefined): ExecutionRoutingDecisionRecord | undefined {
+  const span = run?.spans.find((candidate) =>
+    candidate.kind === 'routing' && candidate.name === 'decide_execution_route')
+  if (!span) return undefined
+  const attributes = span.attributes
+  const decisionId = stringAttr(attributes, 'oma.routing.decision_id')
+  const receiptId = stringAttr(attributes, 'oma.routing.receipt_id')
+  const source = stringAttr(attributes, 'oma.routing.source')
+  const mode = stringAttr(attributes, 'oma.routing.mode')
+  if (
+    !decisionId
+    || !receiptId
+    || !['override', 'declared', 'policy', 'router', 'legacy-deterministic'].includes(source ?? '')
+    || (mode !== 'single' && mode !== 'team')
+  ) return undefined
+  const rawReasons = attributes['oma.routing.reasons']
+  const reasons = Array.isArray(rawReasons)
+    ? rawReasons.filter((reason): reason is string => typeof reason === 'string')
+    : []
+  return {
+    decisionId,
+    receiptId,
+    traceSpanId: span.spanId,
+    source: source as ExecutionRoutingDecisionRecord['source'],
+    mode,
+    reasons,
+    ...(stringAttr(attributes, 'oma.routing.router_version')
+      ? { routerVersion: stringAttr(attributes, 'oma.routing.router_version') }
+      : {}),
+    ...(numberAttr(attributes, 'oma.routing.confidence') !== undefined
+      ? { confidence: numberAttr(attributes, 'oma.routing.confidence') }
+      : {}),
+  }
 }
 
 function safeFacts(attributes: Readonly<Record<string, TraceAttributeValue>>): RunViewerFact[] {
@@ -256,6 +310,7 @@ function taskStatusFromSpan(status: RunStatusCode | undefined, incomplete: boole
     case 'ok': return 'completed'
     case 'skipped': return 'skipped'
     case 'cancelled': return 'blocked'
+    case 'suspended': return 'in_progress'
     case 'error':
     case 'timeout':
     case 'budget_exhausted':
@@ -554,6 +609,13 @@ export function buildRunViewerModel(
     message: 'No task graph was recorded for this run.',
   })
   const sourceMode: RunViewerSourceMode = result && run ? 'combined' : result ? 'result' : 'trace'
+  const routingDecision = result?.routingDecision ?? traceRoutingDecision(run)
+  const routing = routingDecision
+    ? {
+        decision: routingDecision,
+        ...(result ? { receipt: buildExecutionReceipt(result) } : {}),
+      }
+    : undefined
   const availableKinds = uniqueSorted(spans.map((span) => span.kind))
   const availableStatuses = uniqueSorted([
     ...spans.map((span) => span.status),
@@ -566,6 +628,7 @@ export function buildRunViewerModel(
     defaultView: options.defaultView ?? (tasks.length > 0 ? 'dag' : 'waterfall'),
     sourceMode,
     summary: summary(result, run),
+    ...(routing ? { routing } : {}),
     tasks,
     spans,
     dag: dagLayout(tasks, warnings),

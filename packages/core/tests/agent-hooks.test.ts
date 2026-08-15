@@ -379,6 +379,41 @@ describe('Agent hooks — beforeRun / afterRun', () => {
     expect((firstUserInHistory!.content[0] as any).text).toBe('original message')
   })
 
+  it('restores constructor history for stateless prompt conversations', async () => {
+    const history: LLMMessage[] = [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'previous question' }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'previous answer' }],
+      },
+    ]
+    const { agent, calls } = buildMockAgent({ ...baseConfig, history }, 'new answer')
+
+    await agent.prompt('follow-up question')
+
+    expect(calls[0]).toEqual([
+      ...history,
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'follow-up question' }],
+      },
+    ])
+    expect(agent.getHistory()).toEqual([
+      ...history,
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'follow-up question' }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'new answer' }],
+      },
+    ])
+  })
+
   // -----------------------------------------------------------------------
   // afterRun NOT called on error
   // -----------------------------------------------------------------------

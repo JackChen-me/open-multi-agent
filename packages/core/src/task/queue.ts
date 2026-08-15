@@ -6,8 +6,17 @@
  * orchestrators can react without polling.
  */
 
-import type { Task, TaskQueueSnapshot, TaskSnapshot, TaskStatus } from '../types.js'
-import { isTaskReady } from './task.js'
+import { randomUUID } from 'node:crypto'
+import type {
+  PlanPatch,
+  PlanRevision,
+  Task,
+  TaskQueueSnapshot,
+  TaskSnapshot,
+  TaskStatus,
+} from '../types.js'
+import { createTask, isTaskReady, validateTaskDependencies } from './task.js'
+import { validateTaskMetadata } from './metadata.js'
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -54,6 +63,8 @@ type HandlerFor<E extends TaskQueueEvent> = E extends 'all:complete'
  */
 export class TaskQueue {
   private readonly tasks = new Map<string, Task>()
+  private planRevision = 0
+  private planRevisions: PlanRevision[] = []
 
   /** Listeners keyed by event type, stored as symbol → handler pairs. */
   private readonly listeners = new Map<
@@ -100,8 +111,7 @@ export class TaskQueue {
   /** Returns a serializable snapshot of all tasks and their status partitions. */
   snapshot(): TaskQueueSnapshot {
     const tasks = this.list()
-    return {
-      version: 1,
+    const base = {
       tasks: tasks.map(TaskQueue.taskToSnapshot),
       pending: tasks.filter((task) => task.status === 'pending').map((task) => task.id),
       inProgress: tasks.filter((task) => task.status === 'in_progress').map((task) => task.id),
@@ -110,6 +120,14 @@ export class TaskQueue {
       blocked: tasks.filter((task) => task.status === 'blocked').map((task) => task.id),
       skipped: tasks.filter((task) => task.status === 'skipped').map((task) => task.id),
     }
+    return this.planRevision === 0
+      ? { version: 1, ...base }
+      : {
+          version: 2,
+          ...base,
+          planRevision: this.planRevision,
+          planRevisions: this.planRevisions.map(TaskQueue.clonePlanRevision),
+        }
   }
 
   /**
@@ -124,10 +142,6 @@ export class TaskQueue {
     snapshot: TaskQueueSnapshot,
     options: { readonly resetInProgress?: boolean } = {},
   ): TaskQueue {
-    if (snapshot.version !== 1) {
-      throw new Error(`TaskQueue.fromSnapshot: unsupported snapshot version ${String(snapshot.version)}.`)
-    }
-
     const queue = new TaskQueue()
     const tasks = snapshot.tasks.map((task) => TaskQueue.taskFromSnapshot(task))
     const restored = options.resetInProgress
@@ -137,7 +151,248 @@ export class TaskQueue {
     for (const task of restored) {
       queue.tasks.set(task.id, task)
     }
+    if (snapshot.version === 2) {
+      TaskQueue.validatePlanSnapshot(snapshot)
+      queue.planRevision = snapshot.planRevision
+      queue.planRevisions = snapshot.planRevisions.map(TaskQueue.clonePlanRevision)
+    }
     return queue
+  }
+
+  /** Current append-only runtime plan revision. */
+  getPlanRevision(): number {
+    return this.planRevision
+  }
+
+  /** Immutable copies of the accepted runtime plan-repair history. */
+  getPlanRevisions(): readonly PlanRevision[] {
+    return this.planRevisions.map(TaskQueue.clonePlanRevision)
+  }
+
+  /**
+   * Atomically apply an append-only plan patch without publishing queue events.
+   *
+   * Call {@link publishPlanRevision} after durable persistence succeeds. Until
+   * then, newly-ready tasks are present in the queue but invisible to the
+   * event-driven executor.
+   */
+  applyPlanPatch(
+    patch: PlanPatch,
+    triggerTaskId: string,
+    trigger: PlanRevision['trigger'],
+  ): { readonly revision: PlanRevision; readonly before: TaskQueueSnapshot } {
+    const reason = patch.reason.trim()
+    if (!reason) throw new Error('TaskQueue.applyPlanPatch: patch reason must not be empty.')
+
+    const addSpecs = [...(patch.addTasks ?? [])]
+    const retargets = [...(patch.retargetPending ?? [])]
+    const supersedeIds = [...(patch.supersedePending ?? [])]
+    if (addSpecs.length === 0 && retargets.length === 0 && supersedeIds.length === 0) {
+      throw new Error('TaskQueue.applyPlanPatch: patch must contain at least one operation.')
+    }
+    if (trigger !== 'success' && addSpecs.length === 0) {
+      throw new Error(
+        'TaskQueue.applyPlanPatch: failure recovery must append at least one replacement task.',
+      )
+    }
+
+    const before = this.snapshot()
+    const draft = new Map<string, Task>(
+      Array.from(this.tasks, ([id, task]) => [id, TaskQueue.cloneTask(task)]),
+    )
+    const nextVersion = this.planRevision + 1
+    const now = new Date()
+    const triggerTask = draft.get(triggerTaskId)
+    if (!triggerTask) {
+      throw new Error(`TaskQueue.applyPlanPatch: trigger task "${triggerTaskId}" not found.`)
+    }
+    if (triggerTask.status !== 'in_progress') {
+      throw new Error(
+        `TaskQueue.applyPlanPatch: trigger task "${triggerTaskId}" must be in_progress; ` +
+          `it is ${triggerTask.status}.`,
+      )
+    }
+
+    const retargetIds = new Set<string>()
+    for (const retarget of retargets) {
+      if (retargetIds.has(retarget.taskId)) {
+        throw new Error(`TaskQueue.applyPlanPatch: task "${retarget.taskId}" is retargeted more than once.`)
+      }
+      retargetIds.add(retarget.taskId)
+      const task = draft.get(retarget.taskId)
+      if (!task) throw new Error(`TaskQueue.applyPlanPatch: task "${retarget.taskId}" not found.`)
+      if (task.status !== 'pending' && task.status !== 'blocked') {
+        throw new Error(
+          `TaskQueue.applyPlanPatch: only pending or blocked tasks can be retargeted; ` +
+            `"${task.id}" is ${task.status}.`,
+        )
+      }
+      if (!retarget.assignee.trim()) {
+        throw new Error(`TaskQueue.applyPlanPatch: retarget assignee for "${task.id}" must not be empty.`)
+      }
+      draft.set(task.id, { ...task, assignee: retarget.assignee, updatedAt: now })
+    }
+
+    const superseded = new Set<string>()
+    for (const taskId of supersedeIds) {
+      if (superseded.has(taskId)) {
+        throw new Error(`TaskQueue.applyPlanPatch: task "${taskId}" is superseded more than once.`)
+      }
+      if (retargetIds.has(taskId)) {
+        throw new Error(`TaskQueue.applyPlanPatch: task "${taskId}" cannot be retargeted and superseded.`)
+      }
+      superseded.add(taskId)
+      const task = draft.get(taskId)
+      if (!task) throw new Error(`TaskQueue.applyPlanPatch: task "${taskId}" not found.`)
+      if (task.status !== 'pending' && task.status !== 'blocked') {
+        throw new Error(
+          `TaskQueue.applyPlanPatch: only pending or blocked tasks can be superseded; ` +
+            `"${task.id}" is ${task.status}.`,
+        )
+      }
+      draft.set(task.id, {
+        ...task,
+        status: 'skipped',
+        result: `Superseded by plan revision ${nextVersion}: ${reason}`,
+        supersededByRevision: nextVersion,
+        updatedAt: now,
+      })
+    }
+
+    const keys = new Set<string>()
+    const created = new Map<string, Task>()
+    for (const spec of addSpecs) {
+      const key = spec.key.trim()
+      if (!key) throw new Error('TaskQueue.applyPlanPatch: appended task key must not be empty.')
+      if (keys.has(key)) {
+        throw new Error(`TaskQueue.applyPlanPatch: appended task key "${key}" is duplicated.`)
+      }
+      if (draft.has(key)) {
+        throw new Error(
+          `TaskQueue.applyPlanPatch: appended task key "${key}" conflicts with an existing task id.`,
+        )
+      }
+      keys.add(key)
+      const task = createTask({
+        title: spec.title,
+        description: spec.description,
+        assignee: spec.assignee,
+        memoryScope: spec.memoryScope,
+        dependencyPayload: spec.dependencyPayload,
+        metadata: spec.metadata,
+        maxRetries: spec.maxRetries,
+        retryDelayMs: spec.retryDelayMs,
+        retryBackoff: spec.retryBackoff,
+        role: spec.role,
+        priority: spec.priority,
+        requires: spec.requires,
+        verify: spec.verify,
+      })
+      created.set(key, task)
+    }
+
+    const addedTasks: Record<string, string> = {}
+    for (const spec of addSpecs) {
+      const task = created.get(spec.key.trim())!
+      const dependencies = (spec.dependsOn ?? []).map((reference) => {
+        const newTask = created.get(reference)
+        const dependencyId = newTask?.id ?? reference
+        const dependency = draft.get(dependencyId) ?? newTask
+        if (!dependency) {
+          throw new Error(
+            `TaskQueue.applyPlanPatch: appended task "${spec.key}" has unknown dependency "${reference}".`,
+          )
+        }
+        if (dependency.status === 'failed' || dependency.status === 'skipped') {
+          throw new Error(
+            `TaskQueue.applyPlanPatch: appended task "${spec.key}" cannot depend on ` +
+              `${dependency.status} task "${dependency.id}".`,
+          )
+        }
+        return dependencyId
+      })
+      if (new Set(dependencies).size !== dependencies.length) {
+        throw new Error(`TaskQueue.applyPlanPatch: appended task "${spec.key}" has duplicate dependencies.`)
+      }
+      const resolved: Task = {
+        ...task,
+        id: task.id || randomUUID(),
+        ...(dependencies.length > 0 ? { dependsOn: dependencies } : {}),
+      }
+      created.set(spec.key.trim(), resolved)
+      addedTasks[spec.key.trim()] = resolved.id
+      draft.set(resolved.id, resolved)
+    }
+
+    // Resolve references between appended tasks after every patch-local id exists.
+    for (const spec of addSpecs) {
+      const task = created.get(spec.key.trim())!
+      const dependencies = (spec.dependsOn ?? []).map((reference) =>
+        created.get(reference)?.id ?? reference)
+      const allTasks = Array.from(draft.values())
+      const taskById = new Map(allTasks.map((candidate) => [candidate.id, candidate]))
+      const pendingTask: Task = {
+        ...task,
+        ...(dependencies.length > 0 ? { dependsOn: dependencies } : { dependsOn: undefined }),
+        status: 'pending',
+      }
+      const status: TaskStatus = isTaskReady(pendingTask, allTasks, taskById)
+        ? 'pending'
+        : 'blocked'
+      draft.set(task.id, { ...pendingTask, status })
+    }
+
+    const validation = validateTaskDependencies(Array.from(draft.values()))
+    if (!validation.valid) {
+      throw new Error(`TaskQueue.applyPlanPatch: invalid patched graph: ${validation.errors.join(' ')}`)
+    }
+
+    const revision: PlanRevision = {
+      id: randomUUID(),
+      version: nextVersion,
+      triggerTaskId,
+      trigger,
+      reason,
+      addedTasks,
+      retargetedTasks: retargets.map((item) => ({ ...item })),
+      supersededTaskIds: [...supersedeIds],
+      createdAt: now.toISOString(),
+    }
+
+    if (trigger !== 'success') {
+      draft.set(triggerTaskId, {
+        ...draft.get(triggerTaskId)!,
+        recoveredByRevision: nextVersion,
+        updatedAt: now,
+      })
+    }
+    this.tasks.clear()
+    for (const [id, task] of draft) this.tasks.set(id, task)
+    this.planRevision = nextVersion
+    this.planRevisions = [...this.planRevisions, revision]
+    return { revision: TaskQueue.clonePlanRevision(revision), before }
+  }
+
+  /** Roll back an unpublished plan patch while preserving queue listeners. */
+  restorePlanSnapshot(snapshot: TaskQueueSnapshot): void {
+    const restored = TaskQueue.fromSnapshot(snapshot)
+    this.tasks.clear()
+    for (const task of restored.list()) this.tasks.set(task.id, task)
+    this.planRevision = restored.planRevision
+    this.planRevisions = [...restored.planRevisions]
+  }
+
+  /** Publish buffered skipped/ready events after a plan revision is durable. */
+  publishPlanRevision(revision: PlanRevision): void {
+    for (const taskId of revision.supersededTaskIds) {
+      const task = this.tasks.get(taskId)
+      if (task) this.emit('task:skipped', task)
+    }
+    for (const taskId of Object.values(revision.addedTasks)) {
+      const task = this.tasks.get(taskId)
+      if (task?.status === 'pending') this.emit('task:ready', task)
+    }
+    if (this.isComplete()) this.emitAllComplete()
   }
 
   // ---------------------------------------------------------------------------
@@ -230,10 +485,10 @@ export class TaskQueue {
    * Used when an approval gate rejects continuation — every pending, blocked,
    * or in-progress task is skipped with the given reason.
    *
-   * **Important:** Call only when no tasks are actively executing. The
-   * orchestrator invokes this after `await Promise.all()`, so no tasks are
-   * in-flight. Calling while agents are running may mark an in-progress task
-   * as skipped while its agent continues executing.
+   * **Important:** Call only after active execution has drained. The
+   * orchestrator first stops new dispatches, waits for its in-flight map to
+   * settle, and only then calls this method. Direct callers must provide the
+   * same drain-before-skip ordering.
    */
   skipRemaining(reason = 'Skipped: approval rejected.'): void {
     // Snapshot first — update() mutates the live map, which is unsafe to
@@ -523,14 +778,23 @@ export class TaskQueue {
       ...(task.assignee !== undefined ? { assignee: task.assignee } : {}),
       ...(task.dependsOn !== undefined ? { dependsOn: [...task.dependsOn] } : {}),
       ...(task.memoryScope !== undefined ? { memoryScope: task.memoryScope } : {}),
+      ...(task.dependencyPayload !== undefined ? { dependencyPayload: task.dependencyPayload } : {}),
       ...(task.role !== undefined ? { role: task.role } : {}),
       ...(task.priority !== undefined ? { priority: task.priority } : {}),
+      ...(task.metadata !== undefined ? { metadata: task.metadata } : {}),
+      ...(task.requires !== undefined ? { requires: task.requires } : {}),
       ...(task.result !== undefined ? { result: task.result } : {}),
       createdAt: task.createdAt.toISOString(),
       updatedAt: task.updatedAt.toISOString(),
       ...(task.maxRetries !== undefined ? { maxRetries: task.maxRetries } : {}),
       ...(task.retryDelayMs !== undefined ? { retryDelayMs: task.retryDelayMs } : {}),
       ...(task.retryBackoff !== undefined ? { retryBackoff: task.retryBackoff } : {}),
+      ...(task.supersededByRevision !== undefined
+        ? { supersededByRevision: task.supersededByRevision }
+        : {}),
+      ...(task.recoveredByRevision !== undefined
+        ? { recoveredByRevision: task.recoveredByRevision }
+        : {}),
     }
   }
 
@@ -543,14 +807,71 @@ export class TaskQueue {
       ...(snapshot.assignee !== undefined ? { assignee: snapshot.assignee } : {}),
       ...(snapshot.dependsOn !== undefined ? { dependsOn: [...snapshot.dependsOn] } : {}),
       ...(snapshot.memoryScope !== undefined ? { memoryScope: snapshot.memoryScope } : {}),
+      ...(snapshot.dependencyPayload !== undefined
+        ? { dependencyPayload: snapshot.dependencyPayload }
+        : {}),
       ...(snapshot.role !== undefined ? { role: snapshot.role } : {}),
       ...(snapshot.priority !== undefined ? { priority: snapshot.priority } : {}),
+      ...(snapshot.metadata !== undefined
+        ? { metadata: validateTaskMetadata(snapshot.metadata) }
+        : {}),
+      ...(snapshot.requires !== undefined ? { requires: snapshot.requires } : {}),
       ...(snapshot.result !== undefined ? { result: snapshot.result } : {}),
       createdAt: TaskQueue.parseSnapshotDate(snapshot.createdAt),
       updatedAt: TaskQueue.parseSnapshotDate(snapshot.updatedAt),
       ...(snapshot.maxRetries !== undefined ? { maxRetries: snapshot.maxRetries } : {}),
       ...(snapshot.retryDelayMs !== undefined ? { retryDelayMs: snapshot.retryDelayMs } : {}),
       ...(snapshot.retryBackoff !== undefined ? { retryBackoff: snapshot.retryBackoff } : {}),
+      ...(snapshot.supersededByRevision !== undefined
+        ? { supersededByRevision: snapshot.supersededByRevision }
+        : {}),
+      ...(snapshot.recoveredByRevision !== undefined
+        ? { recoveredByRevision: snapshot.recoveredByRevision }
+        : {}),
+    }
+  }
+
+  private static cloneTask(task: Task): Task {
+    return {
+      ...task,
+      ...(task.dependsOn !== undefined ? { dependsOn: [...task.dependsOn] } : {}),
+      createdAt: new Date(task.createdAt),
+      updatedAt: new Date(task.updatedAt),
+    }
+  }
+
+  private static clonePlanRevision(revision: PlanRevision): PlanRevision {
+    return {
+      ...revision,
+      addedTasks: { ...revision.addedTasks },
+      retargetedTasks: revision.retargetedTasks.map((item) => ({ ...item })),
+      supersededTaskIds: [...revision.supersededTaskIds],
+    }
+  }
+
+  private static validatePlanSnapshot(
+    snapshot: Extract<TaskQueueSnapshot, { readonly version: 2 }>,
+  ): void {
+    if (
+      !Number.isInteger(snapshot.planRevision)
+      || snapshot.planRevision < 1
+      || snapshot.planRevisions.length !== snapshot.planRevision
+    ) {
+      throw new Error('TaskQueue.fromSnapshot: invalid plan revision sequence.')
+    }
+    const taskIds = new Set(snapshot.tasks.map((task) => task.id))
+    for (const [index, revision] of snapshot.planRevisions.entries()) {
+      if (revision.version !== index + 1 || !taskIds.has(revision.triggerTaskId)) {
+        throw new Error('TaskQueue.fromSnapshot: invalid plan revision history.')
+      }
+      const referenced = [
+        ...Object.values(revision.addedTasks),
+        ...revision.retargetedTasks.map((item) => item.taskId),
+        ...revision.supersededTaskIds,
+      ]
+      if (referenced.some((taskId) => !taskIds.has(taskId))) {
+        throw new Error('TaskQueue.fromSnapshot: plan revision references an unknown task.')
+      }
     }
   }
 

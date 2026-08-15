@@ -87,6 +87,11 @@ export class AgentPool {
     return this.maxConcurrency - this.semaphore.active
   }
 
+  /** Maximum concurrent agent runs enforced by the pool semaphore. */
+  get runConcurrencyLimit(): number {
+    return this.semaphore.limit
+  }
+
   // -------------------------------------------------------------------------
   // Registry operations
   // -------------------------------------------------------------------------

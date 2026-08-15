@@ -120,16 +120,28 @@ describe('serializeTeamRunResult', () => {
     }
     const tr: TeamRunResult = {
       success: true,
+      routingDecision: {
+        mode: 'single',
+        reasons: ['simple goal'],
+        routerVersion: 'deterministic-v1',
+      },
       agentResults: new Map([['alice', ar]]),
+      taskResults: new Map([['task-1', ar]]),
       totalTokenUsage: { input_tokens: 1, output_tokens: 2 },
     }
     const json = serializeTeamRunResult(tr, { pretty: false, includeMessages: false })
     expect(json.success).toBe(true)
+    expect(json.routingDecision).toEqual(tr.routingDecision)
     expect((json.agentResults as Record<string, unknown>)['alice']).toMatchObject({
       success: true,
       output: 'ok',
     })
     expect((json.agentResults as Record<string, unknown>)['alice']).not.toHaveProperty('messages')
+    expect((json.taskResults as Record<string, unknown>)['task-1']).toMatchObject({
+      success: true,
+      output: 'ok',
+    })
+    expect((json.taskResults as Record<string, unknown>)['task-1']).not.toHaveProperty('messages')
   })
 
   it('includes messages when requested', () => {

@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run lint
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,19 +44,22 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run test:coverage
       - uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: ./packages/core/coverage/lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   package:
     runs-on: ubuntu-latest
@@ -65,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
@@ -132,6 +135,19 @@ jobs:
             exit 1
           fi
 
+      - name: Smoke-test the installed core npm bin
+        working-directory: packages/core
+        run: |
+          pack_dir=$(mktemp -d)
+          consumer_dir=$(mktemp -d)
+          pack_json=$(npm pack --json --pack-destination "$pack_dir")
+          tarball=$(echo "$pack_json" | jq -r '.[0].filename')
+          npm install --prefix "$consumer_dir" "$pack_dir/$tarball"
+          help_output=$("$consumer_dir/node_modules/.bin/oma" help)
+          echo "$help_output" | grep -q "oma eval run"
+          echo "$help_output" | grep -q "oma eval gate"
+          echo "Installed CLI help runs OK"
+
       - name: Assert the create-oma-app tarball ships dist + template
         working-directory: packages/create-oma-app
         run: |
@@ -187,7 +203,24 @@ jobs:
       - name: Run tolerant same-host observability regression gate
         run: npm run bench:observability:ci
 
+      - name: Pack the minimum core version supported by OTel
+        id: minimum-otel-core
+        run: |
+          set -euo pipefail
+          range=$(jq -r '.dependencies["@open-multi-agent/core"]' packages/otel/package.json)
+          if [[ ! "$range" =~ ^\^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::expected an exact caret range for the OTel core dependency; got $range"
+            exit 1
+          fi
+          minimum="${range#^}"
+          filename=$(npm pack "@open-multi-agent/core@$minimum" --pack-destination "$RUNNER_TEMP" --json | jq -er '.[0].filename')
+          tarball="$RUNNER_TEMP/$filename"
+          test -f "$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
       - name: Install real core and OTel tarballs in clean consumers
+        env:
+          OMA_OBSERVABILITY_MIN_CORE_TARBALL: ${{ steps.minimum-otel-core.outputs.tarball }}
         run: npm run test:observability-pack
 
   scaffold-e2e:
@@ -197,7 +230,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - name: End-to-end scaffold smoke test (pack -> generate -> install -> run gate)

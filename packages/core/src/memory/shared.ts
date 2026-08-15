@@ -17,6 +17,7 @@ import type {
   SharedMemoryWriteOptions,
 } from '../types.js'
 import { InMemoryStore } from './store.js'
+import { APPROVAL_KEY_PREFIX } from '../approval/durable.js'
 
 // ---------------------------------------------------------------------------
 // Runtime shape check
@@ -25,7 +26,7 @@ import { InMemoryStore } from './store.js'
 const STORE_METHODS = ['get', 'set', 'list', 'delete', 'clear'] as const
 const STRUCTURED_VALUE_ENCODING = 'json'
 const STRUCTURED_VALUE_METADATA_KEY = 'sharedMemoryValueEncoding'
-const RESERVED_STORE_PREFIXES = ['__oma_checkpoint__/'] as const
+const RESERVED_STORE_PREFIXES = ['__oma_checkpoint__/', APPROVAL_KEY_PREFIX] as const
 
 
 /**

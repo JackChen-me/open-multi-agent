@@ -225,7 +225,9 @@ describe('per-agent credentials: standalone Agent', () => {
 describe('per-agent credentials: orchestrator', () => {
   it('survives the runTeam short-circuit config spread', async () => {
     const { tool, seen } = credentialSpy()
-    const oma = new OpenMultiAgent({})
+    const oma = new OpenMultiAgent({
+      executionRouting: { strategy: 'deterministic' },
+    })
     const team = oma.createTeam('t', {
       name: 't',
       agents: [

@@ -1,5 +1,7 @@
 # Model routing
 
+Model Routing chooses models for calls inside an execution topology. It is orthogonal to [Execution Routing](execution-routing.md), which decides whether an automatic `runTeam()` call uses one Agent or a Coordinator-generated Team plan.
+
 `modelRouting` is an opt-in, deterministic policy that sends different orchestration calls to different models without touching your team or agent configuration. The usual shape is "flagship model plans, a cheap model runs the leaf work":
 
 ```ts
@@ -52,6 +54,45 @@ The `route` is the override applied when the rule matches. Only `model` is requi
 | `baseURL` | Base URL for OpenAI-compatible or self-hosted endpoints. |
 | `apiKey` | API key for the matched call. |
 | `region` | AWS region, for Bedrock routes. |
+| `fallback` | Ordered backup routes for retryable worker-provider failures. |
+
+## Retryable provider fallback
+
+Worker routes can declare an ordered `fallback` list. The initial attempt uses
+the route itself. When a confirmed provider error is retryable, the next task
+retry moves to the next entry in the list. Once the list is exhausted, later
+retries keep using its final entry.
+
+```ts
+const modelRouting: ModelRoutingPolicy = {
+  rules: [{
+    match: { phase: 'worker' },
+    route: {
+      model: 'claude-sonnet-4-5',
+      provider: 'anthropic',
+      fallback: [{
+        model: 'gpt-5',
+        provider: 'openai',
+      }],
+    },
+  }],
+}
+
+await orchestrator.runTasks(team, [{
+  title: 'Write report',
+  description: 'Summarize the findings.',
+  assignee: 'writer',
+  maxRetries: 1,
+}], { modelRouting })
+```
+
+Fallback is opt-in and reuses each task's existing retry settings, so set
+`maxRetries` high enough to reach the backup entries you configure. Authentication,
+validation, hook, and other non-provider errors never advance the fallback chain.
+A failed task without a structured provider error continues to use its current
+route. Each fallback entry is applied to the worker's effective configuration like
+any other route. When a backup uses a different provider or endpoint, include its
+`provider`, `baseURL`, `apiKey`, and `region` overrides as appropriate.
 
 ## Which calls are routed
 

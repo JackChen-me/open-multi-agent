@@ -10,20 +10,34 @@ export const STOP_WORDS: ReadonlySet<string> = new Set([
   'them', 'their', 'about', 'into', 'more', 'also', 'should', 'must',
 ])
 
+const WORD_SEGMENTER = new Intl.Segmenter('und', { granularity: 'word' })
+const CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+
 /**
  * Tokenise `text` into a deduplicated set of lower-cased keywords.
- * Words shorter than 4 characters and entries in {@link STOP_WORDS}
- * are filtered out.
+ * CJK words shorter than 2 characters, non-CJK words shorter than 4
+ * characters, and entries in {@link STOP_WORDS} are filtered out.
  */
 export function extractKeywords(text: string): string[] {
-  return [
-    ...new Set(
-      text
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length > 3 && !STOP_WORDS.has(w)),
-    ),
-  ]
+  const keywords: string[] = []
+
+  for (const { segment, isWordLike } of WORD_SEGMENTER.segment(text.toLowerCase())) {
+    if (!isWordLike) continue
+
+    // Preserve the previous \W+ splitting semantics for Latin-script words
+    // while allowing Intl.Segmenter to surface CJK words instead of dropping them.
+    const words = CJK_CHARACTER.test(segment) ? [segment] : segment.split(/\W+/)
+    for (const word of words) {
+      const meetsLengthThreshold = CJK_CHARACTER.test(word)
+        ? [...word].length >= 2
+        : word.length > 3
+      if (meetsLengthThreshold && !STOP_WORDS.has(word)) {
+        keywords.push(word)
+      }
+    }
+  }
+
+  return [...new Set(keywords)]
 }
 
 /**

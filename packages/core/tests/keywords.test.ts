@@ -47,6 +47,64 @@ describe('utils/keywords', () => {
     it('returns empty array for empty input', () => {
       expect(extractKeywords('')).toEqual([])
     })
+
+    it('extracts CJK words with at least two characters', () => {
+      expect(extractKeywords('分析代码质量并生成评审报告')).toEqual([
+        '分析',
+        '代码',
+        '质量',
+        '生成',
+        '评审',
+        '报告',
+      ])
+    })
+
+    it('extracts keywords from mixed Chinese and English text', () => {
+      expect(extractKeywords('Review这段TypeScript代码并生成API报告')).toEqual([
+        'review',
+        'typescript',
+        '代码',
+        '生成',
+        '报告',
+      ])
+    })
+
+    it('segments Japanese words without spaces', () => {
+      expect(extractKeywords('コード品質を分析してレビューレポートを作成する')).toEqual([
+        'コード',
+        '品質',
+        '分析',
+        'レビュー',
+        'レポート',
+        '作成',
+        'する',
+      ])
+    })
+
+    it('segments Korean with particles attached to stems (agglutinative)', () => {
+      // Intl.Segmenter keeps object/verb particles attached (품질을, 분석하고,
+      // 보고서를). Substring keywordScore still matches these against bare stems
+      // in the other direction, which is why agent selection stays robust
+      // without any stemming. This test pins that surface behaviour.
+      expect(extractKeywords('코드 품질을 분석하고 리뷰 보고서를 작성한다')).toEqual([
+        '코드',
+        '품질을',
+        '분석하고',
+        '리뷰',
+        '보고서를',
+        '작성한다',
+      ])
+    })
+
+    it('preserves pure-English punctuation and length behaviour', () => {
+      expect(extractKeywords("Writer's notes don't include tiny API words")).toEqual([
+        'writer',
+        'notes',
+        'include',
+        'tiny',
+        'words',
+      ])
+    })
   })
 
   describe('keywordScore', () => {

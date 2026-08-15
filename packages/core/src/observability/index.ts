@@ -36,6 +36,12 @@ export type {
 } from './processors.js'
 export { LegacyCallbackTraceSink } from './legacy-callback.js'
 export { materializeRun } from './materialize.js'
+export { buildExecutionReceipt } from './execution-receipt.js'
+export type {
+  ExecutionReceipt,
+  ExecutionReceiptApprovalDecision,
+  ExecutionReceiptDependencyEdge,
+} from './execution-receipt.js'
 export { InMemoryTraceStore } from './in-memory-store.js'
 export type { InMemoryTraceStoreOptions } from './in-memory-store.js'
 export { TraceStoreExporter } from './store-exporter.js'

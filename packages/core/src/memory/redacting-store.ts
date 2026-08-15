@@ -39,6 +39,11 @@ export interface RedactingStoreOptions {
  * Wraps any {@link MemoryStore}, redacting the value passed to `set` /
  * `setWithExpiry` before it is persisted. Metadata, keys, and read paths are
  * forwarded unchanged.
+ *
+ * This lossy decorator deliberately does not expose `compareAndSet`: exact
+ * content hashes are required for durable approvals, while redaction changes
+ * the reviewed content. Use a protected, non-redacting approval/checkpoint
+ * store when suspendable approvals are required.
  */
 export class RedactingStore implements MemoryStore {
   private readonly patterns: readonly RegExp[]

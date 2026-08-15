@@ -23,6 +23,12 @@ describe('subpath export barrels', () => {
     expect(typeof mod.AISdkAdapter).toBe('function')
   })
 
+  it('/shell exposes LocalShellExecutor', async () => {
+    const mod = await import('../src/shell.js')
+    expect(typeof mod.LocalShellExecutor).toBe('function')
+    expect(typeof new mod.LocalShellExecutor().exec).toBe('function')
+  })
+
   it('/eval exposes EvalSet and offline runner entry points', async () => {
     const mod = await import('../src/eval/index.js')
     expect(typeof mod.defineEvalSet).toBe('function')

@@ -43,17 +43,28 @@
 
 import type {
   AgentConfig,
+  AgentRunInput,
   AgentRunResult,
+  ApprovalDecisionRecord,
+  ApprovalGateDecision,
+  ApprovalRequest,
+  ApprovalRequestContent,
   CheckpointOptions,
   CheckpointSnapshot,
+  InFlightTaskCheckpoint,
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
+  EgressPolicy,
+  ExecutionRoutingConfig,
+  ModelRoutingPolicy,
   PlanArtifact,
+  PlanRevision,
   PlanTaskArtifact,
   OrchestratorConfig,
   OrchestratorEvent,
   RestoreOptions,
+  RoutingDecision as ExecutionRoutingDecision,
   RunAgentOptions,
   RunIdentity,
   RunStatus,
@@ -61,7 +72,9 @@ import type {
   RunTaskSpec,
   RunTasksOptions,
   RunTeamOptions,
+  SemanticRoutingAssessment,
   Task,
+  TaskProfiler,
   TaskExecutionMetrics,
   TaskExecutionRecord,
   TaskStatus,
@@ -71,16 +84,35 @@ import type {
 } from '../types.js'
 import type { RunOptions } from '../agent/runner.js'
 import { Agent } from '../agent/agent.js'
+import { copyMessages, prepareAgentRunInput } from '../agent/input.js'
 import { AgentPool } from '../agent/pool.js'
+import { createAdapter } from '../llm/adapter.js'
+import {
+  intersectEgressPolicies,
+  rejectUnsupportedEgress,
+} from '../llm/egress.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
+import { mergeAbortSignals } from '../utils/abort.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { Checkpoint } from '../memory/checkpoint.js'
 import { InMemoryStore } from '../memory/store.js'
-import { createTask, validateTaskDependencies } from '../task/task.js'
+import { validateTaskDependencies } from '../task/task.js'
+import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
-import { CostBudgetExceededError, TokenBudgetExceededError } from '../errors.js'
+import {
+  CostBudgetExceededError,
+  InvalidTaskRequirementsError,
+  RoutingDeclarationRequiredError,
+  RoutingProfilerFailedError,
+  RoutingTimeoutError,
+  TokenBudgetExceededError,
+} from '../errors.js'
+import {
+  validateTaskRequirements,
+  type AgentSelectorContext,
+} from './agent-selector.js'
 import {
   createRestoreIdentity,
   resolveRestoreMetadata,
@@ -88,6 +120,11 @@ import {
   type RestoreMetadataResolution,
 } from '../observability/identity.js'
 import { classifyRunFailure, statusOnly } from '../observability/status.js'
+import { buildExecutionReceipt } from '../observability/execution-receipt.js'
+import {
+  recordRoutingDecision,
+  type RoutingDecisionRecordInput,
+} from '../observability/routing-decision.js'
 import {
   createTraceRuntime,
   LEGACY_TRACE_METADATA_ONLY,
@@ -114,7 +151,7 @@ import {
 } from './run-context.js'
 import {
   computeRunMetrics,
-  resolveTokenBudget,
+  resolveBudgetCeiling,
   buildCostEstimateContext,
   applyBudgetAccounting,
   emitBudgetExceeded,
@@ -127,9 +164,45 @@ import {
   withModelRoute,
   isLeafTask,
 } from './agent-config.js'
-import { isSimpleGoal, selectBestAgent } from './short-circuit.js'
-import { executeQueue, saveRunCheckpoint } from './task-execution.js'
+import { selectBestAgent } from './short-circuit.js'
+import {
+  buildRoutingContext,
+  DeterministicRouter,
+  resolveExecutionRouting,
+} from './execution-router.js'
+import {
+  evaluateSemanticRoutingPolicy,
+  HYBRID_ROUTER_VERSION,
+  LLMTaskProfiler,
+  TaskProfileValidationError,
+  validateTaskProfilerResult,
+} from './task-profiler.js'
+import {
+  executeQueue,
+  persistPendingApproval,
+  saveRunCheckpoint,
+} from './task-execution.js'
+import {
+  assertDurableTaskApprovalSupport,
+  createApprovalRequest,
+  DurableApprovalError,
+  DurableApprovalLedger,
+  hashApprovalRequest,
+} from '../approval/durable.js'
+import {
+  buildGovernanceTaskSpecs,
+  finalizeGovernanceRun,
+  type GovernanceDeclaration,
+} from './governance.js'
+import {
+  createConsequentialConfirmationState,
+  finalizeConsequentialRun,
+  hasGrantedConsequentialTool,
+  withConsequentialConfirmation,
+  type ConsequentialConfirmationState,
+} from './consequential.js'
 import { runConsensusCore, applyConsensusDefaults, type ConsensusAgentDefaults } from './consensus.js'
+import { resolveRecoveryOptions } from './recovery.js'
 import {
   createOnlineEvaluator,
   NOOP_ONLINE_EVALUATION,
@@ -139,11 +212,13 @@ import {
 } from '../eval/online.js'
 
 import {
-  parseTaskSpecs,
   buildCoordinatorBaseConfig,
+  buildCoordinatorTaskSpecsSchema,
   buildDecompositionPrompt,
   runCoordinatorSynthesis,
   loadSpecsIntoQueue,
+  findInvalidAssignees,
+  type ParsedTaskSpec,
 } from './coordinator.js'
 
 // ---------------------------------------------------------------------------
@@ -153,6 +228,14 @@ import {
 
 export { isSimpleGoal, selectBestAgent } from './short-circuit.js'
 export { computeRetryDelay, executeWithRetry } from './retry.js'
+export { DeterministicRouter } from './execution-router.js'
+export type {
+  ExecutionRouter,
+  RoutingBudget,
+  RoutingContext,
+  RoutingDecision,
+  RosterSummaryEntry,
+} from './execution-router.js'
 
 // ---------------------------------------------------------------------------
 // OpenMultiAgent
@@ -163,6 +246,147 @@ interface PendingOnlineEvaluation {
   readonly startedAtMs: number
 }
 
+interface EffectiveRunBudgets {
+  readonly maxTokenBudget?: number
+  readonly maxCostBudget?: number
+}
+
+type EffectiveOrchestratorConfig = Required<
+  Omit<
+    OrchestratorConfig,
+    | 'onApproval'
+    | 'onTaskDispatch'
+    | 'onAgentStream'
+    | 'onPlanReady'
+    | 'onProgress'
+    | 'onTrace'
+    | 'onToolCall'
+    | 'observability'
+    | 'evaluation'
+    | 'defaultBaseURL'
+    | 'defaultApiKey'
+    | 'egressPolicy'
+    | 'defaultShellExecutor'
+    | 'maxTokenBudget'
+    | 'maxCostBudget'
+    | 'estimateCost'
+    | 'defaultToolPreset'
+    | 'checkpoint'
+    | 'recovery'
+  >
+> & Pick<
+  OrchestratorConfig,
+  | 'onApproval'
+  | 'onTaskDispatch'
+  | 'onAgentStream'
+  | 'onPlanReady'
+  | 'onProgress'
+  | 'onTrace'
+  | 'onToolCall'
+  | 'observability'
+  | 'evaluation'
+  | 'defaultBaseURL'
+  | 'defaultApiKey'
+  | 'egressPolicy'
+  | 'defaultShellExecutor'
+  | 'maxTokenBudget'
+  | 'maxCostBudget'
+  | 'estimateCost'
+  | 'defaultToolPreset'
+  | 'checkpoint'
+  | 'recovery'
+>
+
+interface SemanticProfileRun {
+  readonly assessment: SemanticRoutingAssessment
+  readonly usage?: TokenUsage
+  readonly model?: string
+  readonly provider?: string
+  readonly reasons: readonly string[]
+}
+
+function normalizeApprovalDecision(
+  value: ApprovalGateDecision,
+  callbackName: string,
+): { readonly action: 'allow' | 'deny' | 'suspend'; readonly reason?: string } {
+  if (value === true) return { action: 'allow' }
+  if (value === false) return { action: 'deny' }
+  if (
+    value === null
+    || typeof value !== 'object'
+    || (value.action !== 'allow' && value.action !== 'deny' && value.action !== 'suspend')
+    || ('reason' in value && value.reason !== undefined && typeof value.reason !== 'string')
+  ) {
+    throw new Error(`${callbackName} returned an invalid approval decision.`)
+  }
+  const reason = 'reason' in value ? value.reason : undefined
+  return reason === undefined
+    ? { action: value.action }
+    : { action: value.action, reason }
+}
+
+function validateExecutionRoutingConfig(config?: ExecutionRoutingConfig): void {
+  if (
+    config?.strategy !== undefined
+    && config.strategy !== 'hybrid'
+    && config.strategy !== 'deterministic'
+  ) {
+    throw new TypeError("executionRouting.strategy must be 'hybrid' or 'deterministic'.")
+  }
+  if (
+    config?.failurePolicy !== undefined
+    && config.failurePolicy !== 'fallback'
+    && config.failurePolicy !== 'fail'
+  ) {
+    throw new TypeError("executionRouting.failurePolicy must be 'fallback' or 'fail'.")
+  }
+  if (
+    config?.confidenceThreshold !== undefined
+    && (
+      !Number.isFinite(config.confidenceThreshold)
+      || config.confidenceThreshold < 0
+      || config.confidenceThreshold > 1
+    )
+  ) {
+    throw new TypeError('executionRouting.confidenceThreshold must be between 0 and 1.')
+  }
+  if (
+    config?.timeoutMs !== undefined
+    && (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0)
+  ) {
+    throw new TypeError('executionRouting.timeoutMs must be a positive finite number.')
+  }
+}
+
+function closeTraceForFailure(
+  traceRuntime: TraceRuntime | undefined,
+  error: unknown,
+): void {
+  const classified = classifyRunFailure(error)
+  traceRuntime?.close({
+    status: classified.status,
+    error: classified.errorInfo,
+  })
+}
+
+function resolveRunBudgets(
+  config: Pick<OrchestratorConfig, 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost'>,
+  options?: Pick<RunTasksOptions, 'maxTokenBudget' | 'maxCostBudget'>,
+): EffectiveRunBudgets {
+  const maxTokenBudget = resolveBudgetCeiling(
+    options?.maxTokenBudget,
+    config.maxTokenBudget,
+  )
+  const maxCostBudget = resolveBudgetCeiling(
+    options?.maxCostBudget,
+    config.maxCostBudget,
+  )
+  if (maxCostBudget !== undefined && config.estimateCost === undefined) {
+    throw new Error('maxCostBudget requires estimateCost so cost caps cannot be silently ignored.')
+  }
+  return { maxTokenBudget, maxCostBudget }
+}
+
 /**
  * Top-level orchestrator for the open-multi-agent framework.
  *
@@ -170,11 +394,10 @@ interface PendingOnlineEvaluation {
  * Most users will interact with this class exclusively.
  */
 export class OpenMultiAgent {
-  private readonly config: Required<
-    Omit<OrchestratorConfig, 'onApproval' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint'>
-  > & Pick<OrchestratorConfig, 'onApproval' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint'>
+  private readonly config: EffectiveOrchestratorConfig
 
   private readonly teams: Map<string, Team> = new Map()
+  private readonly hasConfiguredCustomExecutionRouter: boolean
   private readonly fallbackCheckpointStore = new InMemoryStore()
   private completedTaskCount = 0
   private readonly traceRecordObserver?: TraceRecordObserver
@@ -189,6 +412,9 @@ export class OpenMultiAgent {
    * Sensible defaults:
    *   - `maxConcurrency`: 5
    *   - `maxDelegationDepth`: 3
+   *   - `schedulingStrategy`: `'dependency-first'`
+   *   - `schedulingWeights`: `{ fit: 0.7, load: 0.3 }`
+   *   - `strictAssignees`: `true`
    *   - `defaultModel`:   `'claude-opus-4-6'`
    *   - `defaultProvider`: `'anthropic'`
    */
@@ -196,8 +422,13 @@ export class OpenMultiAgent {
     if (config.maxCostBudget !== undefined && config.estimateCost === undefined) {
       throw new Error('maxCostBudget requires estimateCost so cost caps cannot be silently ignored.')
     }
+    if (config.onApproval && config.onTaskDispatch) {
+      throw new Error('onApproval and onTaskDispatch are mutually exclusive approval modes.')
+    }
+    validateExecutionRoutingConfig(config.executionRouting)
 
     this.traceRecordObserver = traceRecordObserverFrom(config)
+    this.hasConfiguredCustomExecutionRouter = config.executionRouter !== undefined
     this.onlineEvaluator = createOnlineEvaluator(config.evaluation, config.estimateCost)
     this.evaluation = this.onlineEvaluator ?? NOOP_ONLINE_EVALUATION
     const hasExplicitLegacyBridge = config.observability?.sinks.some(
@@ -215,20 +446,45 @@ export class OpenMultiAgent {
     this.config = {
       maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
       maxDelegationDepth: config.maxDelegationDepth ?? DEFAULT_MAX_DELEGATION_DEPTH,
+      schedulingStrategy: config.schedulingStrategy ?? 'dependency-first',
+      schedulingWeights: config.schedulingWeights ?? {},
+      strictAssignees: config.strictAssignees ?? true,
+      executionRouter: config.executionRouter ?? new DeterministicRouter(),
+      executionRouting: {
+        strategy: config.executionRouting?.strategy ?? 'deterministic',
+        confidenceThreshold: config.executionRouting?.confidenceThreshold ?? 0.7,
+        failurePolicy: config.executionRouting?.failurePolicy ?? 'fallback',
+        ...(config.executionRouting?.profiler !== undefined
+          ? { profiler: config.executionRouting.profiler }
+          : {}),
+        ...(config.executionRouting?.model !== undefined
+          ? { model: config.executionRouting.model }
+          : {}),
+        ...(config.executionRouting?.adapter !== undefined
+          ? { adapter: config.executionRouting.adapter }
+          : {}),
+        ...(config.executionRouting?.timeoutMs !== undefined
+          ? { timeoutMs: config.executionRouting.timeoutMs }
+          : {}),
+      },
       defaultModel: config.defaultModel ?? DEFAULT_MODEL,
       defaultProvider: config.defaultProvider ?? 'anthropic',
       defaultBaseURL: config.defaultBaseURL,
       defaultApiKey: config.defaultApiKey,
+      egressPolicy: intersectEgressPolicies(config.egressPolicy),
       // `defaultCwd === undefined` means "use the default sandbox rooted at
       // <cwd>/.agent-workspace". An explicit `null` propagates through to
       // disable the filesystem sandbox; a string sets a custom sandbox root.
       defaultCwd: config.defaultCwd === undefined ? defaultWorkspaceDir() : config.defaultCwd,
+      defaultShellExecutor: config.defaultShellExecutor,
       maxTokenBudget: config.maxTokenBudget,
       maxCostBudget: config.maxCostBudget,
       estimateCost: config.estimateCost,
       defaultToolPreset: config.defaultToolPreset,
       checkpoint: config.checkpoint,
+      recovery: config.recovery,
       onApproval: config.onApproval,
+      onTaskDispatch: config.onTaskDispatch,
       onPlanReady: config.onPlanReady,
       onAgentStream: config.onAgentStream,
       onProgress: config.onProgress,
@@ -236,6 +492,305 @@ export class OpenMultiAgent {
       observability: config.observability,
       onTrace: config.onTrace ?? (hasExplicitLegacyBridge ? LEGACY_TRACE_METADATA_ONLY : undefined),
       onToolCall: config.onToolCall,
+      requireConsequentialConfirmation: config.requireConsequentialConfirmation ?? false,
+    }
+  }
+
+  private configForRun(egressPolicy?: EgressPolicy): EffectiveOrchestratorConfig {
+    const effectivePolicy = intersectEgressPolicies(this.config.egressPolicy, egressPolicy)
+    return {
+      ...this.config,
+      egressPolicy: effectivePolicy,
+    }
+  }
+
+  private createScheduler(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): Scheduler {
+    return new Scheduler(
+      this.config.schedulingStrategy,
+      this.agentSelectorContext(modelRouting, tasks),
+      {
+        weights: this.config.schedulingWeights,
+        onWarning: (warning) => {
+          this.config.onProgress?.({
+            type: 'warning',
+            task: warning.taskId,
+            data: warning,
+          })
+        },
+      },
+    )
+  }
+
+  private agentSelectorContext(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): AgentSelectorContext {
+    return {
+      defaultProvider: this.config.defaultProvider,
+      defaultToolPreset: this.config.defaultToolPreset,
+      includeDelegateTool: true,
+      ...(modelRouting ? {
+        resolveCandidate: (task: Task, candidate: AgentConfig): AgentConfig => {
+          const base = applyDefaultToolPreset(
+            applyAgentDefaults(candidate, this.config),
+            this.config.defaultToolPreset,
+          )
+          return withModelRoute(base, routeMatches(modelRouting, {
+            phase: 'worker',
+            agent: candidate.name,
+            task,
+            leaf: isLeafTask(task, tasks()),
+          }))
+        },
+      } : {}),
+    }
+  }
+
+  private resolveExecutionRoutingConfig(
+    override?: ExecutionRoutingConfig,
+    coordinator?: CoordinatorConfig,
+  ): Required<
+    Pick<
+      ExecutionRoutingConfig,
+      'strategy' | 'confidenceThreshold' | 'failurePolicy'
+    >
+  > & Omit<ExecutionRoutingConfig, 'strategy' | 'confidenceThreshold' | 'failurePolicy'> {
+    const profiler = override?.profiler ?? this.config.executionRouting.profiler
+    const model = override?.model ?? this.config.executionRouting.model
+    const adapter = override?.adapter ?? this.config.executionRouting.adapter
+    const timeoutMs =
+      override?.timeoutMs
+      ?? this.config.executionRouting.timeoutMs
+      ?? coordinator?.callTimeoutMs
+    const resolved = {
+      strategy: override?.strategy ?? this.config.executionRouting.strategy ?? 'deterministic',
+      confidenceThreshold:
+        override?.confidenceThreshold
+        ?? this.config.executionRouting.confidenceThreshold
+        ?? 0.7,
+      failurePolicy:
+        override?.failurePolicy
+        ?? this.config.executionRouting.failurePolicy
+        ?? 'fallback',
+      ...(profiler !== undefined ? { profiler } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(adapter !== undefined ? { adapter } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    }
+    validateExecutionRoutingConfig(resolved)
+    return resolved
+  }
+
+  private async resolveTaskProfiler(
+    routingConfig: ExecutionRoutingConfig,
+    coordinator?: CoordinatorConfig,
+    config: EffectiveOrchestratorConfig = this.config,
+  ): Promise<TaskProfiler> {
+    if (routingConfig.profiler !== undefined) return routingConfig.profiler
+    const configuredAdapter = routingConfig.adapter ?? coordinator?.adapter
+    if (configuredAdapter !== undefined) {
+      rejectUnsupportedEgress(
+        config.egressPolicy,
+        configuredAdapter.name,
+        'custom and AI SDK adapters do not expose an enforceable request transport or target contract to OMA.',
+      )
+    }
+    const adapter = configuredAdapter ?? (
+      config.egressPolicy === undefined
+        ? await createAdapter(
+            config.defaultProvider,
+            config.defaultApiKey,
+            config.defaultBaseURL,
+          )
+        : await createAdapter(
+            config.defaultProvider,
+            config.defaultApiKey,
+            config.defaultBaseURL,
+            undefined,
+            config.egressPolicy,
+          )
+    )
+    return new LLMTaskProfiler({
+      adapter,
+      model: routingConfig.model ?? coordinator?.model ?? config.defaultModel,
+    })
+  }
+
+  private async runSemanticProfiler(
+    context: ReturnType<typeof buildRoutingContext>,
+    routingConfig: ReturnType<OpenMultiAgent['resolveExecutionRoutingConfig']>,
+    coordinator: CoordinatorConfig | undefined,
+    config: EffectiveOrchestratorConfig,
+    traceRuntime: TraceRuntime | undefined,
+    facts: {
+      readonly hasConsequentialTools: boolean
+      readonly permissionBoundaryCount: number
+    },
+  ): Promise<SemanticProfileRun> {
+    let profiler: TaskProfiler | undefined
+    const startedAt = Date.now()
+    const span = traceRuntime?.startSpan({
+      kind: 'routing',
+      name: 'profile_execution_route',
+      parent: traceRuntime.root,
+      attributes: {
+        'oma.routing.semantic.strategy': 'hybrid',
+        'oma.routing.semantic.confidence_threshold': routingConfig.confidenceThreshold,
+      },
+    })
+    try {
+      profiler = await this.resolveTaskProfiler(routingConfig, coordinator, config)
+      if (typeof profiler.version !== 'string' || profiler.version.length === 0) {
+        throw new TaskProfileValidationError(
+          'Task profiler version must be a non-empty string.',
+        )
+      }
+      const timeoutMs = routingConfig.timeoutMs
+      let abortSignal = context.abortSignal
+      let timeoutSignal: AbortSignal | undefined
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        timeoutSignal = AbortSignal.timeout(timeoutMs)
+        abortSignal = abortSignal
+          ? mergeAbortSignals(abortSignal, timeoutSignal)
+          : timeoutSignal
+      }
+      const profilePromise = Promise.resolve(profiler.profile({
+        goal: context.goal,
+        roster: context.roster,
+        ...(context.budget !== undefined ? { budget: context.budget } : {}),
+        ...(abortSignal !== undefined ? { abortSignal } : {}),
+      }))
+      const rawResult = timeoutSignal === undefined
+        ? await profilePromise
+        : await Promise.race([
+            profilePromise,
+            new Promise<never>((_, reject) => {
+              timeoutSignal!.addEventListener(
+                'abort',
+                () => reject(new RoutingTimeoutError(timeoutMs!, 'profiler')),
+                { once: true },
+              )
+            }),
+          ])
+      const result = validateTaskProfilerResult(rawResult)
+      const policy = evaluateSemanticRoutingPolicy(result.profile, {
+        confidenceThreshold: routingConfig.confidenceThreshold,
+        ...facts,
+      })
+      const assessment: SemanticRoutingAssessment = {
+        profilerVersion: profiler.version,
+        profile: result.profile,
+        ...(result.model !== undefined ? { model: result.model } : {}),
+        ...(result.provider !== undefined ? { provider: result.provider } : {}),
+        legacyMode: 'single',
+        recommendation: policy.recommendation,
+        outcome: 'applied',
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+      }
+      span?.end({
+        status: statusOnly('ok'),
+        attributes: {
+          'oma.routing.semantic.profiler_version': profiler.version,
+          'oma.routing.semantic.recommendation': policy.recommendation,
+          'oma.routing.semantic.confidence': result.profile.confidence,
+          ...(result.model !== undefined
+            ? { 'gen_ai.request.model': result.model }
+            : {}),
+          ...(result.provider !== undefined
+            ? { 'gen_ai.provider.name': result.provider }
+            : {}),
+          ...(result.usage !== undefined
+            ? {
+                'gen_ai.usage.input_tokens': result.usage.input_tokens,
+                'gen_ai.usage.output_tokens': result.usage.output_tokens,
+              }
+            : {}),
+          'oma.routing.semantic.duration_ms': Math.max(0, Date.now() - startedAt),
+        },
+      })
+      return {
+        assessment,
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+        ...(result.model !== undefined ? { model: result.model } : {}),
+        ...(result.provider !== undefined ? { provider: result.provider } : {}),
+        reasons: policy.reasons,
+      }
+    } catch (error) {
+      if (context.abortSignal?.aborted) {
+        span?.end({ status: statusOnly('cancelled') })
+        throw error
+      }
+      const fallbackCode = error instanceof RoutingTimeoutError
+        ? 'profiler-timeout'
+        : error instanceof TaskProfileValidationError
+          ? 'invalid-profile'
+          : profiler === undefined
+            ? 'profiler-unavailable'
+            : 'profiler-error'
+      const failure = error instanceof RoutingTimeoutError
+        ? error
+        : new RoutingProfilerFailedError(
+            'Semantic routing profiler failed to produce a valid task profile.',
+            error,
+          )
+      const validationFailure = error instanceof TaskProfileValidationError
+        ? error
+        : undefined
+      span?.end({
+        status: statusOnly('error'),
+        error: classifyRunFailure(failure).errorInfo,
+        attributes: {
+          'oma.routing.semantic.fallback_code': fallbackCode,
+          'oma.routing.semantic.duration_ms': Math.max(0, Date.now() - startedAt),
+          ...(validationFailure?.usage !== undefined
+            ? {
+                'gen_ai.usage.input_tokens': validationFailure.usage.input_tokens,
+                'gen_ai.usage.output_tokens': validationFailure.usage.output_tokens,
+              }
+            : {}),
+          ...(validationFailure?.model !== undefined
+            ? { 'gen_ai.request.model': validationFailure.model }
+            : {}),
+          ...(validationFailure?.provider !== undefined
+            ? { 'gen_ai.provider.name': validationFailure.provider }
+            : {}),
+        },
+      })
+      if (routingConfig.failurePolicy === 'fail') throw failure
+      return {
+        assessment: {
+          profilerVersion: 'none',
+          ...(typeof profiler?.version === 'string' && profiler.version.length > 0
+            ? { requestedProfilerVersion: profiler.version }
+            : {}),
+          legacyMode: 'single',
+          recommendation: 'single',
+          outcome: 'fallback',
+          fallbackCode,
+          ...(validationFailure?.model !== undefined
+            ? { model: validationFailure.model }
+            : {}),
+          ...(validationFailure?.provider !== undefined
+            ? { provider: validationFailure.provider }
+            : {}),
+          ...(validationFailure?.usage !== undefined
+            ? { usage: validationFailure.usage }
+            : {}),
+        },
+        ...(validationFailure?.usage !== undefined
+          ? { usage: validationFailure.usage }
+          : {}),
+        ...(validationFailure?.model !== undefined
+          ? { model: validationFailure.model }
+          : {}),
+        ...(validationFailure?.provider !== undefined
+          ? { provider: validationFailure.provider }
+          : {}),
+        reasons: ['Semantic profiling failed; keeping the deterministic Single route.'],
+      }
     }
   }
 
@@ -300,34 +855,45 @@ export class OpenMultiAgent {
   // -------------------------------------------------------------------------
 
   /**
-   * Run a single prompt with a one-off agent.
+   * Run a string prompt or structured message history with a one-off agent.
    *
-   * Constructs a fresh agent from `config`, runs `prompt` in a single turn,
+   * Constructs a fresh agent from `config`, runs `input` in a fresh conversation,
    * and returns the result. The agent is not registered with any pool or team.
    *
    * Useful for simple one-shot queries that do not need team orchestration.
    *
    * @param config - Agent configuration.
-   * @param prompt - The user prompt to send.
+   * @param input - A string shorthand or complete caller-owned message list.
    */
   async runAgent(
     config: AgentConfig,
-    prompt: string,
+    input: AgentRunInput,
     options?: RunAgentOptions,
   ): Promise<AgentRunResult> {
-    const pendingEvaluation = this.beginOnlineEvaluation(prompt)
+    const runConfig = this.configForRun(options?.egressPolicy)
+    const preparedInput = prepareAgentRunInput(input, config.backend)
+    const pendingEvaluation = this.beginOnlineEvaluation(
+      preparedInput.structured ? copyMessages(preparedInput.messages) : input,
+    )
     const { identity, metadata } = createRunFacts(options)
     const traceRuntime = this.startTrace(identity, metadata)
-    const effectiveBudget = resolveTokenBudget(config.maxTokenBudget, this.config.maxTokenBudget)
+    const effectiveBudget = resolveBudgetCeiling(config.maxTokenBudget, this.config.maxTokenBudget)
     const effective: AgentConfig = applyDefaultToolPreset({
-      ...applyAgentDefaults(config, this.config),
+      ...applyAgentDefaults(config, runConfig),
       maxTokenBudget: effectiveBudget,
-    }, this.config.defaultToolPreset)
-    const agent = buildAgent(effective)
+    }, runConfig.defaultToolPreset)
+    const consequential = hasGrantedConsequentialTool(effective)
+    const confirmationState = createConsequentialConfirmationState()
+    const guardedEffective = consequential && this.config.requireConsequentialConfirmation
+      ? withConsequentialConfirmation(effective, confirmationState)
+      : effective
+    const agent = buildAgent(guardedEffective)
     this.config.onProgress?.({
       type: 'agent_start',
       agent: config.name,
-      data: { prompt },
+      data: preparedInput.structured
+        ? { messages: copyMessages(preparedInput.messages) }
+        : { prompt: input },
     })
 
     // Build run-time options: trace + optional abort signal. RunOptions has
@@ -356,7 +922,10 @@ export class OpenMultiAgent {
             tracePhase: 'agent',
           }
 
-    const result = await agent.run(prompt, runOptions)
+    const result = await agent.run(
+      preparedInput.structured ? preparedInput.messages : input,
+      runOptions,
+    )
     let finalResult = result
 
     if (result.budgetExceeded) {
@@ -400,19 +969,18 @@ export class OpenMultiAgent {
       }
     }
 
+    const completedResult = finalizeConsequentialRun<AgentRunResult>({
+      ...finalResult,
+      ...(metadata !== undefined ? { metadata } : {}),
+    }, consequential, confirmationState)
     this.config.onProgress?.({
       type: 'agent_complete',
       agent: config.name,
-      data: finalResult,
+      data: completedResult,
     })
 
-    if (finalResult.success) {
+    if (completedResult.success) {
       this.completedTaskCount++
-    }
-
-    const completedResult: AgentRunResult = {
-      ...finalResult,
-      ...(metadata !== undefined ? { metadata } : {}),
     }
     traceRuntime?.close({
       status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
@@ -452,14 +1020,304 @@ export class OpenMultiAgent {
     goal: string,
     options?: RunTeamOptions,
   ): Promise<TeamRunResult> {
+    const runConfig = this.configForRun(options?.egressPolicy)
     const pendingEvaluation = this.beginOnlineEvaluation(goal)
+    const agentConfigs = team.getAgents()
+    const budgets = resolveRunBudgets(runConfig, options)
+    const explicitMode = options?.mode
+    if (explicitMode === 'single' && options?.planOnly) {
+      throw new Error("runTeam mode 'single' cannot be combined with planOnly.")
+    }
+    const preferredBudgetDegraded = explicitMode === undefined
+      && !options?.planOnly
+      && options?.governanceIntent === 'preferred'
+      && options.preferredUnderBudget === 'degrade'
+      && (budgets.maxTokenBudget !== undefined || budgets.maxCostBudget !== undefined)
+    // Always validate declared role names/order, even when an explicit mode
+    // selects a different execution topology.
+    const declaredGovernanceTaskSpecs = buildGovernanceTaskSpecs(goal, agentConfigs, options)
+    const governanceTaskSpecs = explicitMode === undefined && !preferredBudgetDegraded
+      ? declaredGovernanceTaskSpecs
+      : undefined
+    if (
+      explicitMode === undefined
+      && options?.governanceIntent === 'required'
+      && declaredGovernanceTaskSpecs === undefined
+    ) {
+      throw new Error('Invariant violation: required runTeam governance must use an explicit task topology.')
+    }
+    if (governanceTaskSpecs !== undefined) {
+      const queue = new TaskQueue()
+      loadSpecsIntoQueue(governanceTaskSpecs, agentConfigs, queue)
+      if (options?.planOnly) {
+        const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
+        const traceRuntime = this.startTrace(identity, metadata)
+        const routingDecision = recordRoutingDecision(identity, traceRuntime, {
+          source: 'declared',
+          mode: 'team',
+          reasons: ['Structured governance roles declared the execution topology.'],
+        })
+        const result = {
+          ...this.buildPlanOnlyTeamRunResult(new Map(), identity, goal, queue),
+          routingDecision,
+          ...(metadata !== undefined ? { metadata } : {}),
+        }
+        traceRuntime?.close({ status: result.status ?? statusOnly('ok') })
+        this.completeOnlineEvaluation(pendingEvaluation, result)
+        return result
+      }
+      return this.executeExplicitTaskQueue(
+        team,
+        queue,
+        options,
+        goal,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        pendingEvaluation,
+        options,
+        {
+          source: 'declared',
+          mode: 'team',
+          reasons: ['Structured governance roles declared the execution topology.'],
+        },
+      )
+    }
+
+    const executionRouting = this.resolveExecutionRoutingConfig(
+      options?.executionRouting,
+      options?.coordinator,
+    )
     const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
     const traceRuntime = this.startTrace(identity, metadata)
+    const routingContext = buildRoutingContext(
+      goal,
+      agentConfigs,
+      this.config.defaultModel,
+      budgets,
+      options?.abortSignal,
+    )
+    let routerDecision: ExecutionRoutingDecision | undefined
+    try {
+      routerDecision = explicitMode === undefined
+        && !options?.planOnly
+        && !preferredBudgetDegraded
+        ? await resolveExecutionRouting(
+            options?.executionRouter ?? this.config.executionRouter,
+            routingContext,
+            new DeterministicRouter(),
+            {
+              timeoutMs: executionRouting.timeoutMs,
+              failurePolicy: executionRouting.failurePolicy,
+            },
+          )
+        : undefined
+    } catch (error) {
+      closeTraceForFailure(traceRuntime, error)
+      throw error
+    }
+    let semanticProfileRun: SemanticProfileRun | undefined
+    const customRouterSelected = options?.executionRouter !== undefined
+      || this.hasConfiguredCustomExecutionRouter
+    const shouldProfile = executionRouting.strategy === 'hybrid'
+      && routerDecision?.mode === 'single'
+      && !options?.abortSignal?.aborted
+      && (!customRouterSelected || routerDecision.status === 'fallback')
+    if (shouldProfile) {
+      const deterministicSingleDecision = routerDecision!
+      const effectiveAgents = agentConfigs.map((agentConfig) =>
+        applyDefaultToolPreset(
+          applyAgentDefaults(agentConfig, runConfig),
+          runConfig.defaultToolPreset,
+        ))
+      try {
+        semanticProfileRun = await this.runSemanticProfiler(
+          routingContext,
+          executionRouting,
+          options?.coordinator,
+          runConfig,
+          traceRuntime,
+          {
+            hasConsequentialTools: effectiveAgents.some((agentConfig) =>
+              hasGrantedConsequentialTool(agentConfig, { includeDelegateTool: true })),
+            permissionBoundaryCount: new Set(
+              effectiveAgents
+                .map((agentConfig) => agentConfig.permissionBoundary)
+                .filter((boundary): boundary is string =>
+                  typeof boundary === 'string' && boundary.length > 0),
+            ).size,
+          },
+        )
+      } catch (error) {
+        closeTraceForFailure(traceRuntime, error)
+        throw error
+      }
+      if (semanticProfileRun.assessment.recommendation === 'team') {
+        routerDecision = {
+          ...deterministicSingleDecision,
+          mode: 'team',
+          confidence: semanticProfileRun.assessment.profile?.confidence,
+          reasons: [...deterministicSingleDecision.reasons, ...semanticProfileRun.reasons],
+          routerVersion: HYBRID_ROUTER_VERSION,
+        }
+      }
+    }
+    let routingDecisionInput: RoutingDecisionRecordInput = explicitMode !== undefined
+      ? {
+          source: 'override',
+          mode: explicitMode,
+          reasons: [
+            options?.governanceIntent !== undefined
+              ? `Caller mode '${explicitMode}' overrode the declared governance topology.`
+              : `Caller explicitly selected mode '${explicitMode}'.`,
+          ],
+        }
+      : preferredBudgetDegraded
+        ? {
+            source: 'policy',
+            mode: 'single',
+            reasons: ['preferredUnderBudget policy degraded the preferred governance topology under a configured budget.'],
+          }
+        : options?.planOnly
+          ? {
+              source: 'policy',
+              mode: 'team',
+              reasons: ['planOnly policy requires coordinator planning without task execution.'],
+            }
+          : {
+              source: 'router',
+              mode: routerDecision!.mode,
+              reasons: routerDecision!.reasons,
+              routerVersion: routerDecision!.routerVersion,
+              ...(routerDecision!.status !== undefined
+                ? { status: routerDecision!.status }
+                : {}),
+              ...(routerDecision!.requestedRouterVersion !== undefined
+                ? { requestedRouterVersion: routerDecision!.requestedRouterVersion }
+                : {}),
+              ...(routerDecision!.fallbackCode !== undefined
+                ? { fallbackCode: routerDecision!.fallbackCode }
+                : {}),
+              ...(routerDecision!.confidence !== undefined
+                ? { confidence: routerDecision!.confidence }
+                : {}),
+              ...(semanticProfileRun !== undefined
+                ? { semanticRoutingAssessment: semanticProfileRun.assessment }
+                : {}),
+            }
+    const routingBudget = semanticProfileRun?.usage !== undefined
+      ? applyBudgetAccounting({
+          currentUsage: ZERO_USAGE,
+          currentCost: 0,
+          usage: semanticProfileRun.usage,
+          maxTokenBudget: budgets.maxTokenBudget,
+          maxCostBudget: budgets.maxCostBudget,
+          estimateCost: this.config.estimateCost,
+          costContext: buildCostEstimateContext({
+            agentName: 'semantic-router',
+            model:
+              semanticProfileRun.model
+              ?? executionRouting.model
+              ?? options?.coordinator?.model
+              ?? this.config.defaultModel,
+            phase: 'routing',
+          }),
+        })
+      : undefined
+    const routingUsage = routingBudget?.cumulativeUsage ?? ZERO_USAGE
+    const routingCost = routingBudget?.cumulativeCost ?? 0
+    if (
+      semanticProfileRun !== undefined
+      && routingBudget !== undefined
+      && this.config.estimateCost !== undefined
+    ) {
+      semanticProfileRun = {
+        ...semanticProfileRun,
+        assessment: {
+          ...semanticProfileRun.assessment,
+          estimatedCost: routingCost,
+        },
+      }
+      routingDecisionInput = {
+        ...routingDecisionInput,
+        semanticRoutingAssessment: semanticProfileRun.assessment,
+      }
+    }
+    if (
+      semanticProfileRun !== undefined
+      && semanticProfileRun.assessment.recommendation !== 'needs-declaration'
+      && routingBudget?.exceeded === undefined
+    ) {
+      semanticProfileRun = {
+        ...semanticProfileRun,
+        assessment: {
+          ...semanticProfileRun.assessment,
+          actualMode: routerDecision!.mode,
+        },
+      }
+      routingDecisionInput = {
+        ...routingDecisionInput,
+        semanticRoutingAssessment: semanticProfileRun.assessment,
+      }
+    }
+    const routingDecision = recordRoutingDecision(identity, traceRuntime, routingDecisionInput)
+    if (semanticProfileRun?.assessment.recommendation === 'needs-declaration') {
+      const error = new RoutingDeclarationRequiredError(
+        semanticProfileRun.reasons,
+        semanticProfileRun.assessment,
+      )
+      traceRuntime?.close({
+        status: statusOnly('error'),
+        error: classifyRunFailure(error).errorInfo,
+      })
+      throw error
+    }
+    const undeclared = options?.governanceIntent === undefined
+    const confirmationState = createConsequentialConfirmationState()
+    let consequentialUndeclared = undeclared && agentConfigs.some((agentConfig) => {
+      const effective = applyDefaultToolPreset(
+        applyAgentDefaults(agentConfig, runConfig),
+        runConfig.defaultToolPreset,
+      )
+      return hasGrantedConsequentialTool(effective, { includeDelegateTool: true })
+    })
+
     const finish = (result: TeamRunResult): TeamRunResult => {
-      const completedResult: TeamRunResult = {
+      const resultWithRouting = {
         ...result,
+        routingDecision,
+        ...(semanticProfileRun !== undefined
+          ? {
+              semanticRoutingAssessment: semanticProfileRun.assessment,
+              totalTokenUsage: addUsage(result.totalTokenUsage, routingUsage),
+              ...(result.metrics !== undefined
+                ? {
+                    metrics: {
+                      ...result.metrics,
+                      totalTokens: addUsage(result.metrics.totalTokens, routingUsage),
+                    },
+                  }
+                : {}),
+            }
+          : {}),
         ...(metadata !== undefined ? { metadata } : {}),
       }
+      const governedResult = finalizeGovernanceRun(
+        resultWithRouting,
+        options,
+        buildExecutionReceipt(resultWithRouting),
+        {
+          modeOverride: explicitMode !== undefined,
+          preferredBudgetDegraded,
+        },
+      )
+      const completedResult = finalizeConsequentialRun<TeamRunResult>(
+        governedResult,
+        consequentialUndeclared,
+        confirmationState,
+      )
       traceRuntime?.close({
         status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
         ...(completedResult.errorInfo ? { error: completedResult.errorInfo } : {}),
@@ -467,31 +1325,59 @@ export class OpenMultiAgent {
       this.completeOnlineEvaluation(pendingEvaluation, completedResult)
       return completedResult
     }
-    const agentConfigs = team.getAgents()
     const coordinatorOverrides = options?.coordinator
+
+    if (routingBudget?.exceeded !== undefined) {
+      emitBudgetExceeded(this.config, routingBudget.exceeded, 'semantic-router')
+      const classified = classifyRunFailure(routingBudget.exceeded)
+      return finish(this.buildTeamRunResult(
+        new Map(),
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
+    }
 
     // ------------------------------------------------------------------
     // Short-circuit: skip coordinator for simple, single-action goals.
     //
-    // When the goal is short and contains no multi-step / coordination
-    // signals, dispatching it to a single agent is faster and cheaper
+    // When the router selects Single, dispatching to one agent is faster and cheaper
     // than spinning up a coordinator for decomposition + synthesis.
     //
     // The best-matching agent is selected via keyword affinity scoring
     // (same algorithm as the `capability-match` scheduler strategy).
     // ------------------------------------------------------------------
-    if (!options?.planOnly && agentConfigs.length > 0 && isSimpleGoal(goal)) {
+    if (
+      !options?.planOnly
+      && agentConfigs.length > 0
+      && (
+        explicitMode === 'single'
+        || preferredBudgetDegraded
+        || routingDecision.mode === 'single'
+      )
+    ) {
       const bestAgent = selectBestAgent(goal, agentConfigs)
 
       // Use buildAgent() + agent.run() directly instead of this.runAgent()
       // to avoid duplicate progress events and double completedTaskCount.
       // Events are emitted here; counting is handled by buildTeamRunResult().
-      const effectiveBudget = resolveTokenBudget(bestAgent.maxTokenBudget, this.config.maxTokenBudget)
+      const effectiveBudget = resolveBudgetCeiling(
+        bestAgent.maxTokenBudget,
+        budgets.maxTokenBudget,
+      )
       const effective: AgentConfig = withModelRoute(applyDefaultToolPreset({
-        ...applyAgentDefaults(bestAgent, this.config),
+        ...applyAgentDefaults(bestAgent, runConfig),
         maxTokenBudget: effectiveBudget,
-      }, this.config.defaultToolPreset), routeMatches(options?.modelRouting, { phase: 'short-circuit', agent: bestAgent.name }))
-      const agent = buildAgent(effective)
+      }, runConfig.defaultToolPreset), routeMatches(options?.modelRouting, { phase: 'short-circuit', agent: bestAgent.name }))
+      const selectedConsequential = undeclared
+        && hasGrantedConsequentialTool(effective)
+      const guardedEffective = selectedConsequential
+        && this.config.requireConsequentialConfirmation
+        ? withConsequentialConfirmation(effective, confirmationState)
+        : effective
+      const agent = buildAgent(guardedEffective)
 
       this.config.onProgress?.({
         type: 'agent_start',
@@ -537,12 +1423,13 @@ export class OpenMultiAgent {
         })
       }
 
-      if (!result.budgetExceeded && this.config.estimateCost) {
+      if (!result.budgetExceeded) {
         const accounting = applyBudgetAccounting({
-          currentUsage: ZERO_USAGE,
-          currentCost: 0,
+          currentUsage: routingUsage,
+          currentCost: routingCost,
           usage: result.tokenUsage,
-          maxCostBudget: this.config.maxCostBudget,
+          maxTokenBudget: budgets.maxTokenBudget,
+          maxCostBudget: budgets.maxCostBudget,
           estimateCost: this.config.estimateCost,
           costContext: buildCostEstimateContext({
             agentName: bestAgent.name,
@@ -551,7 +1438,7 @@ export class OpenMultiAgent {
             phase: 'short-circuit',
           }),
         })
-        if (accounting.exceeded instanceof CostBudgetExceededError) {
+        if (accounting.exceeded !== undefined) {
           this.config.onProgress?.({
             type: 'budget_exceeded',
             agent: bestAgent.name,
@@ -565,6 +1452,12 @@ export class OpenMultiAgent {
           }
         }
       }
+
+      finalResult = finalizeConsequentialRun(
+        finalResult,
+        selectedConsequential,
+        confirmationState,
+      )
 
       this.config.onProgress?.({
         type: 'agent_complete',
@@ -597,19 +1490,29 @@ export class OpenMultiAgent {
     // ------------------------------------------------------------------
     // Step 1: Coordinator decomposes goal into tasks
     // ------------------------------------------------------------------
-    const coordinatorBaseConfig = buildCoordinatorBaseConfig(
-      this.config,
+    const unguardedCoordinatorBaseConfig = buildCoordinatorBaseConfig(
+      runConfig,
       coordinatorOverrides,
       agentConfigs,
       (options?.verifyJudges?.length ?? 0) > 0,
     )
+    const coordinatorConsequential = undeclared
+      && hasGrantedConsequentialTool(unguardedCoordinatorBaseConfig)
+    if (coordinatorConsequential) consequentialUndeclared = true
+    const coordinatorBaseConfig = coordinatorConsequential
+      && this.config.requireConsequentialConfirmation
+      ? withConsequentialConfirmation(unguardedCoordinatorBaseConfig, confirmationState)
+      : unguardedCoordinatorBaseConfig
     const coordinatorConfig = withModelRoute(
       coordinatorBaseConfig,
       routeMatches(options?.modelRouting, { phase: 'coordinator', agent: 'coordinator' }),
     )
 
     const decompositionPrompt = buildDecompositionPrompt(goal, agentConfigs)
-    const coordinatorAgent = buildAgent(coordinatorConfig)
+    const coordinatorAgent = buildAgent({
+      ...coordinatorConfig,
+      outputSchema: buildCoordinatorTaskSpecsSchema(agentConfigs, this.config.strictAssignees),
+    })
     const runId = identity.runId
     const coordinatorDecomposeSpanId = this.config.onTrace ? generateSpanId() : undefined
 
@@ -640,11 +1543,10 @@ export class OpenMultiAgent {
     const decompositionResult = await coordinatorAgent.run(decompositionPrompt, decompTraceOptions)
     const agentResults = new Map<string, AgentRunResult>()
     agentResults.set('coordinator:decompose', decompositionResult)
-    const maxTokenBudget = this.config.maxTokenBudget
-    const maxCostBudget = this.config.maxCostBudget
+    const { maxTokenBudget, maxCostBudget } = budgets
     const decompositionBudget = applyBudgetAccounting({
-      currentUsage: ZERO_USAGE,
-      currentCost: 0,
+      currentUsage: routingUsage,
+      currentCost: routingCost,
       usage: decompositionResult.tokenUsage,
       maxTokenBudget,
       maxCostBudget,
@@ -670,38 +1572,184 @@ export class OpenMultiAgent {
     // ------------------------------------------------------------------
     // Step 2: Parse tasks from coordinator output
     // ------------------------------------------------------------------
-    const taskSpecs = parseTaskSpecs(decompositionResult.output)
+    if (!decompositionResult.success && decompositionResult.errorInfo?.kind !== 'validation') {
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_DECOMPOSITION_FAILED',
+          error: decompositionResult.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        decompositionResult.status ?? statusOnly('error'),
+        decompositionResult.errorInfo,
+      ))
+    }
+
+    const taskSpecs = decompositionResult.success && Array.isArray(decompositionResult.structured)
+      ? decompositionResult.structured as ParsedTaskSpec[]
+      : null
 
     const queue = new TaskQueue()
-    const scheduler = new Scheduler('dependency-first')
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
     const taskMetrics = new Map<string, TaskExecutionMetrics>()
 
     if (taskSpecs && taskSpecs.length > 0) {
-      // Map title-based dependsOn references to real task IDs so we can
-      // build the dependency graph before adding tasks to the queue.
-      loadSpecsIntoQueue(taskSpecs, agentConfigs, queue, options?.verifyJudges)
-    } else {
-      // Coordinator failed to produce structured output — fall back to
-      // one task per agent using the goal as the description.
-      for (const agentConfig of agentConfigs) {
-        const task = createTask({
-          title: `${agentConfig.name}: ${goal.slice(0, 80)}`,
-          description: goal,
-          assignee: agentConfig.name,
+      const invalidAssignees = findInvalidAssignees(taskSpecs, agentConfigs)
+      if (invalidAssignees.length > 0 && this.config.strictAssignees) {
+        const error = Object.assign(
+          new Error(
+            `Coordinator plan contains invalid assignees: ${invalidAssignees
+              .map((issue) => `"${issue.assignee}" for "${issue.taskTitle}"`)
+              .join(', ')}.`,
+          ),
+          { code: 'INVALID_ASSIGNEE' },
+        )
+        const classified = classifyRunFailure(error, { kind: 'validation' })
+        this.config.onProgress?.({
+          type: 'agent_complete',
+          agent: 'coordinator',
+          data: decompositionResult,
         })
-        queue.add(task)
+        this.config.onProgress?.({
+          type: 'error',
+          data: {
+            code: 'INVALID_ASSIGNEE',
+            issues: invalidAssignees,
+            error: classified.errorInfo,
+          },
+        })
+        return finish(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          goal,
+          [],
+          classified.status,
+          classified.errorInfo,
+        ))
       }
+      for (const issue of invalidAssignees) {
+        this.config.onProgress?.({
+          type: 'warning',
+          task: issue.taskTitle,
+          data: {
+            code: 'INVALID_ASSIGNEE',
+            assignee: issue.assignee,
+            taskTitle: issue.taskTitle,
+            fallback: 'clear-and-schedule',
+          },
+        })
+      }
+      // Map title-based dependsOn references to real task IDs and reject an
+      // invalid coordinator DAG before any task can be dispatched or the
+      // coordinator can synthesise an answer from incomplete work.
+      try {
+        loadSpecsIntoQueue(taskSpecs, agentConfigs, queue, options?.verifyJudges)
+      } catch (error) {
+        const classified = classifyRunFailure(error, { kind: 'validation' })
+        this.config.onProgress?.({
+          type: 'agent_complete',
+          agent: 'coordinator',
+          data: decompositionResult,
+        })
+        this.config.onProgress?.({
+          type: 'error',
+          data: {
+            code: 'INVALID_TASK_DEPENDENCIES',
+            error: classified.errorInfo,
+          },
+        })
+        return finish(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          goal,
+          [],
+          classified.status,
+          classified.errorInfo,
+        ))
+      }
+    } else {
+      // A coordinator plan is an execution boundary. Do not turn an invalid
+      // plan into a different topology: that could duplicate side effects.
+      const error = Object.assign(
+        new Error('Coordinator plan failed structured validation after repair.'),
+        { code: 'COORDINATOR_PLAN_INVALID' },
+      )
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_PLAN_INVALID',
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
+    }
+
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
     }
 
     // ------------------------------------------------------------------
     // Step 3: Auto-assign any unassigned tasks
     // ------------------------------------------------------------------
-    scheduler.autoAssign(queue, agentConfigs)
+    if (this.config.onApproval || this.config.onPlanReady || options?.planOnly) {
+      scheduler.autoAssign(queue, agentConfigs)
+    }
 
     // ------------------------------------------------------------------
     // Step 4: Build pool and execute
     // ------------------------------------------------------------------
-    const pool = this.buildPool(agentConfigs)
+    const pool = this.buildPool(
+      agentConfigs,
+      undeclared && this.config.requireConsequentialConfirmation
+        ? confirmationState
+        : undefined,
+      runConfig,
+    )
     const activeCheckpoint = this.createActiveCheckpoint(
       team,
       options?.checkpoint ?? this.config.checkpoint,
@@ -713,7 +1761,7 @@ export class OpenMultiAgent {
       pool,
       scheduler,
       agentResults,
-      config: this.config,
+      config: runConfig,
       ...(activeCheckpoint ? { checkpoint: activeCheckpoint } : {}),
       runId,
       identity,
@@ -740,6 +1788,8 @@ export class OpenMultiAgent {
       modelRouting: options?.modelRouting,
       taskById: new Map(queue.list().map((task) => [task.id, task])),
       taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+      recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+      recoveryPatchSignatures: new Set(),
     }
 
     const planTasks = queue.list()
@@ -750,15 +1800,44 @@ export class OpenMultiAgent {
       attributes: { 'oma.plan.task_count': planTasks.length },
     })
     const planReadyStartMs = planSpan?.startUnixMs ?? Date.now()
-    let approved = true
+    let planDecision: { readonly action: 'allow' | 'deny' | 'suspend'; readonly reason?: string } = {
+      action: 'allow',
+    }
     let planApprovalError: unknown
     if (this.config.onPlanReady) {
       try {
-        approved = await this.config.onPlanReady(planTasks)
+        planDecision = normalizeApprovalDecision(
+          await this.config.onPlanReady(planTasks),
+          'onPlanReady',
+        )
+        if (planDecision.action === 'suspend') {
+          assertDurableTaskApprovalSupport(planTasks)
+          const request = createApprovalRequest({
+            runId: identity.runId,
+            scope: 'plan',
+            boundary: 'coordinator-plan',
+            content: {
+              kind: 'plan',
+              continuation: options?.planOnly ? 'plan_only' : 'execute',
+              tasks: queue.snapshot().tasks,
+            },
+            ...(planDecision.reason !== undefined ? { reason: planDecision.reason } : {}),
+          })
+          await persistPendingApproval(queue, ctx, request)
+          ctx.outcomeStatus = statusOnly('suspended', 'Plan approval pending.')
+        }
       } catch (error) {
-        approved = false
+        planDecision = { action: 'deny' }
         planApprovalError = error
       }
+    }
+    if (
+      planDecision.action === 'allow'
+      && this.config.onPlanReady
+      && consequentialUndeclared
+      && this.config.requireConsequentialConfirmation
+    ) {
+      confirmationState.planApproved = true
     }
     const planReadyEndMs = Date.now()
     const planLegacyEvent = this.config.onTrace ? {
@@ -768,7 +1847,7 @@ export class OpenMultiAgent {
         ...(coordinatorDecomposeSpanId ? { parentId: coordinatorDecomposeSpanId } : {}),
         agent: 'coordinator',
         taskCount: planTasks.length,
-        approved,
+        approved: planDecision.action === 'allow',
         startMs: planReadyStartMs,
         endMs: planReadyEndMs,
         durationMs: planReadyEndMs - planReadyStartMs,
@@ -778,15 +1857,33 @@ export class OpenMultiAgent {
         ? classifyRunFailure(planApprovalError, { kind: 'callback' })
         : undefined
       planSpan.end({
-        status: planStatus?.status ?? statusOnly(approved ? 'ok' : 'rejected'),
+        status: planStatus?.status ?? statusOnly(
+          planDecision.action === 'allow'
+            ? 'ok'
+            : planDecision.action === 'suspend'
+              ? 'suspended'
+              : 'rejected',
+        ),
         ...(planStatus ? { error: planStatus.errorInfo } : {}),
-        attributes: { 'oma.plan.approved': approved },
+        attributes: {
+          'oma.plan.approved': planDecision.action === 'allow',
+          'oma.approval.decision': planDecision.action,
+        },
         ...(planLegacyEvent ? { legacyEvent: planLegacyEvent } : {}),
       })
     } else if (planLegacyEvent) {
       emitTrace(this.config.onTrace, planLegacyEvent)
     }
-    if (!approved) {
+    if (planDecision.action === 'suspend') {
+      const suspended = this.buildPlanOnlyTeamRunResult(agentResults, identity, goal, queue)
+      return finish(this.withCheckpointApprovals({
+        ...suspended,
+        success: false,
+        status: statusOnly('suspended', 'Plan approval pending.'),
+        planOnly: undefined,
+      }, activeCheckpoint))
+    }
+    if (planDecision.action === 'deny') {
       if (planApprovalError !== undefined) {
         const classified = classifyRunFailure(planApprovalError, { kind: 'callback' })
         return finish(this.buildTeamRunResult(
@@ -803,29 +1900,12 @@ export class OpenMultiAgent {
     }
 
     if (options?.planOnly) {
-      const planOnlyTasks: readonly TaskExecutionRecord[] = queue.list().map((task) => ({
-        id: task.id,
-        title: task.title,
-        assignee: task.assignee,
-        status: task.status,
-        dependsOn: task.dependsOn ?? [],
-        description: task.description,
-        memoryScope: task.memoryScope,
-        maxRetries: task.maxRetries,
-        retryDelayMs: task.retryDelayMs,
-        retryBackoff: task.retryBackoff,
-        verify: task.verify,
-        metrics: undefined,
-      }))
       this.config.onProgress?.({
         type: 'agent_complete',
         agent: 'coordinator',
         data: decompositionResult,
       })
-      return finish({
-        ...this.buildTeamRunResult(agentResults, identity, goal, planOnlyTasks),
-        planOnly: true,
-      })
+      return finish(this.buildPlanOnlyTeamRunResult(agentResults, identity, goal, queue))
     }
 
     await executeQueue(queue, ctx)
@@ -842,17 +1922,35 @@ export class OpenMultiAgent {
       dependsOn: task.dependsOn ?? [],
       description: task.description,
       memoryScope: task.memoryScope,
+      dependencyPayload: task.dependencyPayload,
+      role: task.role,
+      priority: task.priority,
+      metadata: task.metadata,
+      requires: task.requires,
       maxRetries: task.maxRetries,
       retryDelayMs: task.retryDelayMs,
       retryBackoff: task.retryBackoff,
       verify: task.verify,
+      supersededByRevision: task.supersededByRevision,
+      recoveredByRevision: task.recoveredByRevision,
       metrics: taskMetrics.get(task.id),
     }))
+
+    if (ctx.outcomeStatus?.code === 'suspended') {
+      return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        taskRecords,
+        ctx.outcomeStatus,
+        ctx.outcomeErrorInfo,
+      ), activeCheckpoint))
+    }
 
     // ------------------------------------------------------------------
     // Step 5: Coordinator synthesises final result
     // ------------------------------------------------------------------
-    const synthesis = await runCoordinatorSynthesis(this.config, team, queue, goal, coordinatorBaseConfig, {
+    const synthesis = await runCoordinatorSynthesis(runConfig, team, queue, goal, coordinatorBaseConfig, {
       identity,
       modelRouting: options?.modelRouting,
       runId,
@@ -873,9 +1971,16 @@ export class OpenMultiAgent {
         ctx.outcomeStatus = classified.status
         ctx.outcomeErrorInfo = classified.errorInfo
       }
-      return finish(this.buildTeamRunResult(
-        agentResults, identity, goal, taskRecords, ctx.outcomeStatus, ctx.outcomeErrorInfo,
-      ))
+      return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        taskRecords,
+        ctx.outcomeStatus,
+        ctx.outcomeErrorInfo,
+        false,
+        queue.getPlanRevisions(),
+      ), activeCheckpoint))
     }
     agentResults.set('coordinator', synthesis.result)
     cumulativeUsage = synthesis.cumulativeUsage
@@ -885,9 +1990,16 @@ export class OpenMultiAgent {
     // Only actual user tasks (non-coordinator keys) are counted in
     // buildTeamRunResult, so we do not increment completedTaskCount here.
 
-    return finish(this.buildTeamRunResult(
-      agentResults, identity, goal, taskRecords, ctx.outcomeStatus, ctx.outcomeErrorInfo,
-    ))
+    return finish(this.withCheckpointApprovals(this.buildTeamRunResult(
+      agentResults,
+      identity,
+      goal,
+      taskRecords,
+      ctx.outcomeStatus,
+      ctx.outcomeErrorInfo,
+      false,
+      queue.getPlanRevisions(),
+    ), activeCheckpoint))
   }
 
   // -------------------------------------------------------------------------
@@ -920,9 +2032,16 @@ export class OpenMultiAgent {
           ...(task.assignee !== undefined ? { assignee: task.assignee } : {}),
           ...(task.dependsOn.length > 0 ? { dependsOn: task.dependsOn } : {}),
           ...(task.memoryScope !== undefined ? { memoryScope: task.memoryScope } : {}),
+          ...(task.dependencyPayload !== undefined
+            ? { dependencyPayload: task.dependencyPayload }
+            : {}),
+          ...(task.role !== undefined ? { role: task.role } : {}),
+          ...(task.priority !== undefined ? { priority: task.priority } : {}),
+          ...(task.metadata !== undefined ? { metadata: task.metadata } : {}),
           ...(task.maxRetries !== undefined ? { maxRetries: task.maxRetries } : {}),
           ...(task.retryDelayMs !== undefined ? { retryDelayMs: task.retryDelayMs } : {}),
           ...(task.retryBackoff !== undefined ? { retryBackoff: task.retryBackoff } : {}),
+          ...(task.requires !== undefined ? { requires: task.requires } : {}),
         }
       }),
     }
@@ -942,6 +2061,9 @@ export class OpenMultiAgent {
     options?: RunTasksOptions,
   ): Promise<TeamRunResult> {
     const pendingEvaluation = this.beginOnlineEvaluation(plan)
+    if (resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed') {
+      throw new Error('runFromPlan requires fixed recovery so the frozen plan remains exact.')
+    }
     if (plan.version !== 1) {
       throw new Error(`Unsupported plan artifact version: ${String(plan.version)}`)
     }
@@ -953,6 +2075,12 @@ export class OpenMultiAgent {
       throw new Error(`Invalid plan artifact: ${validation.errors.join(' ')}`)
     }
     queue.addBatch(tasks)
+    const activeCheckpoint = this.createActiveCheckpoint(
+      team,
+      options?.checkpoint ?? this.config.checkpoint,
+      'runFromPlan',
+      plan.goal,
+    )
 
     return this.executeExplicitTaskQueue(
       team,
@@ -960,7 +2088,7 @@ export class OpenMultiAgent {
       options,
       plan.goal,
       undefined,
-      undefined,
+      activeCheckpoint,
       undefined,
       undefined,
       undefined,
@@ -1026,11 +2154,14 @@ export class OpenMultiAgent {
             assignee: t.assignee,
             dependsOn: t.dependsOn,
             memoryScope: t.memoryScope,
+            dependencyPayload: t.dependencyPayload,
             maxRetries: t.maxRetries,
             retryDelayMs: t.retryDelayMs,
             retryBackoff: t.retryBackoff,
             role: t.role,
             priority: t.priority,
+            metadata: t.metadata,
+            requires: t.requires,
             verify: t.verify,
           })),
           team.getAgents(),
@@ -1053,6 +2184,9 @@ export class OpenMultiAgent {
         )
       }
       if (this.isPlanArtifact(tasksOrOptions)) {
+        if (resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed') {
+          throw new Error('restore from a plan artifact requires fixed recovery so the plan remains exact.')
+        }
         const queue = new TaskQueue()
         const tasks = this.tasksFromPlan(tasksOrOptions)
         const validation = validateTaskDependencies(tasks)
@@ -1095,6 +2229,13 @@ export class OpenMultiAgent {
       )
     }
 
+    if (
+      snapshot.mode === 'runFromPlan'
+      && resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed'
+    ) {
+      throw new Error('restore of a runFromPlan checkpoint requires fixed recovery so the plan remains exact.')
+    }
+
     const sharedMem = team.getSharedMemoryInstance()
     if (sharedMem && snapshot.sharedMemory) {
       await sharedMem.restore(snapshot.sharedMemory)
@@ -1112,6 +2253,33 @@ export class OpenMultiAgent {
     const identity = createRestoreIdentity(snapshot, restoreIdentityOptions)
 
     const queue = TaskQueue.fromSnapshot(snapshot.queue, { resetInProgress: true })
+    const validation = validateTaskDependencies(queue.list())
+    if (!validation.valid) {
+      throw new Error(`Invalid checkpoint task dependencies: ${validation.errors.join(' ')}`)
+    }
+    let restoredInFlightTasks: InFlightTaskCheckpoint[] =
+      snapshot.version === 3 || snapshot.version === 4
+        ? snapshot.inFlightTasks.map((state) => ({
+            ...state,
+            ...(state.pendingToolCalls
+              ? { pendingToolCalls: state.pendingToolCalls.map((pending) => ({ ...pending })) }
+              : {}),
+          }))
+        : []
+    for (const state of restoredInFlightTasks) {
+      const task = queue.get(state.taskId)
+      if (!task || !snapshot.queue.inProgress.includes(state.taskId)) {
+        throw new Error(
+          `Invalid checkpoint in-flight state: task "${state.taskId}" is not in the queue's in-progress partition.`,
+        )
+      }
+      if (task.assignee !== state.assignee) {
+        throw new Error(
+          `Invalid checkpoint in-flight state: task "${state.taskId}" belongs to ` +
+            `"${task.assignee ?? 'unassigned'}", not "${state.assignee}".`,
+        )
+      }
+    }
     const agentResults = this.agentResultsFromCheckpoint(snapshot, queue)
     const checkpointForResume: ActiveCheckpoint | undefined = activeCheckpoint
       ? {
@@ -1119,8 +2287,183 @@ export class OpenMultiAgent {
           mode: snapshot.mode,
           ...(snapshot.goal !== undefined ? { goal: snapshot.goal } : {}),
           runId: identity.runId,
+          inFlightTasks: new Map(restoredInFlightTasks.map((state) => [state.taskId, state])),
         }
       : undefined
+
+    if (snapshot.version === 4 && checkpointForResume) {
+      const hasTerminalRejection = snapshot.approvalDecisions.some(
+        (decision) => decision.scope !== 'tool_call' && decision.decision === 'rejected',
+      )
+      for (const decision of snapshot.approvalDecisions) {
+        const primary = await checkpointForResume.approvalLedger.get(decision.requestId)
+        if (!primary?.decision || !this.approvalDecisionsEqual(primary.decision, decision)) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Checkpoint approval decision "${decision.requestId}" does not match the primary ledger.`,
+          )
+        }
+        checkpointForResume.approvalDecisions.set(decision.requestId, decision)
+      }
+
+      const unresolved: ApprovalRequest[] = []
+      let rejectedBoundary: ApprovalRequest | undefined
+      let approvedPlanOnly: ApprovalRequest | undefined
+
+      for (const request of snapshot.pendingApprovals) {
+        if (request.runId !== identity.runId) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Approval request "${request.id}" belongs to another logical run.`,
+          )
+        }
+        this.assertApprovalMatchesCheckpoint(request, snapshot)
+        checkpointForResume.pendingApprovals.set(request.id, request)
+        const primary = await checkpointForResume.approvalLedger.ensureRequest(request)
+        if (!primary.decision) {
+          unresolved.push(request)
+          continue
+        }
+
+        checkpointForResume.approvalDecisions.set(request.id, primary.decision)
+        if (request.scope === 'tool_call') {
+          restoredInFlightTasks = restoredInFlightTasks.map((state) => ({
+            ...state,
+            ...(state.pendingToolCalls
+              ? {
+                  pendingToolCalls: state.pendingToolCalls.map((pending) =>
+                    pending.approvalRequest?.id === request.id
+                      ? { ...pending, approvalDecision: primary.decision }
+                      : pending),
+                }
+              : {}),
+          }))
+          continue
+        }
+
+        if (primary.decision.decision === 'approved') {
+          if (
+            request.content.kind === 'plan'
+            && request.content.continuation === 'plan_only'
+          ) {
+            approvedPlanOnly = request
+          } else if (request.scope === 'plan' || request.scope === 'task_round') {
+            checkpointForResume.pendingApprovals.delete(request.id)
+          } else {
+            checkpointForResume.approvedBoundaries.set(request.id, primary.decision)
+          }
+        } else {
+          rejectedBoundary = request
+        }
+      }
+      checkpointForResume.inFlightTasks.clear()
+      for (const state of restoredInFlightTasks) {
+        checkpointForResume.inFlightTasks.set(state.taskId, state)
+      }
+
+      const taskRecords = (): readonly TaskExecutionRecord[] => queue.list().map((task) => ({
+        id: task.id,
+        title: task.title,
+        assignee: task.assignee,
+        status: task.status,
+        dependsOn: task.dependsOn ?? [],
+        description: task.description,
+        memoryScope: task.memoryScope,
+        dependencyPayload: task.dependencyPayload,
+        role: task.role,
+        priority: task.priority,
+        metadata: task.metadata,
+        requires: task.requires,
+        maxRetries: task.maxRetries,
+        retryDelayMs: task.retryDelayMs,
+        retryBackoff: task.retryBackoff,
+        supersededByRevision: task.supersededByRevision,
+        recoveredByRevision: task.recoveredByRevision,
+      }))
+      const finishRestoreBoundary = (result: TeamRunResult): TeamRunResult => {
+        const completed = {
+          ...this.withCheckpointApprovals(result, checkpointForResume),
+          ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
+        }
+        this.completeOnlineEvaluation(
+          evaluationStartedAtMs === undefined ? undefined : {
+            input: { kind: 'restore', goal: snapshot.goal ?? options?.goal },
+            startedAtMs: evaluationStartedAtMs,
+          },
+          completed,
+        )
+        return completed
+      }
+
+      if (unresolved.length > 0) {
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('suspended', 'Durable approval decision pending.'),
+        ))
+      }
+
+      if (rejectedBoundary) {
+        checkpointForResume.pendingApprovals.delete(rejectedBoundary.id)
+        queue.skipRemaining('Skipped: durable approval rejected.')
+        await saveRunCheckpoint(queue, {
+          team,
+          pool: this.buildPool(team.getAgents()),
+          scheduler: this.createScheduler(options?.modelRouting, () => queue.list()),
+          agentResults,
+          config: this.config,
+          checkpoint: checkpointForResume,
+          identity,
+          ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
+          runId: identity.runId,
+          taskSpans: new Map(),
+          cumulativeUsage: ZERO_USAGE,
+          cumulativeCost: 0,
+          budgetExceededTriggered: false,
+          taskMetrics: new Map(),
+          taskById: new Map(queue.list().map((task) => [task.id, task])),
+          taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+          recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+          recoveryPatchSignatures: new Set(),
+        })
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('rejected', 'Durable approval rejected.'),
+        ))
+      }
+
+      if (hasTerminalRejection) {
+        return finishRestoreBoundary(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          snapshot.goal ?? options?.goal,
+          taskRecords(),
+          statusOnly('rejected', 'Durable approval rejected.'),
+        ))
+      }
+
+      if (approvedPlanOnly) {
+        checkpointForResume.pendingApprovals.delete(approvedPlanOnly.id)
+        const goal = snapshot.goal ?? options?.goal
+        if (goal === undefined) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            'A plan-only approval checkpoint has no goal.',
+          )
+        }
+        return finishRestoreBoundary(this.buildPlanOnlyTeamRunResult(
+          agentResults,
+          identity,
+          goal,
+          queue,
+        ))
+      }
+    }
 
     return this.executeExplicitTaskQueue(
       team,
@@ -1165,11 +2508,14 @@ export class OpenMultiAgent {
         assignee: t.assignee,
         dependsOn: t.dependsOn,
         memoryScope: t.memoryScope,
+        dependencyPayload: t.dependencyPayload,
         maxRetries: t.maxRetries,
         retryDelayMs: t.retryDelayMs,
         retryBackoff: t.retryBackoff,
         role: t.role,
         priority: t.priority,
+        metadata: t.metadata,
+        requires: t.requires,
         verify: t.verify,
       })),
       agentConfigs,
@@ -1207,6 +2553,7 @@ export class OpenMultiAgent {
     prompt: string,
     options: ConsensusOptions,
   ): Promise<ConsensusResult> {
+    const runConfig = this.configForRun(options.egressPolicy)
     const pendingEvaluation = this.beginOnlineEvaluation(prompt)
     const { identity, metadata } = createRunFacts(options)
     const proposers = Array.isArray(options.proposer) ? options.proposer : [options.proposer]
@@ -1259,7 +2606,9 @@ export class OpenMultiAgent {
       defaultProvider: this.config.defaultProvider,
       defaultBaseURL: this.config.defaultBaseURL,
       defaultApiKey: this.config.defaultApiKey,
+      egressPolicy: runConfig.egressPolicy,
       defaultCwd: this.config.defaultCwd,
+      defaultShellExecutor: this.config.defaultShellExecutor,
       onToolCall: this.config.onToolCall,
       maxConcurrency: this.config.maxConcurrency,
     }
@@ -1436,6 +2785,15 @@ export class OpenMultiAgent {
       ...(task.assignee !== undefined ? { assignee: task.assignee } : {}),
       ...(task.dependsOn && task.dependsOn.length > 0 ? { dependsOn: [...task.dependsOn] } : {}),
       ...(task.memoryScope !== undefined ? { memoryScope: task.memoryScope } : {}),
+      ...(task.dependencyPayload !== undefined
+        ? { dependencyPayload: task.dependencyPayload }
+        : {}),
+      ...(task.role !== undefined ? { role: task.role } : {}),
+      ...(task.priority !== undefined ? { priority: task.priority } : {}),
+      ...(task.metadata !== undefined
+        ? { metadata: validateTaskMetadata(task.metadata) }
+        : {}),
+      ...(task.requires !== undefined ? { requires: task.requires } : {}),
       result: undefined,
       createdAt: now,
       updatedAt: now,
@@ -1456,18 +2814,44 @@ export class OpenMultiAgent {
     identity?: RunIdentity,
     restoreMetadata?: RestoreMetadataResolution,
     pendingEvaluation?: PendingOnlineEvaluation,
+    governanceDeclaration?: GovernanceDeclaration,
+    routingDecisionInput?: RoutingDecisionRecordInput,
   ): Promise<TeamRunResult> {
+    const runConfig = this.configForRun(options?.egressPolicy)
+    const agentConfigs = team.getAgents()
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
+          error: classifyRunFailure(error, { kind: 'validation' }).errorInfo,
+        },
+      })
+      throw error
+    }
+
     const newRunFacts = identity === undefined
       ? createRunFacts(identityOptionsForRun(options))
       : undefined
     const runIdentity = identity ?? newRunFacts!.identity
     const metadata = restoreMetadata?.metadata ?? newRunFacts?.metadata
     const traceRuntime = this.startTrace(runIdentity, metadata, restoreMetadata?.overridden)
-    const agentConfigs = team.getAgents()
-    const scheduler = new Scheduler('dependency-first')
-    scheduler.autoAssign(queue, agentConfigs)
+    const routingDecision = routingDecisionInput
+      ? recordRoutingDecision(runIdentity, traceRuntime, routingDecisionInput)
+      : undefined
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
+    if (this.config.onApproval) {
+      scheduler.autoAssign(queue, agentConfigs)
+    }
+    const budgets = resolveRunBudgets(runConfig, options)
 
-    const pool = this.buildPool(agentConfigs)
     const agentResults = initialAgentResults ?? new Map<string, AgentRunResult>()
     const checkpoint = activeCheckpoint ?? this.createActiveCheckpoint(
       team,
@@ -1475,12 +2859,21 @@ export class OpenMultiAgent {
       'runTasks',
       goal,
     )
+    const restoredConfirmationState = checkpoint?.mode === 'runTeam'
+      && this.config.requireConsequentialConfirmation
+      && [...checkpoint.approvalDecisions.values()].some(
+        (decision) => decision.scope === 'plan' && decision.decision === 'approved',
+      )
+      ? createConsequentialConfirmationState()
+      : undefined
+    if (restoredConfirmationState) restoredConfirmationState.planApproved = true
+    const pool = this.buildPool(agentConfigs, restoredConfirmationState, runConfig)
     const ctx: RunContext = {
       team,
       pool,
       scheduler,
       agentResults,
-      config: this.config,
+      config: runConfig,
       ...(checkpoint ? { checkpoint } : {}),
       identity: runIdentity,
       ...(metadata !== undefined ? { metadata } : {}),
@@ -1490,8 +2883,8 @@ export class OpenMultiAgent {
       abortSignal: options?.abortSignal,
       cumulativeUsage: ZERO_USAGE,
       cumulativeCost: 0,
-      maxTokenBudget: this.config.maxTokenBudget,
-      maxCostBudget: this.config.maxCostBudget,
+      maxTokenBudget: budgets.maxTokenBudget,
+      maxCostBudget: budgets.maxCostBudget,
       estimateCost: this.config.estimateCost,
       budgetExceededTriggered: false,
       budgetExceededReason: undefined,
@@ -1499,6 +2892,8 @@ export class OpenMultiAgent {
       modelRouting: options?.modelRouting,
       taskById: new Map(queue.list().map((task) => [task.id, task])),
       taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+      recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+      recoveryPatchSignatures: new Set(),
     }
 
     await executeQueue(queue, ctx)
@@ -1511,10 +2906,14 @@ export class OpenMultiAgent {
     // per-task outputs). Best-effort: a missing/unusable coordinator config or
     // a failing synthesis call must not discard the recovered work — on failure
     // we surface `synthesis_failed` and fall back to raw outputs.
-    if (checkpoint?.mode === 'runTeam' && goal !== undefined) {
+    if (
+      ctx.outcomeStatus?.code !== 'suspended'
+      && checkpoint?.mode === 'runTeam'
+      && goal !== undefined
+    ) {
       try {
-        const coordinatorBaseConfig = buildCoordinatorBaseConfig(this.config, coordinatorForSynthesis, agentConfigs, false)
-        const synthesis = await runCoordinatorSynthesis(this.config, team, queue, goal, coordinatorBaseConfig, {
+        const coordinatorBaseConfig = buildCoordinatorBaseConfig(runConfig, coordinatorForSynthesis, agentConfigs, false)
+        const synthesis = await runCoordinatorSynthesis(runConfig, team, queue, goal, coordinatorBaseConfig, {
           identity: runIdentity,
           modelRouting: options?.modelRouting,
           runId: ctx.runId,
@@ -1569,25 +2968,40 @@ export class OpenMultiAgent {
       dependsOn: task.dependsOn ?? [],
       description: task.description,
       memoryScope: task.memoryScope,
+      dependencyPayload: task.dependencyPayload,
+      role: task.role,
+      priority: task.priority,
+      metadata: task.metadata,
+      requires: task.requires,
       maxRetries: task.maxRetries,
       retryDelayMs: task.retryDelayMs,
       retryBackoff: task.retryBackoff,
       verify: task.verify,
+      supersededByRevision: task.supersededByRevision,
+      recoveredByRevision: task.recoveredByRevision,
       metrics: ctx.taskMetrics.get(task.id),
     }))
 
-    const result = this.buildTeamRunResult(
+    const result = this.withCheckpointApprovals(this.buildTeamRunResult(
       agentResults,
       runIdentity,
       goal,
       taskRecords,
       ctx.outcomeStatus,
       ctx.outcomeErrorInfo,
-    )
-    const completedResult: TeamRunResult = {
+      false,
+      queue.getPlanRevisions(),
+    ), checkpoint)
+    const resultWithRouting = {
       ...result,
+      ...(routingDecision !== undefined ? { routingDecision } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
     }
+    const completedResult = finalizeGovernanceRun(
+      resultWithRouting,
+      governanceDeclaration,
+      buildExecutionReceipt(resultWithRouting),
+    )
     traceRuntime?.close({
       status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
       ...(completedResult.errorInfo ? { error: completedResult.errorInfo } : {}),
@@ -1622,12 +3036,148 @@ export class OpenMultiAgent {
     const store = explicitStore ?? this.fallbackCheckpointStore
     return {
       manager: new Checkpoint(store, options),
+      approvalLedger: new DurableApprovalLedger(store),
       mode,
       ...(goal !== undefined ? { goal } : {}),
       ...(options.runId !== undefined ? { runId: options.runId } : {}),
       reusesSharedMemoryStore: sharedStore !== undefined && store === sharedStore,
+      inFlightTasks: new Map(),
+      pendingApprovals: new Map(),
+      approvalDecisions: new Map(),
+      approvedBoundaries: new Map(),
       saveChain: Promise.resolve(),
     }
+  }
+
+  private withCheckpointApprovals(
+    result: TeamRunResult,
+    checkpoint: ActiveCheckpoint | undefined,
+  ): TeamRunResult {
+    if (!checkpoint) return result
+    const decisions = [...checkpoint.approvalDecisions.values()]
+    const pending = [...checkpoint.pendingApprovals.values()].filter(
+      (request) => !checkpoint.approvalDecisions.has(request.id),
+    )
+    return {
+      ...result,
+      ...(pending.length > 0 ? { pendingApprovals: pending } : {}),
+      ...(decisions.length > 0 ? { approvalDecisions: decisions } : {}),
+    }
+  }
+
+  private approvalContentAtCheckpoint(
+    request: ApprovalRequest,
+    snapshot: CheckpointSnapshot,
+  ): ApprovalRequestContent {
+    const tasks = new Map(snapshot.queue.tasks.map((task) => [task.id, task]))
+    switch (request.content.kind) {
+      case 'plan':
+        if (request.boundary !== 'coordinator-plan') {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Plan approval "${request.id}" has an invalid boundary.`,
+          )
+        }
+        return {
+          kind: 'plan',
+          continuation: request.content.continuation,
+          tasks: snapshot.queue.tasks,
+        }
+      case 'task_dispatch': {
+        const task = tasks.get(request.content.task.id)
+        if (!task || request.boundary !== task.id) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Task-dispatch approval "${request.id}" no longer identifies a pending task.`,
+          )
+        }
+        return { kind: 'task_dispatch', task }
+      }
+      case 'task_round': {
+        const completedTasks = request.content.completedTasks.map((task) => tasks.get(task.id))
+        const nextTasks = request.content.nextTasks.map((task) => tasks.get(task.id))
+        if (completedTasks.some((task) => !task) || nextTasks.some((task) => !task)) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Round approval "${request.id}" references a task that no longer exists.`,
+          )
+        }
+        const boundary = [
+          request.content.completedTasks.map((task) => task.id).join(','),
+          request.content.nextTasks.map((task) => task.id).join(','),
+        ].join('->')
+        if (request.boundary !== boundary) {
+          throw new DurableApprovalError(
+            'APPROVAL_INTEGRITY_ERROR',
+            `Round approval "${request.id}" has an invalid boundary.`,
+          )
+        }
+        return {
+          kind: 'task_round',
+          completedTasks: completedTasks as NonNullable<(typeof completedTasks)[number]>[],
+          nextTasks: nextTasks as NonNullable<(typeof nextTasks)[number]>[],
+        }
+      }
+      case 'tool_call': {
+        const content = request.content
+        const state = (snapshot.version === 3 || snapshot.version === 4)
+          ? snapshot.inFlightTasks.find((item) => item.taskId === content.taskId)
+          : undefined
+        const pending = state?.pendingToolCalls?.find(
+          (item) => item.call.id === content.toolCallId,
+        )
+        if (
+          !state
+          || !pending
+          || pending.commit
+          || pending.approvalRequest?.id !== request.id
+          || state.assignee !== content.agentName
+          || pending.call.name !== content.toolName
+          || request.boundary !== `${state.taskId}:${pending.call.id}`
+        ) {
+          throw new DurableApprovalError(
+            'APPROVAL_STALE_DECISION',
+            `Tool approval "${request.id}" no longer identifies the pending invocation.`,
+          )
+        }
+        return {
+          ...content,
+          rawInput: pending.call.input,
+        }
+      }
+    }
+  }
+
+  private assertApprovalMatchesCheckpoint(
+    request: ApprovalRequest,
+    snapshot: CheckpointSnapshot,
+  ): void {
+    const content = this.approvalContentAtCheckpoint(request, snapshot)
+    const currentHash = hashApprovalRequest(
+      request.scope,
+      request.boundary,
+      content,
+    )
+    if (currentHash !== request.requestHash) {
+      throw new DurableApprovalError(
+        'APPROVAL_STALE_DECISION',
+        `Approval request "${request.id}" does not match the checkpointed execution boundary.`,
+      )
+    }
+  }
+
+  private approvalDecisionsEqual(
+    left: ApprovalDecisionRecord,
+    right: ApprovalDecisionRecord,
+  ): boolean {
+    return left.requestId === right.requestId
+      && left.runId === right.runId
+      && left.scope === right.scope
+      && left.requestHash === right.requestHash
+      && left.decision === right.decision
+      && left.reviewer.id === right.reviewer.id
+      && left.reviewer.displayName === right.reviewer.displayName
+      && left.decidedAt === right.decidedAt
   }
 
   private agentResultsFromCheckpoint(
@@ -1641,13 +3191,16 @@ export class OpenMultiAgent {
       const task = taskById.get(completed.taskId)
       const assignee = completed.assignee ?? task?.assignee ?? 'unknown'
       const output = completed.result ?? task?.result ?? ''
-      agentResults.set(`${assignee}:${completed.taskId}`, {
-        success: true,
-        output,
-        messages: [],
-        tokenUsage: ZERO_USAGE,
-        toolCalls: [],
-      })
+      agentResults.set(
+        `${assignee}:${completed.taskId}`,
+        completed.agentResult ?? {
+          success: true,
+          output,
+          messages: [],
+          tokenUsage: ZERO_USAGE,
+          toolCalls: [],
+        },
+      )
     }
 
     return agentResults
@@ -1659,14 +3212,22 @@ export class OpenMultiAgent {
     return artifact['version'] === 1 && Array.isArray(artifact['tasks'])
   }
 
-  private buildPool(agentConfigs: AgentConfig[]): AgentPool {
-    const pool = new AgentPool(this.config.maxConcurrency)
-    for (const config of agentConfigs) {
+  private buildPool(
+    agentConfigs: AgentConfig[],
+    confirmationState?: ConsequentialConfirmationState,
+    config: EffectiveOrchestratorConfig = this.config,
+  ): AgentPool {
+    const pool = new AgentPool(config.maxConcurrency)
+    for (const agentConfig of agentConfigs) {
       const effective: AgentConfig = applyDefaultToolPreset(
-        applyAgentDefaults(config, this.config),
-        this.config.defaultToolPreset,
+        applyAgentDefaults(agentConfig, config),
+        config.defaultToolPreset,
       )
-      pool.add(buildAgent(effective, { includeDelegateTool: true }))
+      const guardedEffective = confirmationState
+        && hasGrantedConsequentialTool(effective, { includeDelegateTool: true })
+        ? withConsequentialConfirmation(effective, confirmationState)
+        : effective
+      pool.add(buildAgent(guardedEffective, { includeDelegateTool: true }))
     }
     return pool
   }
@@ -1687,17 +3248,31 @@ export class OpenMultiAgent {
     tasks?: readonly TaskExecutionRecord[],
     forcedStatus?: RunStatus,
     forcedErrorInfo?: StructuredTraceError,
+    allowIncompleteTasks = false,
+    planRevisions?: readonly PlanRevision[],
   ): TeamRunResult {
     let totalUsage: TokenUsage = ZERO_USAGE
     let overallSuccess = true
     const collapsed = new Map<string, AgentRunResult>()
+    const taskResults = new Map<string, AgentRunResult>()
+    const taskRecordsById = new Map((tasks ?? []).map((task) => [task.id, task]))
+
+    for (const task of tasks ?? []) {
+      if (!task.assignee) continue
+      const exact = agentResults.get(`${task.assignee}:${task.id}`)
+        ?? (task.id === 'short-circuit' ? agentResults.get(task.assignee) : undefined)
+      if (exact !== undefined) taskResults.set(task.id, exact)
+    }
 
     for (const [key, result] of agentResults) {
       // Strip the `:taskId` suffix to get the agent name
       const agentName = key.includes(':') ? key.split(':')[0]! : key
 
       totalUsage = addUsage(totalUsage, result.tokenUsage)
-      if (!result.success) overallSuccess = false
+      const taskId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : undefined
+      const recovered = taskId !== undefined
+        && taskRecordsById.get(taskId)?.recoveredByRevision !== undefined
+      if (!result.success && !recovered) overallSuccess = false
 
       const existing = collapsed.get(agentName)
       if (!existing) {
@@ -1731,30 +3306,75 @@ export class OpenMultiAgent {
 
     const metrics = computeRunMetrics(tasks)
 
-    const statuses = [...agentResults.values()]
-      .map((result) => result.status)
+    const statuses = [...agentResults.entries()]
+      .filter(([key]) => {
+        const taskId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : undefined
+        return taskId === undefined
+          || taskRecordsById.get(taskId)?.recoveredByRevision === undefined
+      })
+      .map(([, result]) => result.status)
       .filter((status): status is RunStatus => status !== undefined)
     const firstStatus = (code: RunStatus['code']) => statuses.find((status) => status.code === code)
-    const taskFailed = tasks?.some((task) => task.status === 'failed') ?? false
+    const taskFailed = tasks?.some((task) =>
+      task.status === 'failed' && task.recoveredByRevision === undefined) ?? false
+    const taskIncomplete = tasks?.some((task) =>
+      task.status === 'pending' || task.status === 'in_progress' || task.status === 'blocked'
+    ) ?? false
     const status = forcedStatus
       ?? firstStatus('budget_exhausted')
       ?? firstStatus('timeout')
       ?? firstStatus('cancelled')
-      ?? (overallSuccess && !taskFailed ? statusOnly('ok') : statusOnly('error'))
+      ?? (overallSuccess && !taskFailed && (!taskIncomplete || allowIncompleteTasks)
+        ? statusOnly('ok')
+        : statusOnly('error'))
     const errorInfo = forcedErrorInfo ?? [...agentResults.values()]
       .find((result) => result.status?.code === status.code && result.errorInfo !== undefined)
       ?.errorInfo
 
     return {
       success: status.code === 'ok',
+      governanceConclusion: 'not-applicable',
       identity,
       status,
       ...(errorInfo !== undefined ? { errorInfo } : {}),
       goal,
       tasks,
+      ...(planRevisions && planRevisions.length > 0 ? { planRevisions } : {}),
       agentResults: collapsed,
+      taskResults,
       totalTokenUsage: totalUsage,
       metrics,
+    }
+  }
+
+  private buildPlanOnlyTeamRunResult(
+    agentResults: Map<string, AgentRunResult>,
+    identity: RunIdentity,
+    goal: string,
+    queue: TaskQueue,
+  ): TeamRunResult {
+    const tasks: readonly TaskExecutionRecord[] = queue.list().map((task) => ({
+      id: task.id,
+      title: task.title,
+      assignee: task.assignee,
+      status: 'pending',
+      dependsOn: task.dependsOn ?? [],
+      description: task.description,
+      memoryScope: task.memoryScope,
+      dependencyPayload: task.dependencyPayload,
+      role: task.role,
+      priority: task.priority,
+      metadata: task.metadata,
+      requires: task.requires,
+      maxRetries: task.maxRetries,
+      retryDelayMs: task.retryDelayMs,
+      retryBackoff: task.retryBackoff,
+      verify: task.verify,
+      metrics: undefined,
+    }))
+    return {
+      ...this.buildTeamRunResult(agentResults, identity, goal, tasks, undefined, undefined, true),
+      planOnly: true,
     }
   }
 }

@@ -17,6 +17,7 @@ import { resolvePathWithinCwd } from './path-safety.js'
 
 export const fileEditTool = defineTool({
   name: 'file_edit',
+  consequential: true,
   description:
     'Edit a file by replacing a specific string with new content. ' +
     'The `old_string` must appear verbatim in the file. ' +

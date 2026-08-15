@@ -46,17 +46,18 @@
 
 <br />
 
-`@open-multi-agent/core` is the OMA orchestration runtime for TypeScript backends. Give it one agent, an explicit task graph, or a goal that the coordinator can decompose at runtime.
+`@open-multi-agent/core` is the OMA orchestration runtime for TypeScript backends. Give it one agent, an explicit task graph, or a **dynamic workflow** that the coordinator generates from a goal at runtime.
 
 The runtime schedules dependencies, runs independent work in parallel, shares context across agents, and returns an inspectable result. For product positioning and known users, see the [project overview](https://github.com/open-multi-agent/open-multi-agent#readme).
 
 ## Contents
 
-[Quick Start](#quick-start) · [Execution Modes](#execution-modes) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Examples](#examples) · [Providers](#providers) · [Production](#production) · [Documentation](#documentation)
+[Quick Start](#quick-start) · [Execution Modes](#execution-modes) · [Scheduling](#scheduling) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Examples](#examples) · [Providers](#providers) · [Production](#production) · [Documentation](#documentation)
 
 ## Quick Start
 
-Requires Node.js 18 or newer. Scaffold and run a starter in one command:
+Requires Node.js 20 or newer. For production, use a currently maintained
+Node.js LTS release. Scaffold and run a starter in one command:
 
 ```bash
 npm create oma-app@latest my-oma
@@ -109,17 +110,128 @@ Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Pr
 
 Use `planOnly` to inspect a generated task graph before execution, then `createPlanArtifact()` and `runFromPlan()` to replay it. `runConsensus()` adds a proposer→judge verification loop when one answer needs extra scrutiny.
 
+### Structured single-agent input
+
+`Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` keep the string
+form above and also accept a complete `LLMMessage[]`. Use the message form for
+caller-owned conversation history or blocks such as base64 images:
+
+```typescript
+import { OpenMultiAgent, type LLMMessage } from '@open-multi-agent/core'
+
+const messages: LLMMessage[] = [{
+  role: 'user',
+  content: [
+    { type: 'text', text: 'Describe this image.' },
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: imageBase64 },
+    },
+  ],
+}]
+
+const result = await new OpenMultiAgent().runAgent(
+  { name: 'vision', model: 'claude-sonnet-4-6' },
+  messages,
+)
+```
+
+For a persistent `Agent.prompt()` conversation, pass a string or one
+`ContentBlock[]` user turn; restore earlier turns through `AgentConfig.history`.
+Structured input is validated and defensively copied. `beforeRun` receives both
+the complete `messages` and its backwards-compatible latest-user `prompt` view.
+Process and ACP backends remain string-only and reject structured arguments
+instead of discarding history or images. See [Structured Agent
+Input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md) for copy, hook, progress/evaluation, and
+external-backend semantics, or run
+[`basics/structured-input`](examples/basics/structured-input.ts).
+
+Automatic `runTeam()` uses the deterministic router by default: no extra model
+call is made. Opt into Hybrid Semantic Routing with
+`executionRouting: { strategy: 'hybrid' }`; it keeps deterministic Team
+decisions and sends only Single candidates to a one-call, no-tool
+`TaskProfiler`. Deterministic policy may keep Single, upgrade to Team, or
+require an explicit governance declaration. Valid custom `executionRouter`
+decisions, explicit `mode`, and declared governance retain higher priority.
+Auto results expose `routingDecision` and, when profiling ran,
+`semanticRoutingAssessment`. See [Execution
+Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md).
+Execution Routing selects Single versus Team; [Model
+Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)
+selects models inside that topology.
+
+When Hybrid is enabled, the Profiler sends the goal to the configured routing adapter, then the
+Coordinator adapter, or finally the orchestrator's default provider. That last
+fallback can make a provider call even when every worker has its own adapter.
+Configure `executionRouting.adapter` or use deterministic strategy when the goal
+must not cross that provider boundary.
+
+When an application must enforce named independent roles, declare that governance intent instead of relying on wording in the goal:
+
+```typescript
+const governed = await orchestrator.runTeam(team, 'Review the evidence and assess the risk.', {
+  governanceIntent: 'required',
+  requiredRoles: ['researcher', 'analyst'],
+  requiredOrder: ['researcher', 'analyst'],
+})
+
+if (governed.governanceConclusion !== 'satisfied') {
+  throw new Error('Required governance was not satisfied by the executed topology.')
+}
+```
+
+`required` and `preferred` both bypass automatic decomposition and the simple-goal short circuit. OMA creates one task per declared roster name, assigns it to that agent, and chains tasks in `requiredOrder`; dependency outputs are passed to downstream roles. The topology comes only from these structured fields, so equivalent goals in different languages use the same roles and order. `none` or an omitted `governanceIntent` preserves the existing automatic `runTeam()` behavior.
+
+After execution, `governanceConclusion` is `satisfied`, `unsatisfied`, or `not-applicable`. Governance-sensitive applications must check it separately from `success`: the verdict comes from the structured execution receipt, not from role names or approval wording in the model answer. See [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam).
+
+## Scheduling
+
+Set `schedulingStrategy` on `OpenMultiAgent` to choose how unassigned tasks are
+mapped to agents. The setting applies to coordinator-generated `runTeam()`
+plans and explicit or restored task queues. Tasks with an explicit `assignee`
+keep that assignment.
+
+Task DAG execution is event-driven: a downstream task starts as soon as its
+dependencies are satisfied, without waiting for unrelated tasks from the same
+ready set, and dependency outputs reach dependents as task-scoped results and
+validated structured handoffs.
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  schedulingStrategy: 'composite',
+  schedulingWeights: { fit: 0.7, load: 0.3 },
+})
+```
+
+| Strategy | Assignment behavior | Recommended when |
+|----------|---------------------|------------------|
+| `dependency-first` (default) | Assigns tasks that unblock the most downstream work first, rotating eligible agents | The task graph has meaningful dependencies |
+| `round-robin` | Distributes tasks in queue order across eligible agents | Agents are interchangeable |
+| `least-busy` | Chooses the eligible agent with the fewest active or newly assigned tasks | Task duration varies and load balance matters |
+| `capability-match` | Filters explicit task requirements, then prefers declared capability tags before legacy keyword affinity | Tasks or agents declare differentiated requirements/capabilities |
+| `composite` | Ranks tasks by blocked dependents, then maximizes fit and available capacity across eligible agents | Criticality, capability fit, and current load should influence one decision |
+
+Agents may declare `description`, `capabilities`, `costTier`, and
+`latencyClass`, and tasks may add hard `requires` constraints. All strategies
+fail before worker execution when those constraints cannot be satisfied.
+Coordinator plans also fail fast by default when they name an agent outside
+the roster; set `strictAssignees: false` only to retain legacy reassignment.
+Weight semantics, load normalization, `NO_ELIGIBLE_AGENT` and
+`INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event migration
+are covered in
+[Task scheduling and dispatch](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md).
+
 ## Capabilities
 
 | Capability | What you get |
 |------------|--------------|
-| **Dynamic orchestration** | Runtime goal decomposition, dependency-aware scheduling, parallel branches, configurable assignment, opt-in team context for workers (`revealCoordinator`), and final synthesis. |
+| **Dynamic orchestration** | Runtime goal decomposition, dependency-aware scheduling, parallel branches, configurable assignment, task-scoped results and handoffs, opt-in team context for workers (`revealCoordinator`), and final synthesis. |
 | **Models and reasoning** | Mix built-in, OpenAI-compatible, AI SDK, or local models; map one `thinking` config to each provider's reasoning setting, route phases separately, and preserve reasoning only when explicitly enabled. |
-| **Tools and handoffs** | Built-in tools are default-deny; custom tools, MCP, and guarded `delegate_to_agent` handoffs are opt-in. |
-| **Controlled outputs** | Stream per agent, validate results with Zod, approve plans or task rounds, rewrite prompts or post-process results with `beforeRun` / `afterRun`, and cancel with `AbortSignal`. |
+| **Tools and handoffs** | Built-in tools are default-deny; custom tools, MCP, and guarded `delegate_to_agent` handoffs are opt-in, and consequential tools on undeclared runs are flagged for confirmation. |
+| **Controlled outputs** | Send text or structured single-agent input, stream per agent, validate results with Zod, approve or durably suspend plans, task rounds, dispatches, and tool calls, rewrite messages/prompts or post-process results with `beforeRun` / `afterRun`, and cancel with `AbortSignal`. |
 | **Evaluation** | Version EvalSets, run reference scorers, gate CI with offline reports, persist results, or sample production runs on a best-effort path. |
 | **Memory and recovery** | Shared memory is pluggable; checkpoints resume interrupted runs without repeating completed tasks. |
-| **Observability** | Stable run identity, traces, redaction, TraceStore, and the offline DAG/Waterfall Viewer are available without a hosted service. |
+| **Observability** | Stable run identity, traces, execution receipts, redaction, TraceStore, and the offline DAG/Waterfall Viewer are available without a hosted service. |
 | **External agents** | ACP and process backends let coding CLIs participate while OMA keeps scheduling, memory, and budgets. |
 
 ## Architecture
@@ -133,10 +245,11 @@ Coordinator -> Task DAG -> Scheduler -> AgentPool
                     |                       `-- tools / external backends
                     |
                     |-- SharedMemory / checkpoints
-                    `-- TraceRecord -> TraceStore / Run Viewer / OTel
+                    |-- TraceRecord -> TraceStore / Run Viewer / OTel
+                    `-- results -> evaluation (offline / sampled, observe-only)
 ```
 
-The coordinator plans once; the scheduler owns execution order. Agents share results through memory, while checkpoints and traces form separate recovery and observability paths. Detailed contracts live in the linked subsystem guides below.
+The coordinator plans once by default; the scheduler owns execution order. Applications can opt into append-only adaptive recovery when task outcomes need to revise the unstarted part of the graph. Agents share results through memory, while checkpoints and traces form separate recovery and observability paths. Evaluation observes completed results and never changes them. Detailed contracts live in the linked subsystem guides below.
 
 ## Examples
 
@@ -144,15 +257,18 @@ Start with one example that matches the behavior you need:
 
 | Goal | Example |
 |---|---|
+| Send image blocks and caller-owned history | [`basics/structured-input`](examples/basics/structured-input.ts) |
 | See coordinator planning | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
 | Build an explicit DAG | [`cookbook/contract-review-dag`](examples/cookbook/contract-review-dag.ts) |
+| Observe event-driven DAG dispatch | [`patterns/event-driven-dag`](examples/patterns/event-driven-dag.ts) |
 | Validate structured output | [`patterns/structured-output`](examples/patterns/structured-output.ts) |
 | Delegate between agents | [`patterns/agent-handoff`](examples/patterns/agent-handoff.ts) |
 | Replay a frozen plan | [`patterns/plan-replay`](examples/patterns/plan-replay.ts) |
+| Suspend and resume an approval | [`patterns/durable-approval`](examples/patterns/durable-approval.ts) |
 | Embed OMA in a backend | [`integrations/express-customer-support`](examples/integrations/express-customer-support/) |
 | Export an offline trace viewer | [`integrations/observability-v2/run-viewer`](examples/integrations/observability-v2/run-viewer.ts) |
 
-The [example index](examples/README.md) covers all basics, cookbook workflows, patterns, providers, and integrations.
+The [example index](examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Providers
 
@@ -167,7 +283,7 @@ Change `provider`, `model`, and credentials; the agent shape stays the same.
 
 Optional integrations load only when used: core directly installs only `@anthropic-ai/sdk`, `openai`, and `zod`; other SDKs are lazy-loading opt-in peers, and OpenTelemetry lives entirely in `@open-multi-agent/otel`. Dependency changes are weighed on demonstrated value plus security, size, maintenance, and compatibility cost, not a fixed count.
 
-See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md) and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, and local endpoints.
+See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [framework-owned LLM egress policy](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md), and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, local endpoints, and the exact network-enforcement boundary.
 
 **Provider sponsors**
 
@@ -182,17 +298,27 @@ Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technic
 | Bound work | `maxTurns`, `timeoutMs`, `callTimeoutMs`, `contextStrategy`, `loopDetection` |
 | Control spend | `maxTokenBudget`; `maxCostBudget` + application-owned `estimateCost` |
 | Limit tools | `tools` / `toolPreset`, `cwd` / `defaultCwd`, tool-output caps |
-| Recover | Task retries, checkpointing, and `restore()` |
-| Review work | `planOnly`, `onPlanReady`, and approval callbacks |
-| Observe | Trace sinks, TraceStore, Run Viewer, or the optional OTel adapter |
+| Recover | Task retries, checkpointing, `restore()`, and opt-in adaptive plan repair |
+| Review work | `planOnly`, inline approval callbacks, or [durable approval gates](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md) |
+| Observe | Trace sinks, TraceStore, execution receipts, Run Viewer, or the optional OTel adapter |
 
 Budget checks run at turn and task boundaries, so a run can overshoot by up to one model turn; they are not a cent-exact stop. `estimateCost` receives each call's token usage plus the agent, effective `model`, `provider`, phase, and `taskId`, and your application owns the price table.
 
-Built-in tools are default-deny, and every tool result is sent to your model provider, so grant read and exec access deliberately. Filesystem tools stay within the configured `cwd`; granted `bash` is not sandboxed. Secrets are redacted from traces, shell output, and Viewer payloads by default.
+Built-in tools are default-deny, and every model-visible tool result is sent to
+your model provider, so grant read and exec access deliberately. Tools may keep
+application-owned data separate while returning text, image, or file content
+through `modelOutput`; see the [tool configuration guide](../../docs/tool-configuration.md#rich-image-and-file-results).
+Filesystem tools stay within the configured `cwd`; granted `bash` is not
+sandboxed. Its execution target can be replaced through a
+[`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors),
+while the default `LocalShellExecutor` preserves host execution and is not a
+security boundary. Secrets are redacted from traces, shell output, and Viewer
+payloads by default, but result messages and checkpoints have their own
+persistence boundary.
 
 ### Observability
 
-Core already provides run identity, trace sinks, queryable in-memory/file stores, and an offline Run Viewer. These cover local debugging, audit artifacts, and post-run analysis without OpenTelemetry.
+Core already provides run identity, trace sinks, execution receipts, queryable in-memory/file stores, and an offline Run Viewer. These cover local debugging, audit artifacts, and post-run analysis without OpenTelemetry.
 
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) is an **optional enterprise integration** for teams that already operate a centralized OpenTelemetry stack. It converts OMA traces into standard OTel spans so multi-agent runs can join company-wide monitoring, alerting, and incident workflows. The application owns the provider and its lifecycle; telemetry failures never change the run result.
 
@@ -202,8 +328,8 @@ See the [observability guide](https://github.com/open-multi-agent/open-multi-age
 
 | Area | Guides |
 |---|---|
-| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
+| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [structured input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
+| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [durable approvals](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | Control workflows | [Plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](examples/production/README.md) |
 
@@ -239,7 +365,7 @@ Issues and PRs are welcome. For production examples, follow the [acceptance crit
 - [@mvanhorn](https://github.com/mvanhorn) (checkpoint & resume)
 - [@lesbass](https://github.com/lesbass) (run-level metrics rollup on `TeamRunResult`)
 - [@tlysanhuo](https://github.com/tlysanhuo) (trace span parent linkage)
-- [@LambIessz](https://github.com/LambIessz) (orchestrator cost budget, MessageBus persistence in checkpoints)
+- [@LambIessz](https://github.com/LambIessz) (orchestrator cost budget, MessageBus persistence in checkpoints, retryable route fallback)
 - [@Bobuyoucrypto](https://github.com/Bobuyoucrypto) (Windows bash timeout process-tree kill)
 
 **Provider integrations**

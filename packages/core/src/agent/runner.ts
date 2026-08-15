@@ -35,6 +35,12 @@ import type {
   ThinkingConfig,
   RunIdentity,
   ToolCallGate,
+  InFlightTaskCheckpoint,
+  PendingToolCallCheckpoint,
+  ToolCallCommitCheckpoint,
+  ApprovalDecisionRecord,
+  ApprovalRequest,
+  ToolCallApprovalContent,
 } from '../types.js'
 import { LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
 import { LoopDetector } from './loop-detector.js'
@@ -46,23 +52,29 @@ import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import { classifyRunFailure } from '../observability/status.js'
 import type { ToolRegistry } from '../tool/framework.js'
 import type { ToolExecutor } from '../tool/executor.js'
+import type { ShellExecutor } from '../tool/shell/types.js'
+import { RunScopedShellExecutor } from '../tool/shell/lifecycle.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
+import {
+  AGENT_FRAMEWORK_DISALLOWED,
+  resolveGrantedToolDefinitions,
+  TOOL_PRESETS,
+} from '../tool/grants.js'
+import { createApprovalRequest, DurableApprovalError } from '../approval/durable.js'
+import {
+  copyToolResultContent,
+  modelOutputFromToolResult,
+  stripToolResultMedia,
+  summarizeToolResultContent,
+  toolResultContentSize,
+  toolResultHasMedia,
+} from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
 // Tool presets
 // ---------------------------------------------------------------------------
 
-/** Predefined tool sets for common agent use cases. */
-export const TOOL_PRESETS = {
-  readonly: ['file_read', 'grep', 'glob'],
-  readwrite: ['file_read', 'file_write', 'file_edit', 'grep', 'glob'],
-  full: ['file_read', 'file_write', 'file_edit', 'grep', 'glob', 'bash'],
-} as const satisfies Record<string, readonly string[]>
-
-/** Framework-level disallowed tools for safety rails. */
-export const AGENT_FRAMEWORK_DISALLOWED: readonly string[] = [
-  // Empty for now, infrastructure for future built-in tools
-]
+export { AGENT_FRAMEWORK_DISALLOWED, TOOL_PRESETS }
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -137,6 +149,8 @@ export interface RunnerOptions {
   readonly disallowedTools?: readonly string[]
   /** Optional per-call tool gate inherited from agent or orchestrator config. */
   readonly onToolCall?: ToolCallGate
+  /** Effective execution target for the granted `bash` built-in. */
+  readonly shellExecutor?: ShellExecutor
   /**
    * Root directory passed to built-in filesystem tools via `ToolUseContext.cwd`.
    * `null` disables the sandbox; `undefined` falls back to
@@ -188,9 +202,25 @@ export interface RunOptions {
   /** Fired just before each tool is dispatched. */
   readonly onToolCall?: (name: string, input: Record<string, unknown>) => void
   /** Fired after each tool result is received. */
-  readonly onToolResult?: (name: string, result: ToolResult) => void
+  readonly onToolResult?: (name: string, result: ToolResult<any>) => void
   /** Fired after each complete {@link LLMMessage} is appended. */
   readonly onMessage?: (message: LLMMessage) => void
+  /**
+   * Internal checkpoint state supplied by the orchestrator when resuming an
+   * interrupted task. Custom backends may ignore it.
+   */
+  readonly resumeState?: InFlightTaskCheckpoint
+  /**
+   * Internal durable-boundary callback. The runner awaits it before crossing a
+   * recoverable message/tool boundary; failures must be isolated by the caller.
+   */
+  readonly onCheckpoint?: (state: InFlightTaskCheckpoint) => void | Promise<void>
+  /** Internal primary-ledger write after the pending runner state is durable. */
+  readonly onApprovalRequest?: (request: ApprovalRequest) => void | Promise<void>
+  /** Internal fail-fast check run before a pending approval enters the checkpoint. */
+  readonly onApprovalPrepare?: () => void | Promise<void>
+  /** Internal notification used to remove a reviewed request after commit. */
+  readonly onApprovalConsumed?: (requestId: string) => void | Promise<void>
   /**
    * Fired when the runner detects a potential configuration issue.
    * For example, when a model appears to ignore tool definitions.
@@ -240,6 +270,10 @@ export interface RunResult {
   readonly budgetExceeded?: boolean
   /** True when the runner stopped before its next LLM call because the signal was aborted. */
   readonly aborted?: boolean
+  /** True when one or more tool invocations await durable approval. */
+  readonly suspended?: boolean
+  /** Exact requests that stopped this runner before tool execution. */
+  readonly pendingApprovals?: readonly ApprovalRequest[]
 }
 
 /**
@@ -344,10 +378,14 @@ function groupIntoTurns(messages: LLMMessage[]): Turn[] {
  */
 function stripImageBlocksForSummary(messages: LLMMessage[]): LLMMessage[] {
   return messages.map((msg) => {
-    if (!msg.content.some(b => b.type === 'image')) return msg
+    if (!msg.content.some(b =>
+      b.type === 'image' || (b.type === 'tool_result' && toolResultHasMedia(b.content)))) return msg
     const newContent: ContentBlock[] = msg.content.map((block) => {
       if (block.type === 'image') {
         return { type: 'text', text: `[image: ${block.source.media_type}]` } satisfies TextBlock
+      }
+      if (block.type === 'tool_result' && toolResultHasMedia(block.content)) {
+        return { ...block, content: stripToolResultMedia(block.content) }
       }
       return block
     })
@@ -401,6 +439,21 @@ function loopWarningText(kind: 'tool_repetition' | 'text_repetition'): string {
     : 'WARNING: You appear to be repeating the same tool calls with identical arguments. ' +
         'This suggests you are stuck in a loop. Please try a different approach, use different ' +
         'parameters, or explain what you are trying to accomplish.'
+}
+
+interface ToolExecution {
+  readonly commit: ToolCallCommitCheckpoint
+  /** Original result for callbacks; absent when replaying a persisted commit. */
+  readonly result?: ToolResult
+  /** False only when cancellation interrupted the call before a durable result. */
+  readonly shouldCommit: boolean
+  /** Present only when the gate requested a durable suspension. */
+  readonly suspension?: {
+    readonly content: ToolCallApprovalContent
+    readonly reason?: string
+  }
+  /** Filled after the pending runner state and primary record are durable. */
+  readonly approvalRequest?: ApprovalRequest
 }
 
 // ---------------------------------------------------------------------------
@@ -766,72 +819,15 @@ export class AgentRunner implements AgentBackend {
    * Returns LLMToolDef[] for direct use with LLM adapters.
    */
   private resolveTools(): LLMToolDef[] {
-    // Validate configuration for contradictions
-    if (this.options.toolPreset && this.options.allowedTools) {
-      console.warn(
-        'AgentRunner: both toolPreset and allowedTools are set. ' +
-        'Final tool access will be the intersection of both.'
-      )
-    }
-
-    if (this.options.allowedTools && this.options.disallowedTools) {
-      const overlap = this.options.allowedTools.filter(tool =>
-        this.options.disallowedTools!.includes(tool)
-      )
-      if (overlap.length > 0) {
-        console.warn(
-          `AgentRunner: tools [${overlap.map(name => `"${name}"`).join(', ')}] appear in both allowedTools and disallowedTools. ` +
-          'This is contradictory and may lead to unexpected behavior.'
-        )
-      }
-    }
-
-    const allTools = this.toolRegistry.toToolDefs()
-    const runtimeCustomTools = this.toolRegistry.toRuntimeToolDefs()
-    const runtimeCustomToolNames = new Set(runtimeCustomTools.map(t => t.name))
-    let filteredTools = allTools.filter(t => !runtimeCustomToolNames.has(t.name))
-
-    // Default-deny: built-in (non-runtime) tools require a positive grant via
-    // `toolPreset` or `allowedTools`. With neither set, an agent resolves to
-    // zero built-in tools — `bash` and the filesystem tools are opt-in, the
-    // same default-deny model #87 enforces for cross-agent context. Runtime /
-    // custom tools (registered via `addTool` / `customTools`) are exempt:
-    // registering them is the grant. All tools still respect the denylist and
-    // framework rails below.
-    const hasPositiveGrant =
-      this.options.toolPreset !== undefined || this.options.allowedTools !== undefined
-    if (!hasPositiveGrant) {
-      filteredTools = []
-    }
-
-    // 1. Apply preset filter if set
-    if (this.options.toolPreset) {
-      const presetTools = new Set(TOOL_PRESETS[this.options.toolPreset] as readonly string[])
-      filteredTools = filteredTools.filter(t => presetTools.has(t.name))
-    }
-
-    // 2. Apply allowlist filter if set
-    if (this.options.allowedTools) {
-      filteredTools = filteredTools.filter(t => this.options.allowedTools!.includes(t.name))
-    }
-
-    // 3. Apply denylist filter if set
-    const denied = this.options.disallowedTools
-      ? new Set(this.options.disallowedTools)
-      : undefined
-    if (denied) {
-      filteredTools = filteredTools.filter(t => !denied.has(t.name))
-    }
-
-    // 4. Apply framework-level safety rails
-    const frameworkDenied = new Set(AGENT_FRAMEWORK_DISALLOWED)
-    filteredTools = filteredTools.filter(t => !frameworkDenied.has(t.name))
-
-    // Runtime-added custom tools bypass preset / allowlist but respect denylist.
-    const finalRuntime = denied
-      ? runtimeCustomTools.filter(t => !denied.has(t.name))
-      : runtimeCustomTools
-    return [...filteredTools, ...finalRuntime]
+    const grantedTools = resolveGrantedToolDefinitions(this.toolRegistry, {
+      toolPreset: this.options.toolPreset,
+      allowedTools: this.options.allowedTools,
+      disallowedTools: this.options.disallowedTools,
+    })
+    const definitionsByName = new Map(
+      this.toolRegistry.toToolDefs().map((tool) => [tool.name, tool]),
+    )
+    return grantedTools.map((tool) => definitionsByName.get(tool.name)!)
   }
 
   // -------------------------------------------------------------------------
@@ -886,17 +882,28 @@ export class AgentRunner implements AgentBackend {
     initialMessages: LLMMessage[],
     options: RunOptions = {},
   ): AsyncGenerator<StreamEvent> {
+    const restored = options.resumeState
     // Working copy of the conversation — mutated as turns progress.
-    let conversationMessages: LLMMessage[] = [...initialMessages]
-    const newMessages: LLMMessage[] = []
+    let conversationMessages: LLMMessage[] = restored
+      ? [...restored.conversationMessages]
+      : [...initialMessages]
+    const newMessages: LLMMessage[] = restored ? [...restored.messages] : []
 
     // Accumulated state across all turns.
-    let totalUsage: TokenUsage = ZERO_USAGE
-    const allToolCalls: ToolCallRecord[] = []
-    let finalOutput = ''
-    let turns = 0
-    let budgetExceeded = false
+    let totalUsage: TokenUsage = restored?.tokenUsage ?? ZERO_USAGE
+    const allToolCalls: ToolCallRecord[] = restored ? [...restored.toolCalls] : []
+    let finalOutput = restored?.finalOutput ?? ''
+    let turns = restored?.turns ?? 0
+    let budgetExceeded = restored?.budgetExceeded ?? false
     let aborted = false
+    let suspended = false
+    let loopDetected = restored?.loopDetected ?? false
+    let phase: InFlightTaskCheckpoint['phase'] = restored?.phase ?? 'awaiting_model'
+    let pendingToolCalls: PendingToolCallCheckpoint[] = restored?.pendingToolCalls
+      ? [...restored.pendingToolCalls]
+      : []
+    let pendingToolResultText = restored?.pendingToolResultText
+    let loopWarned = restored?.loopWarned ?? false
 
     // Build the stable LLM options once; model / tokens / temp don't change.
     // resolveTools() returns LLMToolDef[] with default-deny + filtering applied.
@@ -909,6 +916,38 @@ export class AgentRunner implements AgentBackend {
 
     // Per-call abortSignal takes precedence over the static one.
     const effectiveAbortSignal = options.abortSignal ?? this.options.abortSignal
+
+    const persistCheckpoint = async (strict = false): Promise<void> => {
+      if (!options.onCheckpoint || !options.taskId) return
+      const assignee = options.traceAgent ?? this.options.agentName
+      if (!assignee) return
+      const state: InFlightTaskCheckpoint = {
+        taskId: options.taskId,
+        assignee,
+        phase,
+        conversationMessages: [...conversationMessages],
+        messages: [...newMessages],
+        tokenUsage: totalUsage,
+        toolCalls: [...allToolCalls],
+        turns,
+        ...(phase === 'executing_tools'
+          ? { pendingToolCalls: [...pendingToolCalls] }
+          : {}),
+        ...(phase === 'executing_tools' && pendingToolResultText !== undefined
+          ? { pendingToolResultText }
+          : {}),
+        ...(phase === 'completed' ? { finalOutput } : {}),
+        ...(loopWarned ? { loopWarned: true } : {}),
+        ...(loopDetected ? { loopDetected: true } : {}),
+        ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      }
+      try {
+        await options.onCheckpoint(state)
+      } catch (error) {
+        if (strict) throw error
+        // Checkpoint delivery is best-effort and must never fail the agent run.
+      }
+    }
 
     const baseChatOptions: LLMChatOptions = {
       model: this.options.model,
@@ -946,15 +985,169 @@ export class AgentRunner implements AgentBackend {
         }
       }
     }
-    let loopDetected = false
-    let loopWarned = false
     const loopAction = this.options.loopDetection?.onLoopDetected ?? 'warn'
+    const runShellExecutor = this.options.shellExecutor === undefined
+      ? undefined
+      : new RunScopedShellExecutor(this.options.shellExecutor)
+    let streamError: Error | undefined
 
     try {
       // -----------------------------------------------------------------
       // Main agentic loop — `while (true)` until end_turn or maxTurns
       // -----------------------------------------------------------------
       while (true) {
+        if (phase === 'completed') break
+
+        if (phase === 'executing_tools') {
+          const toolContext: ToolUseContext = this.buildToolContext(
+            options,
+            runShellExecutor,
+          )
+          const executions = await Promise.all(pendingToolCalls.map(async (pending, index) => {
+            if (pending.commit) {
+              return { commit: pending.commit, shouldCommit: true } satisfies ToolExecution
+            }
+
+            if (pending.approvalRequest && !pending.approvalDecision) {
+              return {
+                commit: this.suspendedToolCommit(pending.call),
+                shouldCommit: false,
+                approvalRequest: pending.approvalRequest,
+                suspension: {
+                  content: pending.approvalRequest.content as ToolCallApprovalContent,
+                  ...(pending.approvalRequest.reason !== undefined
+                    ? { reason: pending.approvalRequest.reason }
+                    : {}),
+                },
+              } satisfies ToolExecution
+            }
+
+            const execution = await this.executeToolCall(
+              pending.call,
+              grantedToolNames,
+              toolContext,
+              options,
+              pending.approvalRequest && pending.approvalDecision
+                ? {
+                    request: pending.approvalRequest,
+                    decision: pending.approvalDecision,
+                  }
+                : undefined,
+            )
+            if (execution.suspension) {
+              const request = createApprovalRequest({
+                runId: options.runId!,
+                scope: 'tool_call',
+                boundary: `${options.taskId!}:${pending.call.id}`,
+                content: execution.suspension.content,
+                ...(execution.suspension.reason !== undefined
+                  ? { reason: execution.suspension.reason }
+                  : {}),
+              })
+              await options.onApprovalPrepare!()
+              pendingToolCalls[index] = { ...pending, approvalRequest: request }
+              // A suspension is not reported until its exact in-flight state
+              // is durable. Unlike ordinary recovery snapshots, failure here
+              // must fail closed rather than pretending the run can resume.
+              await persistCheckpoint(true)
+              await options.onApprovalRequest!(request)
+              return { ...execution, shouldCommit: false, approvalRequest: request }
+            }
+            if (execution.shouldCommit) {
+              if (pending.approvalRequest) {
+                await options.onApprovalConsumed?.(pending.approvalRequest.id)
+              }
+              pendingToolCalls[index] = { call: pending.call, commit: execution.commit }
+              // Await the checkpoint before any fallible result callback so a
+              // callback failure cannot turn a returned side effect into a
+              // missing commit that restore would execute again.
+              await persistCheckpoint()
+            }
+            if (execution.result !== undefined) {
+              options.onToolResult?.(pending.call.name, execution.result)
+            }
+            return execution
+          }))
+
+          const suspendedExecutions = executions.filter(
+            (execution): execution is ToolExecution & { readonly approvalRequest: ApprovalRequest } =>
+              execution.approvalRequest !== undefined,
+          )
+          if (suspendedExecutions.length > 0) {
+            suspended = true
+            await persistCheckpoint(true)
+            break
+          }
+
+          let delegationTurnUsage: TokenUsage | undefined
+          for (const execution of executions) {
+            const usage = execution.commit.delegationUsage
+            if (usage !== undefined) {
+              totalUsage = addTokenUsage(totalUsage, usage)
+              delegationTurnUsage = delegationTurnUsage === undefined
+                ? usage
+                : addTokenUsage(delegationTurnUsage, usage)
+            }
+          }
+
+          const toolResultBlocks: ContentBlock[] = executions.map(
+            execution => execution.commit.result,
+          )
+          for (const execution of executions) {
+            allToolCalls.push(execution.commit.record)
+            yield {
+              type: 'tool_result',
+              data: execution.commit.result,
+            } satisfies StreamEvent
+          }
+          if (pendingToolResultText !== undefined) {
+            toolResultBlocks.push({ type: 'text', text: pendingToolResultText })
+          }
+
+          const toolResultMessage: LLMMessage = {
+            role: 'user',
+            content: toolResultBlocks,
+          }
+          conversationMessages.push(toolResultMessage)
+          newMessages.push(toolResultMessage)
+          options.onMessage?.(toolResultMessage)
+
+          const hasUncommittedCall = executions.some(execution => !execution.shouldCommit)
+          if (hasUncommittedCall) {
+            // Keep the last durable state at `executing_tools`. The current
+            // cancelled result remains well-formed for this process, while a
+            // later restore re-executes only the call that never committed.
+            if (effectiveAbortSignal?.aborted) {
+              aborted = true
+              break
+            }
+            continue
+          }
+
+          pendingToolCalls = []
+          pendingToolResultText = undefined
+
+          if (delegationTurnUsage !== undefined && this.options.maxTokenBudget !== undefined) {
+            const totalAfterDelegation = totalUsage.input_tokens + totalUsage.output_tokens
+            if (totalAfterDelegation > this.options.maxTokenBudget) {
+              budgetExceeded = true
+              yield {
+                type: 'budget_exceeded',
+                data: new TokenBudgetExceededError(
+                  this.options.agentName ?? 'unknown',
+                  totalAfterDelegation,
+                  this.options.maxTokenBudget,
+                ),
+              } satisfies StreamEvent
+            }
+          }
+
+          phase = budgetExceeded ? 'completed' : 'awaiting_model'
+          await persistCheckpoint()
+          if (phase === 'completed') break
+          continue
+        }
+
         // Respect abort before each LLM call.
         if (effectiveAbortSignal?.aborted) {
           aborted = true
@@ -966,11 +1159,11 @@ export class AgentRunner implements AgentBackend {
           break
         }
 
-        turns++
+        const nextTurn = turns + 1
 
         // Compress consumed tool results before context strategy (lightweight,
         // no LLM calls) so the strategy operates on already-reduced messages.
-        if (this.options.compressToolResults && turns > 1) {
+        if (this.options.compressToolResults && nextTurn > 1) {
           conversationMessages = this.compressConsumedToolResults(conversationMessages)
         }
 
@@ -980,7 +1173,7 @@ export class AgentRunner implements AgentBackend {
             conversationMessages,
             this.options.contextStrategy,
             baseChatOptions,
-            turns,
+            nextTurn,
             options,
           )
           conversationMessages = compacted.messages
@@ -991,10 +1184,11 @@ export class AgentRunner implements AgentBackend {
         // Step 1: Call the LLM and collect the full response for this turn.
         // ------------------------------------------------------------------
         const response = await this.tracedChat(
-          conversationMessages, baseChatOptions, options, 'turn', turns,
+          conversationMessages, baseChatOptions, options, 'turn', nextTurn,
         )
 
         totalUsage = addTokenUsage(totalUsage, response.usage)
+        turns = nextTurn
 
         // ------------------------------------------------------------------
         // Step 2: Build the assistant message from the response content.
@@ -1010,6 +1204,7 @@ export class AgentRunner implements AgentBackend {
 
         // Yield text deltas so streaming callers can display them promptly.
         const turnText = extractText(response.content)
+        finalOutput = turnText
         if (turnText.length > 0) {
           yield { type: 'text', data: turnText } satisfies StreamEvent
         }
@@ -1018,10 +1213,8 @@ export class AgentRunner implements AgentBackend {
         // Defer the break to after tool_result is appended so we never leave
         // an unmatched tool_use block in conversationMessages (which would
         // cause a 400 on any subsequent API call that replays the history).
-        let pendingBudgetExceeded = false
         if (this.options.maxTokenBudget !== undefined && totalTokens > this.options.maxTokenBudget) {
           budgetExceeded = true
-          finalOutput = turnText
           yield {
             type: 'budget_exceeded',
             data: new TokenBudgetExceededError(
@@ -1030,7 +1223,6 @@ export class AgentRunner implements AgentBackend {
               this.options.maxTokenBudget,
             ),
           } satisfies StreamEvent
-          pendingBudgetExceeded = true
         }
 
         // Extract tool-use blocks for detection and execution.
@@ -1061,12 +1253,16 @@ export class AgentRunner implements AgentBackend {
             if (action === 'terminate') {
               loopDetected = true
               finalOutput = turnText
+              phase = 'completed'
+              await persistCheckpoint()
               break
             } else if (action === 'warn' || action === 'inject') {
               if (loopWarned) {
                 // Second detection after a warning — force terminate.
                 loopDetected = true
                 finalOutput = turnText
+                phase = 'completed'
+                await persistCheckpoint()
                 break
               }
               loopWarned = true
@@ -1086,7 +1282,9 @@ export class AgentRunner implements AgentBackend {
         // Step 3: Decide whether to continue looping.
         // ------------------------------------------------------------------
         if (toolUseBlocks.length === 0) {
-          if (pendingBudgetExceeded) {
+          if (budgetExceeded) {
+            phase = 'completed'
+            await persistCheckpoint()
             break
           }
           if (injectWarning) {
@@ -1097,6 +1295,8 @@ export class AgentRunner implements AgentBackend {
             conversationMessages.push(warningMessage)
             newMessages.push(warningMessage)
             options.onMessage?.(warningMessage)
+            phase = 'awaiting_model'
+            await persistCheckpoint()
             continue
           }
           // Warn on first turn if tools were provided but model didn't use them.
@@ -1110,6 +1310,8 @@ export class AgentRunner implements AgentBackend {
           }
           // No tools requested — this is the terminal assistant turn.
           finalOutput = turnText
+          phase = 'completed'
+          await persistCheckpoint()
           break
         }
 
@@ -1118,213 +1320,34 @@ export class AgentRunner implements AgentBackend {
         for (const block of toolUseBlocks) {
           yield { type: 'tool_use', data: block } satisfies StreamEvent
         }
-
-        // ------------------------------------------------------------------
-        // Step 4: Execute all tool calls in PARALLEL.
-        //
-        // Parallel execution is critical for multi-tool responses where the
-        // tools are independent (e.g. reading several files at once).
-        // ------------------------------------------------------------------
-        const toolContext: ToolUseContext = this.buildToolContext(options)
-
-        const executionPromises = toolUseBlocks.map(async (block): Promise<{
-          resultBlock: ToolResultBlock
-          record: ToolCallRecord
-          delegationUsage?: TokenUsage
-        }> => {
-          options.onToolCall?.(block.name, block.input)
-
-          const toolSpan = options.traceRuntime && options.traceSpan
-            ? options.traceRuntime.startSpan({
-                kind: 'tool',
-                name: 'execute_tool',
-                parent: options.traceSpan,
-                attributes: {
-                  'oma.agent.name': options.traceAgent ?? this.options.agentName ?? 'unknown',
-                  'oma.tool.name': block.name,
-                  ...(options.taskId ? { 'oma.task.id': options.taskId } : {}),
-                },
-              })
-            : undefined
-          const startTime = toolSpan?.startUnixMs ?? Date.now()
-          let result: ToolResult
-
-          if (!grantedToolNames.has(block.name)) {
-            // Default-deny enforcement: the model asked for a tool that
-            // resolveTools() did not grant (an ungranted built-in such as
-            // `bash`, or a name introduced via prompt injection). Surface a
-            // clear signal rather than silently executing a registered tool.
-            result = {
-              data:
-                `Tool "${block.name}" is not granted to this agent. ` +
-                'Built-in tools are opt-in: grant it via the agent\'s "tools" allowlist or ' +
-                '"toolPreset" (or set the orchestrator\'s "defaultToolPreset").',
-              isError: true,
-            }
-          } else {
-            try {
-              const executionContext: ToolUseContext = toolSpan && toolContext.team?.runDelegatedAgent
-                ? {
-                    ...toolContext,
-                    team: {
-                      ...toolContext.team,
-                      runDelegatedAgent: (targetAgent, prompt) =>
-                        toolContext.team!.runDelegatedAgent!(targetAgent, prompt, toolSpan),
-                    },
-                  }
-                : toolContext
-              result = await this.toolExecutor.execute(
-                block.name,
-                block.input,
-                executionContext,
-                { onToolCall: this.options.onToolCall },
-              )
-            } catch (err) {
-              // Tool executor errors become error results — the loop continues.
-              const message = err instanceof Error ? err.message : String(err)
-              result = { data: message, isError: true }
-            }
-          }
-
-          const endTime = Date.now()
-          const duration = endTime - startTime
-
-          const legacyEvent: TraceEvent | undefined = options.onTrace ? {
-              type: 'tool_call',
-              runId: options.runId ?? '',
-              spanId: generateSpanId(),
-              ...(options.traceSpanId ? { parentId: options.traceSpanId } : {}),
-              taskId: options.taskId,
-              agent: options.traceAgent ?? this.options.agentName ?? 'unknown',
-              tool: block.name,
-              isError: result.isError ?? false,
-              ...(result.metadata?.toolCallGate
-                ? {
-                    gated: true,
-                    gateAction: result.metadata.toolCallGate.action,
-                    ...(result.metadata.toolCallGate.reason
-                      ? { gateReason: redactSensitiveText(result.metadata.toolCallGate.reason) }
-                      : {}),
-                  }
-                : {}),
-              input: redactSensitiveObject(block.input),
-              output: redactSensitiveText(result.data),
-              startMs: startTime,
-              endMs: endTime,
-              durationMs: duration,
-            } : undefined
-          if (toolSpan) {
-            const isError = result.isError ?? false
-            const classified = isError
-              ? classifyRunFailure(new Error(result.data), { kind: 'tool' })
-              : undefined
-            toolSpan.end({
-              status: classified?.status ?? { code: 'ok' },
-              ...(classified ? { error: classified.errorInfo } : {}),
-              attributes: { 'oma.tool.is_error': isError },
-              ...(legacyEvent ? { legacyEvent } : {}),
-            })
-            toolSpan.ensureEnded()
-          } else if (legacyEvent) {
-            emitTrace(options.onTrace, legacyEvent)
-          }
-
-          options.onToolResult?.(block.name, result)
-
-          const record: ToolCallRecord = {
-            toolName: block.name,
-            input: block.input,
-            output: result.data,
-            duration,
-          }
-
-          const resultBlock: ToolResultBlock = {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: result.data,
-            is_error: result.isError,
-          }
-
-          return {
-            resultBlock,
-            record,
-            ...(result.metadata?.tokenUsage !== undefined
-              ? { delegationUsage: result.metadata.tokenUsage }
-              : {}),
-          }
-        })
-
-        // Wait for every tool in this turn to finish.
-        const executions = await Promise.all(executionPromises)
-
-        // Roll up any nested-run token usage surfaced via ToolResult.metadata
-        // (e.g. from delegate_to_agent) so it counts against this agent's budget.
-        let delegationTurnUsage: TokenUsage | undefined
-        for (const ex of executions) {
-          if (ex.delegationUsage !== undefined) {
-            totalUsage = addTokenUsage(totalUsage, ex.delegationUsage)
-            delegationTurnUsage = delegationTurnUsage === undefined
-              ? ex.delegationUsage
-              : addTokenUsage(delegationTurnUsage, ex.delegationUsage)
-          }
-        }
-
-        // ------------------------------------------------------------------
-        // Step 5: Accumulate results and build the user message that carries
-        //         them back to the LLM in the next turn.
-        // ------------------------------------------------------------------
-        const toolResultBlocks: ContentBlock[] = executions.map(e => e.resultBlock)
-
-        for (const { record, resultBlock } of executions) {
-          allToolCalls.push(record)
-          yield { type: 'tool_result', data: resultBlock } satisfies StreamEvent
-        }
-
-        // Inject a loop-detection warning into the tool-result message so
-        // the LLM sees it alongside the results (avoids two consecutive user
-        // messages which violates the alternating-role constraint).
-        if (injectWarning) {
-          toolResultBlocks.push({ type: 'text' as const, text: loopWarningText(injectWarningKind) })
-        }
-
-        const toolResultMessage: LLMMessage = {
-          role: 'user',
-          content: toolResultBlocks,
-        }
-
-        conversationMessages.push(toolResultMessage)
-        newMessages.push(toolResultMessage)
-        options.onMessage?.(toolResultMessage)
-
-        // Budget check is deferred until tool_result events have been yielded
-        // and the tool_result user message has been appended, so stream
-        // consumers see matched tool_use/tool_result pairs and the returned
-        // `messages` remain resumable against the Anthropic/OpenAI APIs.
-        if (pendingBudgetExceeded) {
-          break
-        }
-        if (delegationTurnUsage !== undefined && this.options.maxTokenBudget !== undefined) {
-          const totalAfterDelegation = totalUsage.input_tokens + totalUsage.output_tokens
-          if (totalAfterDelegation > this.options.maxTokenBudget) {
-            budgetExceeded = true
-            finalOutput = turnText
-            yield {
-              type: 'budget_exceeded',
-              data: new TokenBudgetExceededError(
-                this.options.agentName ?? 'unknown',
-                totalAfterDelegation,
-                this.options.maxTokenBudget,
-              ),
-            } satisfies StreamEvent
-            break
-          }
-        }
-
-        // Loop back to Step 1 — send updated conversation to the LLM.
+        pendingToolCalls = toolUseBlocks.map(call => ({ call }))
+        pendingToolResultText = injectWarning
+          ? loopWarningText(injectWarningKind)
+          : undefined
+        phase = 'executing_tools'
+        // Persist the assistant turn before any side effect begins. Each tool
+        // result then advances its own commit record from this baseline.
+        await persistCheckpoint()
       }
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err))
-      yield { type: 'error', data: error } satisfies StreamEvent
+      streamError = err instanceof Error ? err : new Error(String(err))
+    } finally {
+      try {
+        await runShellExecutor?.release()
+      } catch (err) {
+        const cleanupError = err instanceof Error ? err : new Error(String(err))
+        if (streamError !== undefined) {
+          throw new AggregateError(
+            [streamError, cleanupError],
+            'Agent run failed and shell executor cleanup also failed.',
+          )
+        }
+        throw cleanupError
+      }
+    }
+
+    if (streamError !== undefined) {
+      yield { type: 'error', data: streamError } satisfies StreamEvent
       return
     }
 
@@ -1348,6 +1371,14 @@ export class AgentRunner implements AgentBackend {
       ...(loopDetected ? { loopDetected: true } : {}),
       ...(budgetExceeded ? { budgetExceeded: true } : {}),
       ...(aborted ? { aborted: true } : {}),
+      ...(suspended ? { suspended: true } : {}),
+      ...(suspended
+        ? {
+            pendingApprovals: pendingToolCalls
+              .map((pending) => pending.approvalRequest)
+              .filter((request): request is ApprovalRequest => request !== undefined),
+          }
+        : {}),
     }
 
     yield { type: 'done', data: runResult } satisfies StreamEvent
@@ -1356,6 +1387,208 @@ export class AgentRunner implements AgentBackend {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  private async executeToolCall(
+    block: ToolUseBlock,
+    grantedToolNames: ReadonlySet<string>,
+    toolContext: ToolUseContext,
+    options: RunOptions,
+    durableApproval?: {
+      readonly request: ApprovalRequest
+      readonly decision: ApprovalDecisionRecord
+    },
+  ): Promise<ToolExecution> {
+    options.onToolCall?.(block.name, block.input)
+
+    const toolSpan = options.traceRuntime && options.traceSpan
+      ? options.traceRuntime.startSpan({
+          kind: 'tool',
+          name: 'execute_tool',
+          parent: options.traceSpan,
+          attributes: {
+            'oma.agent.name': options.traceAgent ?? this.options.agentName ?? 'unknown',
+            'oma.tool.name': block.name,
+            ...(options.taskId ? { 'oma.task.id': options.taskId } : {}),
+          },
+        })
+      : undefined
+    const startTime = toolSpan?.startUnixMs ?? Date.now()
+    let result: ToolResult<any>
+
+    if (!grantedToolNames.has(block.name)) {
+      // Default-deny enforcement: the model asked for a tool that resolveTools()
+      // did not grant. Surface a normal error result rather than executing it.
+      result = {
+        data:
+          `Tool "${block.name}" is not granted to this agent. ` +
+          'Built-in tools are opt-in: grant it via the agent\'s "tools" allowlist or ' +
+          '"toolPreset" (or set the orchestrator\'s "defaultToolPreset").',
+        isError: true,
+        ...(durableApproval
+          ? { metadata: { approvalError: 'The reviewed tool is no longer granted.' } }
+          : {}),
+      }
+    } else {
+      try {
+        const callContext: ToolUseContext = {
+          ...toolContext,
+          toolCallId: block.id,
+        }
+        const executionContext: ToolUseContext = toolSpan && callContext.team?.runDelegatedAgent
+          ? {
+              ...callContext,
+              team: {
+                ...callContext.team,
+                runDelegatedAgent: (targetAgent, prompt) =>
+                  callContext.team!.runDelegatedAgent!(targetAgent, prompt, toolSpan),
+              },
+            }
+          : callContext
+        result = await this.toolExecutor.execute(
+          block.name,
+          block.input,
+          executionContext,
+          {
+            onToolCall: this.options.onToolCall,
+            ...(durableApproval ? { durableApproval } : {}),
+          },
+        )
+      } catch (err) {
+        // Tool executor errors become error results — the loop continues.
+        const message = err instanceof Error ? err.message : String(err)
+        result = { data: message, isError: true }
+      }
+    }
+
+    const approvalContent = result.metadata?.approvalRequestContent
+    const canSuspend = approvalContent !== undefined
+      && options.onCheckpoint !== undefined
+      && options.onApprovalPrepare !== undefined
+      && options.onApprovalRequest !== undefined
+      && options.taskId !== undefined
+      && options.runId !== undefined
+    if (approvalContent !== undefined && !canSuspend) {
+      const { approvalRequestContent: _approvalRequestContent, ...metadata } = result.metadata ?? {}
+      result = {
+        data:
+          `Tool "${block.name}" requested suspension, but durable tool approval requires ` +
+          'an orchestrated task with checkpoint persistence and MemoryStore.compareAndSet.',
+        isError: true,
+        metadata,
+      }
+    }
+    if (result.metadata?.approvalError) {
+      const approvalError = typeof result.data === 'string'
+        ? result.data
+        : 'The reviewed tool returned a non-text approval error.'
+      throw new DurableApprovalError('APPROVAL_STALE_DECISION', approvalError)
+    }
+
+    const endTime = Date.now()
+    const duration = endTime - startTime
+    // Keep callbacks/application consumers isolated from the transcript.
+    // ToolExecutor already copied tool-owned input; this second copy means an
+    // onToolResult callback cannot mutate what the model or checkpoint receives.
+    const modelOutput = copyToolResultContent(modelOutputFromToolResult(result))
+    const recordedOutput = result.modelOutput === undefined && typeof result.data === 'string'
+      ? result.data
+      : summarizeToolResultContent(modelOutput)
+    const legacyEvent: TraceEvent | undefined = options.onTrace ? {
+        type: 'tool_call',
+        runId: options.runId ?? '',
+        spanId: generateSpanId(),
+        ...(options.traceSpanId ? { parentId: options.traceSpanId } : {}),
+        taskId: options.taskId,
+        agent: options.traceAgent ?? this.options.agentName ?? 'unknown',
+        tool: block.name,
+        isError: result.isError ?? false,
+        ...(result.metadata?.toolCallGate
+          ? {
+              gated: true,
+              gateAction: result.metadata.toolCallGate.action,
+              ...(result.metadata.toolCallGate.reason
+                ? { gateReason: redactSensitiveText(result.metadata.toolCallGate.reason) }
+                : {}),
+            }
+          : {}),
+        input: redactSensitiveObject(block.input),
+        output: redactSensitiveText(summarizeToolResultContent(modelOutput)),
+        startMs: startTime,
+        endMs: endTime,
+        durationMs: duration,
+      } : undefined
+    if (toolSpan) {
+      const isError = result.isError ?? false
+      const classified = isError
+        ? classifyRunFailure(new Error(recordedOutput), { kind: 'tool' })
+        : undefined
+      toolSpan.end({
+        status: classified?.status ?? { code: 'ok' },
+        ...(classified ? { error: classified.errorInfo } : {}),
+        attributes: { 'oma.tool.is_error': isError },
+        ...(legacyEvent ? { legacyEvent } : {}),
+      })
+      toolSpan.ensureEnded()
+    } else if (legacyEvent) {
+      emitTrace(options.onTrace, legacyEvent)
+    }
+
+    const record: ToolCallRecord = {
+      toolName: block.name,
+      input: block.input,
+      output: recordedOutput,
+      duration,
+    }
+    const resultBlock: ToolResultBlock = {
+      type: 'tool_result',
+      tool_use_id: block.id,
+      content: modelOutput,
+      is_error: result.isError,
+    }
+
+    return {
+      commit: {
+        result: resultBlock,
+        record,
+        ...(result.metadata?.tokenUsage !== undefined
+          ? { delegationUsage: result.metadata.tokenUsage }
+          : {}),
+      },
+      result,
+      // An error result is normally plain committed data. The one exception is
+      // a cancellation that became visible during this call: it represents the
+      // conservative "no commit record" path and must run again after restore.
+      shouldCommit: !(result.isError === true && toolContext.abortSignal?.aborted === true),
+      ...(canSuspend
+        ? {
+            suspension: {
+              content: approvalContent,
+              ...(result.metadata?.toolCallGate?.reason !== undefined
+                ? { reason: result.metadata.toolCallGate.reason }
+                : {}),
+            },
+          }
+        : {}),
+    }
+  }
+
+  private suspendedToolCommit(block: ToolUseBlock): ToolCallCommitCheckpoint {
+    const output = `Tool "${block.name}" is awaiting durable approval.`
+    return {
+      result: {
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: output,
+        is_error: true,
+      },
+      record: {
+        toolName: block.name,
+        input: block.input,
+        output,
+        duration: 0,
+      },
+    }
+  }
 
   /**
    * Rule-based selective context compaction (no LLM calls).
@@ -1454,22 +1687,27 @@ export class AgentRunner implements AgentBackend {
           if (block.is_error) return block
           // Already compressed by compressToolResults or a prior compact pass.
           if (
-            block.content.startsWith('[Tool output compressed') ||
-            block.content.startsWith('[Tool result:')
+            typeof block.content === 'string' &&
+            (block.content.startsWith('[Tool output compressed') ||
+              block.content.startsWith('[Tool result:'))
           ) {
             return block
           }
           // Short results: preserve.
-          if (block.content.length < minToolResultChars) return block
+          const contentSize = toolResultContentSize(block.content)
+          if (contentSize < minToolResultChars) return block
           const toolName = toolNameMap.get(block.tool_use_id) ?? 'unknown'
           // Delegation results: preserve — parent agent may still reason over them.
           if (toolName === 'delegate_to_agent') return block
           // Compress.
           msgChanged = true
+          const sizeDescription = typeof block.content === 'string'
+            ? `${contentSize} chars`
+            : `${contentSize} estimated chars`
           return {
             type: 'tool_result',
             tool_use_id: block.tool_use_id,
-            content: `[Tool result: ${toolName} — ${block.content.length} chars, compacted]`,
+            content: `[Tool result: ${toolName} — ${sizeDescription}, compacted]`,
           } satisfies ToolResultBlock
         }
         return block
@@ -1548,16 +1786,23 @@ export class AgentRunner implements AgentBackend {
         if (toolNameMap.get(block.tool_use_id) === 'delegate_to_agent') return block
 
         // Skip already-compressed results — avoid re-compression with wrong char count.
-        if (block.content.startsWith('[Tool output compressed')) return block
+        if (
+          typeof block.content === 'string' &&
+          block.content.startsWith('[Tool output compressed')
+        ) return block
 
         // Skip short results — the marker itself has overhead.
-        if (block.content.length < minChars) return block
+        const contentSize = toolResultContentSize(block.content)
+        if (contentSize < minChars) return block
 
         msgChanged = true
+        const sizeDescription = typeof block.content === 'string'
+          ? `${contentSize} chars`
+          : `${contentSize} estimated chars`
         return {
           type: 'tool_result',
           tool_use_id: block.tool_use_id,
-          content: `[Tool output compressed — ${block.content.length} chars, already processed]`,
+          content: `[Tool output compressed — ${sizeDescription}, already processed]`,
         } satisfies ToolResultBlock
       })
 
@@ -1575,7 +1820,10 @@ export class AgentRunner implements AgentBackend {
    * Build the {@link ToolUseContext} passed to every tool execution.
    * Identifies this runner as the invoking agent.
    */
-  private buildToolContext(options: RunOptions = {}): ToolUseContext {
+  private buildToolContext(
+    options: RunOptions = {},
+    shellExecutor?: ShellExecutor,
+  ): ToolUseContext {
     return {
       agent: {
         name: this.options.agentName ?? 'runner',
@@ -1583,6 +1831,9 @@ export class AgentRunner implements AgentBackend {
         model: this.options.model,
       },
       abortSignal: options.abortSignal ?? this.options.abortSignal,
+      ...(shellExecutor !== undefined
+        ? { shellExecutor }
+        : {}),
       cwd: this.options.cwd === undefined ? defaultWorkspaceDir() : this.options.cwd,
       ...(options.runId !== undefined ? { runId: options.runId } : {}),
       ...(options.taskId !== undefined ? { taskId: options.taskId } : {}),

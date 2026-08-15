@@ -10,7 +10,10 @@
 
 import type {
   AgentRunResult,
+  ApprovalDecisionRecord,
+  ApprovalRequest,
   CheckpointSnapshot,
+  InFlightTaskCheckpoint,
   ModelRoutingPolicy,
   OrchestratorConfig,
   RunIdentity,
@@ -27,7 +30,9 @@ import type { AgentPool } from '../agent/pool.js'
 import type { Team } from '../team/team.js'
 import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
+import type { DurableApprovalLedger } from '../approval/durable.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
+import type { ResolvedRecoveryOptions } from './recovery.js'
 import { createRunIdentity, validateRunMetadata } from '../observability/identity.js'
 
 export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
@@ -148,7 +153,7 @@ export interface RunContext {
   readonly runId: string
   readonly traceRuntime?: TraceRuntime
   readonly taskSpans: Map<string, TraceSpan>
-  /** AbortSignal for run-level cancellation. Checked between task dispatch rounds. */
+  /** AbortSignal for run-level cancellation. Checked by the task dispatch gate. */
   readonly abortSignal?: AbortSignal
   cumulativeUsage: TokenUsage
   cumulativeCost: number
@@ -166,12 +171,15 @@ export interface RunContext {
    */
   readonly revealCoordinatorContext?: RevealCoordinatorContext
   readonly modelRouting?: ModelRoutingPolicy
-  readonly taskById: ReadonlyMap<string, Task>
-  readonly taskLeafById: ReadonlyMap<string, boolean>
+  readonly taskById: Map<string, Task>
+  readonly taskLeafById: Map<string, boolean>
+  readonly recovery: ResolvedRecoveryOptions
+  readonly recoveryPatchSignatures: Set<string>
 }
 
 export interface ActiveCheckpoint {
   readonly manager: Checkpoint
+  readonly approvalLedger: DurableApprovalLedger
   readonly mode: CheckpointSnapshot['mode']
   readonly goal?: string
   readonly runId?: string
@@ -182,5 +190,13 @@ export interface ActiveCheckpoint {
    * (avoids ~O(N^2) write volume) and persists only the turn counter.
    */
   readonly reusesSharedMemoryStore: boolean
+  /** Latest safe runner state for every task currently between queue boundaries. */
+  readonly inFlightTasks: Map<string, InFlightTaskCheckpoint>
+  /** Reviewed boundaries not yet durably consumed by execution. */
+  readonly pendingApprovals: Map<string, ApprovalRequest>
+  /** Primary decisions loaded from the approval ledger and copied into results/checkpoints. */
+  readonly approvalDecisions: Map<string, ApprovalDecisionRecord>
+  /** Approved task/round boundaries that the execution loop may consume once. */
+  readonly approvedBoundaries: Map<string, ApprovalDecisionRecord>
   saveChain: Promise<void>
 }

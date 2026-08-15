@@ -7,17 +7,17 @@ import type { LLMResponse, StreamEvent, ToolUseBlock } from '../src/types.js'
 // ---------------------------------------------------------------------------
 
 const mockCreate = vi.hoisted(() => vi.fn())
-
-vi.mock('openai', () => {
-  const OpenAIMock = vi.fn(() => ({
+const OpenAIMock = vi.hoisted(() =>
+  vi.fn(() => ({
     chat: {
       completions: {
         create: mockCreate,
       },
     },
-  }))
-  return { default: OpenAIMock, OpenAI: OpenAIMock }
-})
+  })),
+)
+
+vi.mock('openai', () => ({ default: OpenAIMock, OpenAI: OpenAIMock }))
 
 import { OpenAIAdapter } from '../src/llm/openai.js'
 
@@ -105,6 +105,20 @@ describe('OpenAIAdapter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     adapter = new OpenAIAdapter('test-key')
+  })
+
+  it('injects a guarded fetch when an egress policy is configured', async () => {
+    new OpenAIAdapter('test-key', 'https://api.openai.com/v1', {
+      mode: 'allowlist',
+      allowedOrigins: ['https://api.openai.com'],
+    })
+    const init = OpenAIMock.mock.calls.at(-1)?.[0] as { fetch?: typeof globalThis.fetch }
+
+    expect(init.fetch).toEqual(expect.any(Function))
+    await expect(init.fetch!('https://other.example/v1')).rejects.toMatchObject({
+      code: 'EGRESS_POLICY_DENIED',
+      origin: 'https://other.example',
+    })
   })
 
   // =========================================================================
@@ -491,9 +505,9 @@ describe('OpenAIAdapter', () => {
     })
 
     it('passes through newer effort values via extraBody (e.g. gpt-5 "minimal")', async () => {
-      // The IR's `effort` union is intentionally narrowed to what the
-      // pinned SDK declares. Newer values (gpt-5 'minimal', GPT-5.5 'none')
-      // travel via extraBody — same escape hatch as vLLM-only top_k/min_p.
+      // Values outside the framework union (gpt-5 'minimal', GPT-5.5
+      // 'none') travel via extraBody — the same escape hatch as vLLM-only
+      // top_k/min_p.
       mockCreate.mockResolvedValue(makeCompletion())
 
       await adapter.chat(
@@ -502,6 +516,17 @@ describe('OpenAIAdapter', () => {
       )
 
       expect(mockCreate.mock.calls[0][0].reasoning_effort).toBe('minimal')
+    })
+
+    it('ignores the DeepSeek-only max effort', async () => {
+      mockCreate.mockResolvedValue(makeCompletion())
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({ thinking: { enabled: true, effort: 'max' } }),
+      )
+
+      expect(mockCreate.mock.calls[0][0].reasoning_effort).toBeUndefined()
     })
 
     it('omits reasoning_effort when thinking is absent', async () => {

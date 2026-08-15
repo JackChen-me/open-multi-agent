@@ -27,7 +27,11 @@ describeE2E('DeepSeekAdapter E2E', () => {
   it('chat() returns a text response with usage', async () => {
     const result = await adapter.chat(
       [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly CHAT_OK.' }] }],
-      { model, maxTokens: 256 },
+      {
+        model,
+        maxTokens: 256,
+        thinking: { enabled: false },
+      },
     )
 
     const text = result.content
@@ -37,6 +41,7 @@ describeE2E('DeepSeekAdapter E2E', () => {
 
     expect(result.id).toBeTruthy()
     expect(text).toContain('CHAT_OK')
+    expect(result.content.some(block => block.type === 'reasoning')).toBe(false)
     expect(result.usage.input_tokens).toBeGreaterThan(0)
     expect(result.usage.output_tokens).toBeGreaterThan(0)
   }, 60_000)
@@ -45,7 +50,11 @@ describeE2E('DeepSeekAdapter E2E', () => {
     const events: StreamEvent[] = []
     for await (const event of adapter.stream(
       [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly STREAM_OK.' }] }],
-      { model, maxTokens: 256 },
+      {
+        model,
+        maxTokens: 256,
+        thinking: { enabled: true, effort: 'max' },
+      },
     )) {
       events.push(event)
     }
@@ -91,6 +100,7 @@ describeE2E('DeepSeekAdapter E2E', () => {
         maxTurns: 4,
         maxTokens: 512,
         callTimeoutMs: 90_000,
+        thinking: { enabled: true, effort: 'max' },
       },
       'Call release_marker exactly once with token probe, then answer with exactly TOOL_OK.',
     )

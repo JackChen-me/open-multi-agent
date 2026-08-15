@@ -296,6 +296,7 @@ describe('AgentPool', () => {
       const pool = new AgentPool(3)
       pool.add(createMockAgent('a'))
       expect(pool.availableRunSlots).toBe(3)
+      expect(pool.runConcurrencyLimit).toBe(3)
     })
 
     it('availableRunSlots is zero while a run holds the pool slot', async () => {

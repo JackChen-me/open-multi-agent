@@ -348,6 +348,71 @@ describe('DeepSeekAdapter', () => {
   })
 
   // =========================================================================
+  // DeepSeek thinking request mapping
+  // =========================================================================
+
+  describe('thinking request mapping', () => {
+    it('maps enabled thinking and max effort on chat()', async () => {
+      createCompletionMock.mockResolvedValue(makeCompletion())
+      const adapter = new DeepSeekAdapter()
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({ thinking: { enabled: true, effort: 'max' } }),
+      )
+
+      const callArgs = createCompletionMock.mock.calls[0][0]
+      expect(callArgs.thinking).toEqual({ type: 'enabled' })
+      expect(callArgs.reasoning_effort).toBe('max')
+    })
+
+    it('maps disabled thinking on stream()', async () => {
+      createCompletionMock.mockResolvedValue(makeChunks([
+        textChunk('Hi', 'stop', { prompt_tokens: 5, completion_tokens: 2 }),
+      ]))
+      const adapter = new DeepSeekAdapter()
+
+      await collectEvents(
+        adapter.stream(
+          [textMsg('user', 'Hi')],
+          chatOpts({ thinking: { enabled: false } }),
+        ),
+      )
+
+      expect(createCompletionMock.mock.calls[0][0].thinking).toEqual({ type: 'disabled' })
+    })
+
+    it('lets explicit extraBody values override first-class thinking config', async () => {
+      createCompletionMock.mockResolvedValue(makeCompletion())
+      const adapter = new DeepSeekAdapter()
+
+      await adapter.chat(
+        [textMsg('user', 'Hi')],
+        chatOpts({
+          thinking: { enabled: true, effort: 'max' },
+          extraBody: {
+            thinking: { type: 'disabled' },
+            reasoning_effort: 'high',
+          },
+        }),
+      )
+
+      const callArgs = createCompletionMock.mock.calls[0][0]
+      expect(callArgs.thinking).toEqual({ type: 'disabled' })
+      expect(callArgs.reasoning_effort).toBe('high')
+    })
+
+    it('leaves thinking absent when no config is supplied', async () => {
+      createCompletionMock.mockResolvedValue(makeCompletion())
+      const adapter = new DeepSeekAdapter()
+
+      await adapter.chat([textMsg('user', 'Hi')], chatOpts())
+
+      expect(createCompletionMock.mock.calls[0][0].thinking).toBeUndefined()
+    })
+  })
+
+  // =========================================================================
   // stream()
   // =========================================================================
 

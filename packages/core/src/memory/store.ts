@@ -61,6 +61,24 @@ export class InMemoryStore implements MemoryStore {
     this.data.set(key, entry)
   }
 
+  /** Atomically replace one value when its current string matches exactly. */
+  async compareAndSet(
+    key: string,
+    expectedValue: string | null,
+    value: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<boolean> {
+    const existing = this.data.get(key)
+    if ((existing?.value ?? null) !== expectedValue) return false
+    this.data.set(key, {
+      key,
+      value,
+      metadata: metadata !== undefined ? { ...metadata } : undefined,
+      createdAt: existing?.createdAt ?? new Date(),
+    })
+    return true
+  }
+
   /**
    * Like {@link set}, but also records a turn-count expiry. The entry is
    * stored as-is — expiry filtering is the caller's responsibility (typically

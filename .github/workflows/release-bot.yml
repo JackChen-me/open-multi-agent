@@ -1,0 +1,72 @@
+name: OMA Release Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Friday 18:00 Asia/Taipei. The offset is intentionally documented because
+    # GitHub schedules are UTC and can be delayed during high load.
+    - cron: '0 10 * * 5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oma-release-bot-main
+  cancel-in-progress: false
+
+jobs:
+  prepare-release-pr:
+    if: github.repository == 'open-multi-agent/open-multi-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Create narrowly scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Resolve GitHub App commit identity
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          user_id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          echo "name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Configure auditable bot commit identity
+        env:
+          BOT_NAME: ${{ steps.app-user.outputs.name }}
+          BOT_EMAIL: ${{ steps.app-user.outputs.email }}
+        run: |
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
+
+      - name: Build the repository-local release bot
+        run: npm run build -w @open-multi-agent/release-bot
+
+      - name: Analyze merged changes and create a ready release PR
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          RELEASE_BOT_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_BOT_MODEL: deepseek-v4-flash
+        run: node packages/release-bot/dist/cli.js prepare-pr

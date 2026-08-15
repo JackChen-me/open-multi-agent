@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { textMsg, toolUseMsg, toolResultMsg, chatOpts, toolDef, collectEvents } from './helpers/llm-fixtures.js'
 import type { LLMResponse, StreamEvent, ToolUseBlock } from '../src/types.js'
+import { UnsupportedToolResultContentError } from '../src/errors.js'
 
 // ---------------------------------------------------------------------------
 // Mock @aws-sdk/client-bedrock-runtime
@@ -231,6 +232,65 @@ describe('BedrockAdapter', () => {
 
       const msgs = mockSend.mock.calls[0][0].input.messages
       expect(msgs[0].content[0].toolResult.status).toBe('error')
+    })
+
+    it('maps inline rich tool_result images and files to Converse blocks', async () => {
+      mockSend.mockResolvedValue(makeConverseResponse())
+
+      await adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'c1',
+            content: [
+              { type: 'text', text: 'Rendered preview' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+              },
+              {
+                type: 'file',
+                filename: 'report.pdf',
+                source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0xLjQ=' },
+              },
+            ],
+          }],
+        }],
+        chatOpts(),
+      )
+
+      const content = mockSend.mock.calls[0][0].input.messages[0].content[0].toolResult.content
+      expect(content[0]).toEqual({ text: 'Rendered preview' })
+      expect(content[1].image).toMatchObject({ format: 'png' })
+      expect(Array.from(content[1].image.source.bytes)).toEqual(Array.from(Buffer.from('aW1hZ2U=', 'base64')))
+      expect(content[2].document).toMatchObject({ format: 'pdf', name: 'report pdf' })
+      expect(Array.from(content[2].document.source.bytes)).toEqual(Array.from(Buffer.from('JVBERi0xLjQ=', 'base64')))
+    })
+
+    it('fails explicitly when Converse cannot carry a media URL reference', async () => {
+      mockSend.mockResolvedValue(makeConverseResponse())
+
+      await expect(adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'c1',
+            content: [{
+              type: 'file',
+              filename: 'report.pdf',
+              source: {
+                type: 'url',
+                media_type: 'application/pdf',
+                url: 'https://example.com/report.pdf',
+              },
+            }],
+          }],
+        }],
+        chatOpts(),
+      )).rejects.toThrow(UnsupportedToolResultContentError)
+      expect(mockSend).not.toHaveBeenCalled()
     })
   })
 

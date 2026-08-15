@@ -7,6 +7,7 @@ import {
   normalizeFinishReason,
   buildOpenAIMessageList,
 } from '../src/llm/openai-common.js'
+import { UnsupportedToolResultContentError } from '../src/errors.js'
 import type {
   ContentBlock,
   LLMMessage,
@@ -156,6 +157,96 @@ describe('toOpenAIMessages', () => {
       tool_call_id: 'tc1',
       content: 'result data',
     })
+  })
+
+  it('keeps rich tool attachments after the required tool-role message', () => {
+    const msgs: LLMMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tc1', name: 'render', input: {} },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tc1',
+            content: [
+              { type: 'text', text: 'Rendered preview' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+              },
+              {
+                type: 'image',
+                source: { type: 'url', media_type: 'image/jpeg', url: 'https://example.com/preview.jpg' },
+              },
+              {
+                type: 'file',
+                filename: 'report.pdf',
+                source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0xLjQ=' },
+              },
+            ],
+          },
+        ],
+      },
+    ]
+
+    const result = toOpenAIMessages(msgs)
+
+    expect(result).toHaveLength(3)
+    expect(result[1]).toEqual({
+      role: 'tool',
+      tool_call_id: 'tc1',
+      content: [
+        { type: 'text', text: 'Rendered preview' },
+        { type: 'text', text: '[3 tool-result attachment(s) follow in the next user message.]' },
+      ],
+    })
+    expect(result[2]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Attachments for tool call tc1:' },
+        {
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,aW1hZ2U=' },
+        },
+        {
+          type: 'image_url',
+          image_url: { url: 'https://example.com/preview.jpg' },
+        },
+        {
+          type: 'file',
+          file: {
+            filename: 'report.pdf',
+            file_data: 'data:application/pdf;base64,JVBERi0xLjQ=',
+          },
+        },
+      ],
+    })
+  })
+
+  it('fails explicitly when Chat Completions cannot carry a remote file reference', () => {
+    const msgs: LLMMessage[] = [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'tc1',
+        content: [{
+          type: 'file',
+          filename: 'report.pdf',
+          source: {
+            type: 'url',
+            media_type: 'application/pdf',
+            url: 'https://example.com/report.pdf',
+          },
+        }],
+      }],
+    }]
+
+    expect(() => toOpenAIMessages(msgs)).toThrow(UnsupportedToolResultContentError)
   })
 
   it('handles mixed user message with text and tool_result (tool first, then user)', () => {

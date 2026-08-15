@@ -76,7 +76,8 @@ export function computeRunMetrics(
   }
 }
 
-export function resolveTokenBudget(primary?: number, fallback?: number): number | undefined {
+/** Resolve nested ceilings without allowing a per-run/agent override to widen its parent. */
+export function resolveBudgetCeiling(primary?: number, fallback?: number): number | undefined {
   if (primary === undefined) return fallback
   if (fallback === undefined) return primary
   return Math.min(primary, fallback)

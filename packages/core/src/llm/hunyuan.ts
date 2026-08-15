@@ -6,6 +6,7 @@
  * environment variable fallback.
  */
 
+import type { EgressPolicy } from '../types.js'
 import { OpenAIAdapter } from './openai.js'
 
 /**
@@ -54,12 +55,14 @@ export class HunyuanAdapter extends OpenAIAdapter {
     echoesReasoning: 'tool-use-only' as const,
   }
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(apiKey?: string, baseURL?: string, egressPolicy?: EgressPolicy) {
     // Default to the current Tencent MaaS / TokenHub endpoint; allow override
     // of baseURL (legacy Tencent Cloud endpoint, proxies, or future clusters).
     super(
       apiKey ?? process.env['HUNYUAN_API_KEY'],
-      baseURL ?? process.env['HUNYUAN_BASE_URL'] ?? 'https://tokenhub.tencentmaas.com/v1'
+      baseURL ?? process.env['HUNYUAN_BASE_URL'] ?? 'https://tokenhub.tencentmaas.com/v1',
+      egressPolicy,
+      'hunyuan',
     )
   }
 }

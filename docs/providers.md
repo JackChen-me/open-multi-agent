@@ -2,6 +2,17 @@
 
 `open-multi-agent` keeps the agent config shape stable across hosted, cloud, and local providers. Change `provider`, `model`, and the relevant credential; the rest of your team definition stays the same.
 
+To restrict connections opened by enforceable built-in LLM adapters, see the
+[framework-owned LLM egress policy](egress-policy.md). That policy deliberately
+does not claim to sandbox tools, subprocesses, MCP servers, or application-owned
+exporters.
+
+The supported runtime is Node.js 20 or newer; Node.js 22 or 24 is recommended.
+Node.js 20 is upstream-EOL and retained only as a migration compatibility
+window. OMA will remove Node.js 20 support in its next major release, no earlier
+than 2026-10-31. Core uses OpenAI SDK v6 for OpenAI and OpenAI-compatible Chat
+Completions endpoints.
+
 ```typescript
 const agent = {
   name: 'my-agent',
@@ -25,7 +36,7 @@ The framework ships a wired-in provider name for each of these. Set `provider` a
 | Azure OpenAI | `provider: 'azure-openai'` | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | `gpt-4` | Optional `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT`. |
 | GitHub Copilot | `provider: 'copilot'` | `GITHUB_COPILOT_TOKEN` (falls back to `GITHUB_TOKEN`) | `gpt-4o` | Custom token-exchange flow on top of OpenAI protocol. |
 | Grok (xAI) | `provider: 'grok'` | `XAI_API_KEY` | `grok-4` | OpenAI-compatible; endpoint is `api.x.ai/v1`. |
-| DeepSeek | `provider: 'deepseek'` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | OpenAI-compatible. `deepseek-v4-flash` (default) or `deepseek-v4-pro` (flagship for coding); both support 1M context and 384K max output. Legacy `deepseek-chat` / `deepseek-reasoner` retire 2026-07-24. |
+| DeepSeek | `provider: 'deepseek'` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | OpenAI-compatible Chat Completions. `deepseek-v4-flash` currently resolves to DeepSeek-V4-Flash-0731 (public beta); `deepseek-v4-pro` remains the Preview API. Both support 1M context and 384K max output. The Flash endpoint also supports DeepSeek's native Responses API, while OMA's built-in adapter uses Chat Completions. Legacy `deepseek-chat` / `deepseek-reasoner` were retired on 2026-07-24. |
 | Doubao (Volcengine) | `provider: 'doubao'` | `ARK_API_KEY` | `doubao-seed-1-8-251228` | OpenAI-compatible. ByteDance Volcengine Ark endpoint `https://ark.cn-beijing.volces.com/api/v3`. See [`providers/doubao`](../packages/core/examples/providers/doubao.ts). |
 | Hunyuan (Tencent MaaS / TokenHub) | `provider: 'hunyuan'` | `HUNYUAN_API_KEY` | `hy3-preview` | OpenAI-compatible. Default endpoint `https://tokenhub.tencentmaas.com/v1` (Tencent's current platform; `sk-...` keys, Hunyuan 3 models). Tool calling verified on `hy3-preview`. See [`providers/hunyuan`](../packages/core/examples/providers/hunyuan.ts). |
 | Hunyuan (legacy Tencent Cloud) | `provider: 'hunyuan'` + `HUNYUAN_BASE_URL` | `HUNYUAN_API_KEY` | `hunyuan-turbos-latest` | Legacy endpoint `https://api.hunyuan.cloud.tencent.com/v1` (console.cloud.tencent.com/hunyuan key; separate key namespace). Tencent has announced this platform is being retired (sales stop 2026-06-30, full shutdown 2026-09-30). Set `HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1` to target it until then. Tool calling verified on `hunyuan-turbos` and `hunyuan-functioncall`. |
@@ -56,7 +67,59 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
 
+OMA registers JSON-schema `function` tools. If an OpenAI-compatible response
+contains the separate `custom` tool-call variant, the adapter raises
+`UnsupportedToolCallError` instead of dropping the call or presenting an empty
+successful turn.
+
+## Budget ceilings and governed runs
+
+Token accounting is provider-independent. Cost accounting remains
+application-owned because provider prices, cached-token rules, regions, and
+contract rates vary. Configure `estimateCost` once, then place a ceiling on the
+orchestrator or on an individual team run:
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  maxCostBudget: 1,
+  estimateCost: (usage, context) => priceTable[context.model](usage),
+})
+
+const result = await orchestrator.runTeam(team, goal, {
+  governanceIntent: 'required',
+  requiredRoles: ['reviewer', 'security'],
+  maxCostBudget: 0.25,
+})
+```
+
+When both scopes set a ceiling, the lower value wins. The same applies to
+`maxTokenBudget`. A required run that exhausts the effective ceiling before its
+required execution facts are complete reports
+`governanceConclusion: 'unsatisfied'` and `governanceReason: 'budget'`; it is
+not presented as a clean governance success. An application `mode`
+wins over the required topology, but an unmet floor is disclosed as
+`unsatisfied` / `overridden` with the `governance-overridden` flag. Automatic
+routing has the lowest priority.
+
+For `governanceIntent: 'preferred'`, set
+`preferredUnderBudget: 'degrade'` to choose Single whenever an effective
+ceiling applies. The result carries `review-skipped-due-to-budget`, while the
+soft preference remains `not-applicable` to the required-governance verdict.
+The default is `attempt`, preserving existing behavior.
+
+These controls do **not** run a preflight price or latency estimator.
+`estimateCost` converts usage after each provider response, and Token/cost
+checks still happen at existing turn/task boundaries, so a run can overshoot by
+one model turn. `preferredUnderBudget: 'degrade'` is an application-declared
+policy choice, not a prediction that a particular plan would exceed budget.
+
 ## Vercel AI SDK (optional)
+
+The AI SDK model is an opaque application-supplied transport. When
+`egressPolicy` is configured, OMA rejects `AISdkAdapter` before invocation
+rather than claiming it can constrain the model's requests. Use the provider's
+own transport controls or an infrastructure firewall when the bridge needs an
+egress boundary; see [framework-owned LLM egress policy](egress-policy.md).
 
 The AI SDK bridge routes an agent through [any AI SDK provider](https://ai-sdk.dev/providers) instead of the built-in `provider` factory. Install the optional peers with `npm i ai @ai-sdk/<provider>`; the peer range accepts AI SDK 5, 6, and 7, and AI SDK 7 requires Node.js >= 22.
 
@@ -96,7 +159,8 @@ const agent = {
 ```
 
 - `budgetTokens` maps to Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget`.
-- `effort` (`'low' | 'medium' | 'high'`) maps to OpenAI `reasoning_effort`. Values the pinned SDK union does not declare yet (such as `'minimal'` or `'none'`) can be passed via `extraBody: { reasoning_effort: '<value>' }`.
+- `effort` (`'low' | 'medium' | 'high'`) maps to OpenAI-compatible `reasoning_effort`. Values outside the framework union (such as `'minimal'` or `'none'`) can be passed via `extraBody: { reasoning_effort: '<value>' }`.
+- DeepSeek additionally maps `enabled` to `thinking: { type: 'enabled' | 'disabled' }` and accepts `effort: 'max'`. Other built-in OpenAI-family adapters ignore the DeepSeek-only `max` value. Explicit `extraBody` values take precedence.
 - Adapters ignore fields they don't recognise, so one config is safe across a mixed-provider team.
 
 Reasoning is streamed as `reasoning` events. Preserving reasoning across a provider switch is opt-in via `preserveReasoningAsText`; see [context management](context-management.md) and [`patterns/cross-provider-reasoning`](../packages/core/examples/patterns/cross-provider-reasoning.ts).

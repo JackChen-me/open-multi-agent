@@ -2,6 +2,11 @@
 
 Scaffold a production-oriented multi-agent starter on [`@open-multi-agent/core`](https://www.npmjs.com/package/@open-multi-agent/core).
 
+Requires Node.js 20 or newer; Node.js 22 or 24 is recommended. Generated
+projects declare the same runtime floor. Node.js 20 is upstream-EOL and retained
+only as a migration compatibility window; OMA will remove it in the next major
+release, no earlier than 2026-10-31.
+
 ```bash
 npm create oma-app@latest my-oma
 ```

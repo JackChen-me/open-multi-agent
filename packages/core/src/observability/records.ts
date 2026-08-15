@@ -8,6 +8,7 @@ import type {
 /** Stable operation categories used by TraceRecord schema v2. */
 export type SpanKind =
   | 'run'
+  | 'routing'
   | 'agent'
   | 'task'
   | 'llm'
@@ -28,6 +29,8 @@ export type SpanEventName =
   | 'loop_detected'
   | 'stream_chunk'
   | 'consensus_verdict'
+  | 'recovery_decision'
+  | 'plan_revision_applied'
 
 export interface TraceRecordBase {
   readonly schemaVersion: 2

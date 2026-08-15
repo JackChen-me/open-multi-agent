@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "maintainer-policy-v1",
+  "promptVersion": "maintainer-prompts-v1",
+  "model": "deepseek-v4-flash",
+  "agentReadyLabel": "agent-ready",
+  "allowedPaths": [
+    "packages/maintainer-bot"
+  ],
+  "protectedPaths": [
+    ".git",
+    ".github/workflows",
+    ".github/RELEASING.md",
+    "package-lock.json",
+    "packages/maintainer-bot/config"
+  ],
+  "context": {
+    "maxFiles": 120,
+    "maxBytes": 800000,
+    "maxBytesPerFile": 80000,
+    "maxHistoryEntries": 20
+  },
+  "edits": {
+    "maxFiles": 20,
+    "maxBytesPerFile": 160000,
+    "maxTotalBytes": 500000
+  },
+  "validationCommands": [
+    {
+      "id": "maintainer-bot-lint",
+      "command": "npm",
+      "args": ["run", "lint", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "maintainer-bot-test",
+      "command": "npm",
+      "args": ["run", "test", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "maintainer-bot-build",
+      "command": "npm",
+      "args": ["run", "build", "-w", "@open-multi-agent/maintainer-bot"],
+      "cwd": ".",
+      "timeoutMs": 600000
+    }
+  ],
+  "limits": {
+    "maxTokenBudget": 160000,
+    "maxCostUsd": 2,
+    "runTimeoutMs": 900000,
+    "maxRepairLoops": 2
+  },
+  "modelPricing": {
+    "inputPerMillionUsd": 0.14,
+    "outputPerMillionUsd": 0.28
+  }
+}

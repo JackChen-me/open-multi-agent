@@ -103,7 +103,10 @@ describe('OMA EvalTarget conveniences', () => {
 
   it('targetFromTeam returns the synthesized or primary team output and team fingerprints', async () => {
     const team = new Team({ name: 'team', agents: [agent(adapter('team output'))] })
-    const output = await targetFromTeam(team, { metadata: { experiment: 'team-v1' } })('hello', context())
+    const output = await targetFromTeam(team, {
+      metadata: { experiment: 'team-v1' },
+      executionRouting: { strategy: 'deterministic' },
+    })('hello', context())
 
     expect(output.output).toBe('team output')
     expect(output.result?.metadata).toEqual({

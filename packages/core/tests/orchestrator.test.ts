@@ -6,6 +6,7 @@ import { ToolExecutor } from '../src/tool/executor.js'
 import type {
   AgentConfig,
   AgentRunResult,
+  CostEstimateContext,
   LLMAdapter,
   LLMChatOptions,
   LLMMessage,
@@ -14,6 +15,7 @@ import type {
   TeamConfig,
   TraceEvent,
 } from '../src/types.js'
+import type { SchedulingStrategy } from '../src/orchestrator/scheduler.js'
 
 // ---------------------------------------------------------------------------
 // Mock LLM adapter
@@ -81,9 +83,12 @@ function extractUserPrompt(messages: LLMMessage[]): string {
 let mockAdapterResponses: string[] = []
 let capturedChatOptions: LLMChatOptions[] = []
 let capturedPrompts: string[] = []
+let capturedAdapterProviders: string[] = []
+let mockAdapterHandler: ((options: LLMChatOptions) => string | Error) | undefined
 
 vi.mock('../src/llm/adapter.js', () => ({
-  createAdapter: async () => {
+  createAdapter: async (provider: string) => {
+    capturedAdapterProviders.push(provider)
     let callIndex = 0
     return {
       name: 'mock',
@@ -95,7 +100,9 @@ vi.mock('../src/llm/adapter.js', () => ({
           .map((b) => b.text)
           .join('\n')
         capturedPrompts.push(prompt)
-        const text = mockAdapterResponses[callIndex] ?? 'default mock response'
+        const configuredResponse = mockAdapterHandler?.(options)
+        if (configuredResponse instanceof Error) throw configuredResponse
+        const text = configuredResponse ?? mockAdapterResponses[callIndex] ?? 'default mock response'
         callIndex++
         return {
           id: `resp-${callIndex}`,
@@ -142,6 +149,8 @@ describe('OpenMultiAgent', () => {
     mockAdapterResponses = []
     capturedChatOptions = []
     capturedPrompts = []
+    capturedAdapterProviders = []
+    mockAdapterHandler = undefined
   })
 
   describe('createTeam', () => {
@@ -318,6 +327,180 @@ describe('OpenMultiAgent', () => {
       expect(result.success).toBe(true)
     })
 
+    it('rejects cyclic task dependencies before dispatch', async () => {
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg())
+
+      await expect(oma.runTasks(team, [
+        { title: 'Task A', description: 'Do A', assignee: 'worker-a', dependsOn: ['Task B'] },
+        { title: 'Task B', description: 'Do B', assignee: 'worker-b', dependsOn: ['Task A'] },
+      ])).rejects.toThrow('Invalid task dependencies: Cyclic dependency detected')
+
+      expect(capturedPrompts).toEqual([])
+    })
+
+    it('rejects an explicit assignee that does not satisfy hard requirements before dispatch', async () => {
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('reader'), tools: ['file_read'] },
+        { ...agentConfig('editor'), tools: ['file_edit'] },
+      ]))
+
+      await expect(oma.runTasks(team, [{
+        title: 'Edit',
+        description: 'Edit a file.',
+        assignee: 'reader',
+        requires: { requiredTools: ['file_edit'] },
+      }])).rejects.toMatchObject({
+        code: 'INVALID_TASK_REQUIREMENTS',
+        issues: [
+          expect.objectContaining({
+            code: 'ASSIGNEE_REQUIREMENTS_MISMATCH',
+            assignee: 'reader',
+          }),
+        ],
+      })
+
+      expect(capturedPrompts).toEqual([])
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({ code: 'INVALID_TASK_REQUIREMENTS' }),
+      }))
+    })
+
+    it('rejects a plan with no eligible agent before dispatch', async () => {
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg([agentConfig('worker')]))
+
+      await expect(oma.runTasks(team, [
+        {
+          title: 'Unrestricted predecessor',
+          description: 'Must not start before the full plan is validated.',
+        },
+        {
+          title: 'Restricted',
+          description: 'Requires a missing capability.',
+          dependsOn: ['Unrestricted predecessor'],
+          requires: { requiredCapabilities: ['missing'] },
+        },
+      ])).rejects.toMatchObject({
+        code: 'INVALID_TASK_REQUIREMENTS',
+        issues: [
+          expect.objectContaining({ code: 'NO_ELIGIBLE_AGENT' }),
+        ],
+      })
+
+      expect(capturedPrompts).toEqual([])
+    })
+
+    it.each<{
+      strategy: SchedulingStrategy
+      expected: Record<string, string>
+    }>([
+      {
+        strategy: 'round-robin',
+        expected: {
+          'Implement TypeScript service': 'researcher',
+          'Research market analysis': 'coder',
+          'Summarize findings': 'researcher',
+        },
+      },
+      {
+        strategy: 'least-busy',
+        expected: {
+          'Implement TypeScript service': 'researcher',
+          'Research market analysis': 'coder',
+          'Summarize findings': 'researcher',
+        },
+      },
+      {
+        strategy: 'capability-match',
+        expected: {
+          'Implement TypeScript service': 'coder',
+          'Research market analysis': 'researcher',
+          'Summarize findings': 'researcher',
+        },
+      },
+      {
+        strategy: 'dependency-first',
+        expected: {
+          'Implement TypeScript service': 'coder',
+          'Research market analysis': 'researcher',
+          'Summarize findings': 'researcher',
+        },
+      },
+    ])('applies the $strategy scheduling strategy from config', async ({ strategy, expected }) => {
+      mockAdapterResponses = ['first done', 'second done', 'third done']
+
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        schedulingStrategy: strategy,
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([
+        {
+          ...agentConfig('researcher'),
+          systemPrompt: 'Research markets and analyze evidence.',
+        },
+        {
+          ...agentConfig('coder'),
+          systemPrompt: 'Implement TypeScript software services.',
+        },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        { title: 'Implement TypeScript service', description: 'Implement software code' },
+        { title: 'Research market analysis', description: 'Research and analyze market evidence' },
+        {
+          title: 'Summarize findings',
+          description: 'Summarize the research',
+          dependsOn: ['Research market analysis'],
+        },
+      ])
+
+      const assignments = Object.fromEntries(
+        events
+          .filter((event) => event.type === 'task_start')
+          .map((event) => [(event.data as { title: string }).title, event.agent]),
+      )
+      expect(result.success).toBe(true)
+      expect(assignments).toEqual(expected)
+    })
+
+    it('defaults to dependency-first scheduling', async () => {
+      mockAdapterResponses = ['first done', 'second done', 'third done']
+
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg())
+
+      const result = await oma.runTasks(team, [
+        { title: 'Independent', description: 'Independent work' },
+        { title: 'Critical root', description: 'Start the pipeline' },
+        { title: 'Dependent', description: 'Finish the pipeline', dependsOn: ['Critical root'] },
+      ])
+
+      const assignments = Object.fromEntries(
+        events
+          .filter((event) => event.type === 'task_start')
+          .map((event) => [(event.data as { title: string }).title, event.agent]),
+      )
+      expect(result.success).toBe(true)
+      expect(assignments).toEqual({
+        Independent: 'worker-b',
+        'Critical root': 'worker-a',
+        Dependent: 'worker-a',
+      })
+    })
+
     it('uses a clean slate for tasks without dependencies', async () => {
       mockAdapterResponses = ['alpha done', 'beta done']
 
@@ -399,6 +582,31 @@ describe('OpenMultiAgent', () => {
       expect(team.getAgents()[0]?.model).toBe('default-worker-model')
     })
 
+    it('rejects a model route that overrides a required provider before dispatch', async () => {
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), provider: 'anthropic' },
+      ]))
+
+      await expect(oma.runTasks(team, [{
+        title: 'Anthropic only',
+        description: 'Run on the required provider.',
+        assignee: 'worker-a',
+        requires: { requiredProvider: 'anthropic' },
+      }], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: { model: 'routed-model', provider: 'openai' },
+          }],
+        },
+      })).rejects.toMatchObject({
+        code: 'INVALID_TASK_REQUIREMENTS',
+      })
+
+      expect(capturedPrompts).toEqual([])
+    })
+
     it('routes critical dependent tasks to an explicit premium model', async () => {
       mockAdapterResponses = ['research output', 'review output']
 
@@ -427,6 +635,403 @@ describe('OpenMultiAgent', () => {
 
       expect(capturedChatOptions[0]?.model).toBe('default-worker-model')
       expect(capturedChatOptions[1]?.model).toBe('premium-review-model')
+    })
+
+    it('fails over to the next route after a retryable provider error', async () => {
+      mockAdapterHandler = (options) => {
+        if (options.model === 'primary-model') {
+          return Object.assign(new Error('rate limited'), { status: 429 })
+        }
+        return 'backup output'
+      }
+
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), model: 'default-worker-model' },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'Fallback',
+          description: 'Recover from a provider outage',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              provider: 'anthropic',
+              fallback: [{ model: 'backup-model', provider: 'openai' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.agentResults.get('worker-a')?.output).toBe('backup output')
+      expect(capturedChatOptions.map(options => options.model)).toEqual([
+        'primary-model',
+        'backup-model',
+      ])
+      expect(capturedAdapterProviders).toEqual(['anthropic', 'openai'])
+    })
+
+    it('does not use a fallback route that violates a required provider', async () => {
+      mockAdapterHandler = () =>
+        Object.assign(new Error('provider unavailable'), { status: 503 })
+
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), provider: 'anthropic' },
+      ]))
+
+      const result = await oma.runTasks(team, [{
+        title: 'Anthropic fallback boundary',
+        description: 'Do not cross the provider boundary.',
+        assignee: 'worker-a',
+        requires: { requiredProvider: 'anthropic' },
+        maxRetries: 1,
+        retryDelayMs: 0,
+      }], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              provider: 'anthropic',
+              fallback: [{ model: 'backup-model', provider: 'openai' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(false)
+      expect(capturedAdapterProviders).toEqual(['anthropic'])
+      expect(capturedChatOptions.map(options => options.model)).toEqual([
+        'primary-model',
+        'primary-model',
+      ])
+    })
+
+    it('fails over after a retryable provider error while onAgentStream is enabled', async () => {
+      const streamedErrorKinds: Array<{ kind: string | undefined; retryable: boolean | undefined }> = []
+      let defaultModelCalls = 0
+      mockAdapterHandler = (options) => {
+        if (options.model === 'primary-model') {
+          return Object.assign(new Error('provider unavailable'), { status: 503 })
+        }
+        if (options.model === 'backup-model') return 'backup output'
+        defaultModelCalls++
+        return defaultModelCalls === 1
+          ? '```json\n[{"title":"Fallback","description":"Recover from a provider outage","assignee":"worker-a","maxRetries":1,"retryDelayMs":0}]\n```'
+          : 'final synthesis'
+      }
+
+      const oma = new OpenMultiAgent({
+        defaultModel: 'default-model',
+        onAgentStream: (_agentName, event) => {
+          if (event.type === 'error') {
+            streamedErrorKinds.push({
+              kind: event.errorInfo?.kind,
+              retryable: event.errorInfo?.retryable,
+            })
+          }
+        },
+      })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), model: 'default-worker-model' },
+      ]))
+
+      const result = await oma.runTeam(
+        team,
+        'First recover from the provider outage, then write a summary of the result',
+        {
+          modelRouting: {
+            rules: [{
+              match: { phase: 'worker' },
+              route: {
+                model: 'primary-model',
+                provider: 'anthropic',
+                fallback: [{ model: 'backup-model', provider: 'openai' }],
+              },
+            }],
+          },
+        },
+      )
+
+      expect(result.success).toBe(true)
+      expect(capturedChatOptions
+        .map(options => options.model)
+        .filter(model => model === 'primary-model' || model === 'backup-model'))
+        .toEqual(['primary-model', 'backup-model'])
+      expect(streamedErrorKinds).toEqual([{ kind: 'provider', retryable: true }])
+    })
+
+    it('prices each fallback attempt with the route that handled it', async () => {
+      const costContexts: CostEstimateContext[] = []
+      mockAdapterHandler = (options) => {
+        if (options.model === 'primary-model') {
+          return Object.assign(new Error('rate limited'), { status: 429 })
+        }
+        return 'backup output'
+      }
+
+      const oma = new OpenMultiAgent({
+        defaultModel: 'default-model',
+        maxCostBudget: 100,
+        estimateCost: (_usage, context) => {
+          costContexts.push(context)
+          return 1
+        },
+      })
+      const team = oma.createTeam('t', teamCfg([
+        agentConfig('worker-a'),
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'Fallback cost accounting',
+          description: 'Price each attempt with its active route',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              provider: 'anthropic',
+              fallback: [{ model: 'backup-model', provider: 'openai' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(costContexts.map(context => context.model)).toEqual([
+        'primary-model',
+        'backup-model',
+      ])
+      expect(costContexts.map(context => context.provider)).toEqual([
+        'anthropic',
+        'openai',
+      ])
+    })
+
+    it('advances through ordered fallbacks and retries the final route after exhaustion', async () => {
+      let finalRouteAttempts = 0
+      mockAdapterHandler = (options) => {
+        if (options.model === 'primary-model' || options.model === 'first-backup-model') {
+          return Object.assign(new Error('provider unavailable'), { status: 503 })
+        }
+        finalRouteAttempts++
+        return finalRouteAttempts === 1
+          ? Object.assign(new Error('rate limited'), { status: 429 })
+          : 'final backup output'
+      }
+
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), model: 'default-worker-model' },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'Multi-hop fallback',
+          description: 'Use each backup route in order',
+          assignee: 'worker-a',
+          maxRetries: 3,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              fallback: [
+                { model: 'first-backup-model' },
+                { model: 'final-backup-model' },
+              ],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(capturedChatOptions.map(options => options.model)).toEqual([
+        'primary-model',
+        'first-backup-model',
+        'final-backup-model',
+        'final-backup-model',
+      ])
+    })
+
+    it('does not fail over after a terminal provider error', async () => {
+      mockAdapterHandler = (options) => {
+        if (options.model === 'primary-model') {
+          return Object.assign(new Error('unauthorized'), { status: 401 })
+        }
+        return 'backup output'
+      }
+
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('worker-a'), model: 'default-worker-model' },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'Terminal error',
+          description: 'Do not retry invalid credentials',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              fallback: [{ model: 'backup-model' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(false)
+      expect(capturedChatOptions.map(options => options.model)).toEqual(['primary-model'])
+    })
+
+    it('retries the current route when a task failure has no provider error', async () => {
+      let afterRunCalls = 0
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        {
+          ...agentConfig('worker-a'),
+          afterRun: (result) => {
+            afterRunCalls++
+            return afterRunCalls === 1 ? { ...result, success: false } : result
+          },
+        },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'Unclassified failure',
+          description: 'Retry without changing the active route',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              fallback: [{ model: 'backup-model' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(capturedChatOptions.map(options => options.model)).toEqual([
+        'primary-model',
+        'primary-model',
+      ])
+    })
+
+    it('does not fail over after a retryable-looking beforeRun hook error', async () => {
+      const hookModels: string[] = []
+      let beforeRunCalls = 0
+      const hookError = Object.assign(new Error('hook rate limited'), { status: 429 })
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        {
+          ...agentConfig('worker-a'),
+          beforeRun: (context) => {
+            hookModels.push(context.agent.model ?? '')
+            beforeRunCalls++
+            if (beforeRunCalls === 1) throw hookError
+            return context
+          },
+        },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'beforeRun hook error',
+          description: 'Retry without changing the active route',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              fallback: [{ model: 'backup-model' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(hookModels).toEqual(['primary-model', 'primary-model'])
+      expect(capturedChatOptions.map(options => options.model)).toEqual(['primary-model'])
+    })
+
+    it('does not fail over after a retryable-looking afterRun hook error', async () => {
+      let afterRunCalls = 0
+      const hookError = Object.assign(new Error('hook rate limited'), { status: 429 })
+      const oma = new OpenMultiAgent({ defaultModel: 'default-model' })
+      const team = oma.createTeam('t', teamCfg([
+        {
+          ...agentConfig('worker-a'),
+          afterRun: (result) => {
+            afterRunCalls++
+            if (afterRunCalls === 1) throw hookError
+            return result
+          },
+        },
+      ]))
+
+      const result = await oma.runTasks(team, [
+        {
+          title: 'afterRun hook error',
+          description: 'Retry without changing the active route',
+          assignee: 'worker-a',
+          maxRetries: 1,
+          retryDelayMs: 0,
+        },
+      ], {
+        modelRouting: {
+          rules: [{
+            match: { phase: 'worker' },
+            route: {
+              model: 'primary-model',
+              fallback: [{ model: 'backup-model' }],
+            },
+          }],
+        },
+      })
+
+      expect(result.success).toBe(true)
+      expect(capturedChatOptions.map(options => options.model)).toEqual([
+        'primary-model',
+        'primary-model',
+      ])
     })
   })
 
@@ -486,20 +1091,267 @@ describe('OpenMultiAgent', () => {
       expect(result.agentResults.has('coordinator')).toBe(true)
     })
 
-    it('falls back to one-task-per-agent when coordinator output is unparseable', async () => {
+    it('repairs a coordinator-generated cyclic DAG before dispatch', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Task A","description":"Do A","assignee":"worker-a","dependsOn":["Task B"]},{"title":"Task B","description":"Do B","assignee":"worker-b","dependsOn":["Task A"]}]\n```',
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"worker-a"}]\n```',
+        'research output',
+        'final answer',
+      ]
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg())
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then produce a detailed report with recommendations.',
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.tasks).toHaveLength(1)
+      expect(capturedPrompts).toHaveLength(4)
+      expect(events.some((event) => event.type === 'error')).toBe(false)
+    })
+
+    it('fails closed when coordinator output remains unparseable after repair', async () => {
       mockAdapterResponses = [
         'I cannot produce JSON output', // invalid coordinator output
-        'worker-a result',
-        'worker-b result',
-        'synthesis',
+        'Still not JSON', // repair also fails
       ]
 
-      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
       const team = oma.createTeam('t', teamCfg())
 
       const result = await oma.runTeam(team, 'First design the database schema, then implement the REST API endpoints')
 
+      expect(result.success).toBe(false)
+      expect(result.status?.code).toBe('error')
+      expect(result.errorInfo).toMatchObject({ kind: 'validation', code: 'COORDINATOR_PLAN_INVALID' })
+      expect(result.tasks).toEqual([])
+      expect(capturedPrompts).toHaveLength(2)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({ code: 'COORDINATOR_PLAN_INVALID' }),
+      }))
+    })
+
+    it('rejects a partially malformed coordinator plan instead of executing its valid subset', async () => {
+      const malformedPlan = '```json\n[' +
+        '{"title":"Research","description":"Research the topic","assignee":"worker-a"},' +
+        '{"title":"Broken","assignee":"worker-b"}' +
+        ']\n```'
+      mockAdapterResponses = [malformedPlan, malformedPlan]
+
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg())
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then produce a detailed report with recommendations.',
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(capturedPrompts).toHaveLength(2)
+    })
+
+    it('uses schedulingStrategy for unassigned coordinator tasks', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Implement TypeScript service","description":"Implement software code"},{"title":"Research market analysis","description":"Research and analyze market evidence"}]\n```',
+        'worker result',
+        'worker result',
+        'synthesis',
+      ]
+
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        schedulingStrategy: 'capability-match',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([
+        {
+          ...agentConfig('researcher'),
+          systemPrompt: 'Research markets and analyze evidence.',
+        },
+        {
+          ...agentConfig('coder'),
+          systemPrompt: 'Implement TypeScript software services.',
+        },
+      ]))
+
+      const result = await oma.runTeam(
+        team,
+        'First implement the service, then research the market and synthesize both results.',
+      )
+
+      const assignments = Object.fromEntries(
+        events
+          .filter((event) => event.type === 'task_start')
+          .map((event) => [(event.data as { title: string }).title, event.agent]),
+      )
       expect(result.success).toBe(true)
+      expect(assignments).toEqual({
+        'Implement TypeScript service': 'coder',
+        'Research market analysis': 'researcher',
+      })
+    })
+
+    it('passes schedulingWeights from OrchestratorConfig into composite scheduling', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Implement TypeScript","description":"Implement TypeScript service"}]\n```',
+      ]
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        schedulingStrategy: 'composite',
+        schedulingWeights: { fit: 0, load: 1 },
+      })
+      const team = oma.createTeam('t', teamCfg([
+        agentConfig('aaa-idle'),
+        {
+          ...agentConfig('coder'),
+          capabilities: ['typescript'],
+        },
+      ]))
+
+      const result = await oma.runTeam(
+        team,
+        'First implement the TypeScript service, then document the result.',
+        { planOnly: true },
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.tasks?.[0]?.assignee).toBe('aaa-idle')
+    })
+
+    it('rejects a coordinator plan with unsatisfied requirements before planOnly succeeds', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Restricted","description":"Restricted task","requires":{"requiredCapabilities":["missing"]}}]\n```',
+      ]
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        schedulingStrategy: 'composite',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([agentConfig('worker-a')]))
+
+      const result = await oma.runTeam(
+        team,
+        'First complete the restricted task, then document the outcome.',
+        { planOnly: true },
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.errorInfo).toMatchObject({
+        kind: 'validation',
+        code: 'INVALID_TASK_REQUIREMENTS',
+      })
+      expect(result.tasks).toEqual([])
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({
+          code: 'INVALID_TASK_REQUIREMENTS',
+          issues: [
+            expect.objectContaining({ code: 'NO_ELIGIBLE_AGENT' }),
+          ],
+        }),
+      }))
+      expect(capturedPrompts).toHaveLength(1)
+    })
+
+    it('rejects a coordinator assignee that conflicts with hard requirements', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Edit","description":"Edit a file","assignee":"reader","requires":{"requiredTools":["file_edit"]}}]\n```',
+      ]
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg([
+        { ...agentConfig('reader'), tools: ['file_read'] },
+        { ...agentConfig('editor'), tools: ['file_edit'] },
+      ]))
+
+      const result = await oma.runTeam(
+        team,
+        'First edit the file, then review the result.',
+        { planOnly: true },
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.errorInfo).toMatchObject({
+        kind: 'validation',
+        code: 'INVALID_TASK_REQUIREMENTS',
+      })
+      expect(capturedPrompts).toHaveLength(1)
+    })
+
+    it('warns and schedules a coordinator task with an invalid assignee only when legacy reassignment is explicit', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
+      ]
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        strictAssignees: false,
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([agentConfig('worker-a')]))
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then prepare a detailed implementation plan.',
+        { planOnly: true },
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.tasks?.[0]?.assignee).toBe('worker-a')
+      expect(events).toContainEqual({
+        type: 'warning',
+        task: 'Research',
+        data: {
+          code: 'INVALID_ASSIGNEE',
+          assignee: 'ghost',
+          taskTitle: 'Research',
+          fallback: 'clear-and-schedule',
+        },
+      })
+    })
+
+    it('returns a structured validation error for an invalid assignee by default', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
+      ]
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg([agentConfig('worker-a')]))
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then prepare a detailed implementation plan.',
+        { planOnly: true },
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.status?.code).toBe('error')
+      expect(result.errorInfo).toMatchObject({
+        kind: 'validation',
+        code: 'COORDINATOR_PLAN_INVALID',
+      })
+      expect(result.tasks).toEqual([])
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({ code: 'COORDINATOR_PLAN_INVALID' }),
+      }))
     })
 
     it('supports coordinator model override without affecting workers', async () => {
@@ -798,17 +1650,13 @@ describe('OpenMultiAgent', () => {
       expect(result.agentResults.get('worker')?.output).toBe('worker output')
     })
 
-    it('marks tasks with unknown coordinator dependencies as failed instead of dropping them', async () => {
+    it('fails closed when coordinator dependencies remain unknown after repair', async () => {
+      let coordinatorCalls = 0
       let workerCalls = 0
-      let synthesisPrompt = ''
       const coordinatorAdapter: LLMAdapter = {
         name: 'coordinator-mock',
-        async chat(messages: LLMMessage[]): Promise<LLMResponse> {
-          const prompt = extractUserPrompt(messages)
-          if (prompt.includes('Task Results')) {
-            synthesisPrompt = prompt
-            return textResponse('final with gap')
-          }
+        async chat(): Promise<LLMResponse> {
+          coordinatorCalls++
           return textResponse('```json\n[{"title": "Use missing", "description": "Use a missing result", "assignee": "worker", "dependsOn": ["Missing research"]}]\n```')
         },
         async *stream() { yield { type: 'done' as const, data: {} } },
@@ -831,22 +1679,18 @@ describe('OpenMultiAgent', () => {
         coordinator: { adapter: coordinatorAdapter },
       })
 
-      const task = result.tasks?.find((t) => t.title === 'Use missing')
-      expect(task?.status).toBe('failed')
-      expect(synthesisPrompt).toContain('Unresolved dependency reference(s): Missing research')
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(coordinatorCalls).toBe(2)
       expect(workerCalls).toBe(0)
     })
 
-    it('fails ambiguous title dependencies when coordinator emits duplicate task titles', async () => {
-      let synthesisPrompt = ''
+    it('fails closed when duplicate coordinator task titles remain ambiguous after repair', async () => {
+      let coordinatorCalls = 0
       const coordinatorAdapter: LLMAdapter = {
         name: 'coordinator-mock',
-        async chat(messages: LLMMessage[]): Promise<LLMResponse> {
-          const prompt = extractUserPrompt(messages)
-          if (prompt.includes('Task Results')) {
-            synthesisPrompt = prompt
-            return textResponse('final with ambiguity')
-          }
+        async chat(): Promise<LLMResponse> {
+          coordinatorCalls++
           return textResponse([
                 '```json',
                 '[',
@@ -867,9 +1711,9 @@ describe('OpenMultiAgent', () => {
         coordinator: { adapter: coordinatorAdapter },
       })
 
-      const synth = result.tasks?.find((t) => t.title === 'Synthesize')
-      expect(synth?.status).toBe('failed')
-      expect(synthesisPrompt).toContain('Research (ambiguous duplicate title)')
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(coordinatorCalls).toBe(2)
     })
 
     it('includes failed and skipped task sections in final synthesis prompt', async () => {
@@ -1184,11 +2028,10 @@ describe('OpenMultiAgent', () => {
       expect(result.tasks).toBeDefined()
       expect(result.tasks!.length).toBe(2)
 
-      // Tasks should be in pre-execution states only. Independent tasks remain
-      // 'pending'; tasks with unmet dependencies are 'blocked' (set by the
-      // queue at insert time). Neither has executed.
+      // Plan artifacts expose every task as pending, including tasks whose
+      // dependencies will block them once execution begins.
       for (const task of result.tasks!) {
-        expect(['pending', 'blocked']).toContain(task.status)
+        expect(task.status).toBe('pending')
         expect(task.metrics).toBeUndefined()
       }
 
@@ -1405,6 +2248,33 @@ describe('OpenMultiAgent', () => {
         retryDelayMs: 500,
         retryBackoff: 3,
       })
+    })
+
+    it('round-trips requirements and revalidates them before plan replay', async () => {
+      mockAdapterResponses = [
+        '```json\n[' +
+          '{"title":"Typed work","description":"Implement TypeScript","assignee":"worker","requires":{"requiredCapabilities":["typescript"]}}' +
+          ']\n```',
+      ]
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const planningTeam = oma.createTeam('planning', teamCfg([
+        { ...agentConfig('worker'), capabilities: ['typescript'] },
+      ]))
+
+      const planOnlyResult = await oma.runTeam(planningTeam, complexGoal, { planOnly: true })
+      const plan = oma.createPlanArtifact(planOnlyResult)
+      expect(plan.tasks[0]?.requires).toEqual({
+        requiredCapabilities: ['typescript'],
+      })
+
+      capturedPrompts = []
+      const replayTeam = oma.createTeam('replay', teamCfg([
+        agentConfig('worker'),
+      ]))
+      await expect(oma.runFromPlan(replayTeam, plan)).rejects.toMatchObject({
+        code: 'INVALID_TASK_REQUIREMENTS',
+      })
+      expect(capturedPrompts).toEqual([])
     })
   })
 

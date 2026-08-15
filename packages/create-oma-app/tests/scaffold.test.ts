@@ -24,6 +24,7 @@ describe('scaffold', () => {
     expect(Object.keys(pkg.dependencies)).toEqual(['@open-multi-agent/core'])
     expect(Object.keys(pkg.devDependencies)).toEqual(['tsx'])
     expect(pkg.name).toBe('my-demo') // stamped + sanitized
+    expect(pkg.engines).toEqual({ node: '>=20.0.0' })
   })
 
   it.each(['pr-review', 'security'] as const)('generates the %s production template with zod', (templateId) => {
@@ -31,6 +32,7 @@ describe('scaffold', () => {
     scaffold({ targetDir: target, projectName: templateId, templateId })
     const pkg = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
     expect(Object.keys(pkg.dependencies)).toEqual(['@open-multi-agent/core', 'zod'])
+    expect(pkg.engines).toEqual({ node: '>=20.0.0' })
     expect(readFileSync(join(target, 'README.md'), 'utf8')).toMatch(templateId === 'pr-review' ? /PR Review Agent/ : /Security Analysis Agent/)
   })
 

@@ -6,7 +6,7 @@ time. There is no stop-the-world rewrite.
 
 The copyable snippets on this page are mirrored by the compile-only
 [`public-snippets.ts`](../packages/core/examples/integrations/observability-v2/public-snippets.ts)
-fixture and typechecked in the Node 18/20/22 test matrix.
+fixture and typechecked in the Node 20/22/24 test matrix.
 
 ## Compatibility contract
 

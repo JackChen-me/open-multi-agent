@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { TokenBudgetExceededError, InvalidMessageError, LLMCallTimeoutError } from '../src/errors.js'
+import {
+  TokenBudgetExceededError,
+  InvalidMessageError,
+  LLMCallTimeoutError,
+  StructuredOutputValidationError,
+  UnsupportedToolCallError,
+  UnsupportedToolResultContentError,
+} from '../src/errors.js'
 
 describe('TokenBudgetExceededError', () => {
   it('sets .name to TokenBudgetExceededError', () => {
@@ -59,6 +66,44 @@ describe('InvalidMessageError', () => {
   it('is an instance of Error (extends built-in Error)', () => {
     const err = new InvalidMessageError('test')
     expect(err).toBeInstanceOf(Error)
+  })
+})
+
+describe('StructuredOutputValidationError', () => {
+  it('exposes a stable code, message, and validation cause', () => {
+    const cause = new Error('schema mismatch')
+    const err = new StructuredOutputValidationError(cause)
+    expect(err.name).toBe('StructuredOutputValidationError')
+    expect(err.code).toBe('STRUCTURED_OUTPUT_VALIDATION_FAILED')
+    expect(err.message).toBe('Structured output validation failed after retry.')
+    expect(err.cause).toBe(cause)
+    expect(err).toBeInstanceOf(Error)
+  })
+})
+
+describe('UnsupportedToolCallError', () => {
+  it('identifies the provider and unsupported tool type', () => {
+    const err = new UnsupportedToolCallError('openai', 'custom')
+    expect(err.name).toBe('UnsupportedToolCallError')
+    expect(err.code).toBe('UNSUPPORTED_TOOL_CALL')
+    expect(err.provider).toBe('openai')
+    expect(err.toolType).toBe('custom')
+    expect(err.message).toBe('openai returned unsupported tool-call type "custom"')
+  })
+})
+
+describe('UnsupportedToolResultContentError', () => {
+  it('identifies the provider and unmappable content type', () => {
+    const err = new UnsupportedToolResultContentError(
+      'Anthropic Messages',
+      'file:text/plain',
+      'only PDF files are supported',
+    )
+    expect(err.name).toBe('UnsupportedToolResultContentError')
+    expect(err.code).toBe('UNSUPPORTED_TOOL_RESULT_CONTENT')
+    expect(err.provider).toBe('Anthropic Messages')
+    expect(err.contentType).toBe('file:text/plain')
+    expect(err.message).toContain('only PDF files are supported')
   })
 })
 

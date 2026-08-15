@@ -20,11 +20,8 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.6-blue" alt="TypeScript"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/stargazers"><img src="https://img.shields.io/github/stars/open-multi-agent/open-multi-agent" alt="GitHub stars"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/network/members"><img src="https://img.shields.io/github/forks/open-multi-agent/open-multi-agent" alt="GitHub forks"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
 <p align="center">
@@ -36,8 +33,8 @@
 <p align="center">
   <a href="https://open-multi-agent.com">Website</a> ·
   <a href="https://open-multi-agent.com/getting-started/introduction/">Docs</a> ·
-  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a> ·
-  <a href="https://github.com/open-multi-agent/open-multi-agent/discussions">Discussions</a>
+  <a href="./packages/core/examples/">Examples</a> ·
+  <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a>
 </p>
 
 <p align="center">
@@ -46,18 +43,12 @@
 
 <br />
 
-`open-multi-agent` is an AI agent orchestration framework for TypeScript backends that drops into any Node.js app. It turns one goal into an inspectable task DAG, runs it across a team of agents, and synthesizes the result, all inside your own environment. Run it local, offline, or air-gapped, mixing cloud and local models on one team.
-
-Use OMA when the plan should adapt at runtime, but execution still needs deterministic scheduling, explicit controls, and a trace you can inspect or replay.
-
-## Why OMA
-
-- **Plan from the goal.** A coordinator decomposes the request into a task DAG at runtime (auto work-division) instead of a hand-wired graph.
-- **Wrap agents in determinism.** Preview and approve the plan, freeze and replay it, and verify with multi-agent consensus: deterministic control around non-deterministic agents.
-- **Run in your own environment.** Local, offline, air-gapped, or your own servers, on your own credentials. Tools are default-deny and secrets auto-redacted, and three runtime dependencies keep it light enough for locked-down infrastructure; no cloud required.
-- **Mix any model.** Cloud (Claude, GPT), local open models, and natively integrated Chinese providers on one team, with a fallback parser for local models that emit tool calls as text.
+`open-multi-agent` is an AI agent orchestration framework for TypeScript backends that drops into any Node.js app. It runs **dynamic workflows**: a coordinator turns one goal into a task DAG at runtime, a deterministic scheduler executes it across the team, and the whole run stays data you can inspect, approve, and replay. The dashboard above is the built-in offline Run Viewer replaying a real run.
 
 ## Get started
+
+Requires Node.js 20 or newer. For production, use a currently maintained
+Node.js LTS release.
 
 Scaffold a PR review agent, security analysis agent, or teaching DAG:
 
@@ -65,7 +56,7 @@ Scaffold a PR review agent, security analysis agent, or teaching DAG:
 npm create oma-app@latest my-oma
 ```
 
-In an interactive terminal, that one command selects a starter and runtime, installs dependencies, and runs a deterministic local demo. The demo needs no API key and makes no model request: scripted model responses drive the real OMA scheduler, result aggregation, and offline dashboard. Use `--no-install` to generate files only, or `--no-run` to install without starting the demo.
+In an interactive terminal, that one command selects a starter and runtime, installs dependencies, and runs a deterministic local demo. The demo needs no API key and makes no model request: scripted model responses drive the real OMA scheduler, result aggregation, and offline dashboard. The [Core package guide](packages/core/README.md#quick-start) covers the flags and runtime choices.
 
 Or add OMA to an existing backend:
 
@@ -73,22 +64,66 @@ Or add OMA to an existing backend:
 npm install @open-multi-agent/core
 ```
 
-The [Core package guide](packages/core/README.md) contains the minimal example, three execution modes, provider setup, and production checklist. Browse the [example index](packages/core/examples/README.md) for runnable workflows.
+```typescript
+import { OpenMultiAgent } from '@open-multi-agent/core'
+
+const model = process.env.OMA_MODEL ?? 'gpt-5.4'
+
+const oma = new OpenMultiAgent({ defaultProvider: 'openai', defaultModel: model })
+
+const team = oma.createTeam('research-team', {
+  name: 'research-team',
+  agents: [
+    { name: 'researcher', systemPrompt: 'Find the relevant facts.' },
+    { name: 'analyst', systemPrompt: 'Compare evidence and identify tradeoffs.' },
+  ],
+  sharedMemory: true,
+})
+
+const result = await oma.runTeam(team, 'Compare three approaches and recommend one.')
+
+// Nothing above declares a task graph. The coordinator planned one at runtime,
+// and the finished run is data you can read back.
+for (const task of result.tasks ?? []) {
+  console.log(`[${task.status}] ${task.title} → ${task.assignee ?? 'unassigned'}`, task.dependsOn)
+}
+
+console.log(result.agentResults.get('coordinator')?.output)
+console.log(result.totalTokenUsage)
+```
+
+Set `OPENAI_API_KEY` to run this example. [Providers](docs/providers.md) covers other hosted models, local servers, OpenAI-compatible endpoints, and AI SDK providers.
+
+`runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](packages/core/examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
+
+## Why OMA
+
+OMA combines dynamic orchestration with the control, evidence, and recovery paths needed to move multi-agent systems from prototype to production.
+
+- **Dynamic orchestration.** Describe the goal and let the coordinator build the task DAG, assign work, and synthesize the result at runtime. There is no hand-wired graph to maintain.
+- **Controlled execution.** Preview, approve, or durably suspend plans, task dispatches, and tool calls; freeze approved plans for replay. Declare required roles and order when topology cannot drift, and verify outputs with multi-agent consensus.
+- **Reliability.** Resume interrupted runs from checkpoints, or opt into append-only plan repair at task outcome barriers. Retries, timeouts, loop detection, and token and cost budgets keep execution bounded.
+- **Observability and evaluation.** Follow each run through stable identity, execution receipts, and traces. Replay the task DAG and span waterfall in the offline Run Viewer, or export through the optional OpenTelemetry adapter. The same records feed versioned EvalSets, offline reports, CI gates, and production sampling.
+- **Safety and privacy.** Tools are default-deny, individual calls are gated, and explicit privacy controls apply to telemetry and persisted state.
+- **Open runtime.** Process and ACP backends put Claude Code, Gemini CLI, and Codex on the same task DAG, shared memory, and budgets as LLM agents. Mix cloud and local models, natively integrated Chinese providers, OpenAI-compatible endpoints, and AI SDK providers, with a fallback parser for local models that emit tool calls as text. Run on your own infrastructure and credentials, locally, offline, or air-gapped.
 
 ## Built with OMA
 
 `open-multi-agent` launched 2026-04-01 under MIT. Known users and integrations to date:
 
-- **[temodar-agent](https://github.com/xeloxa/temodar-agent)** (~60 stars). WordPress security analysis platform by [Ali Sünbül](https://github.com/xeloxa). Uses our built-in tools (`bash`, `file_*`, `grep`) directly inside a Docker runtime. Confirmed production use.
-- **[Mark Galyan](https://github.com/apollo-mg)** runs OMA fully offline on local quantized models, using the Coordinator and context compaction to keep autonomous agent loops alive under tight VRAM limits. Contributor since the framework's first month, across compaction, sampling, and tool-call parsing.
-- **[PR-Copilot](https://github.com/kidoom/PR-Copilot)**. AI pull-request review assistant by [kidoom](https://github.com/kidoom). Runs an OMA review team (coordinator + scoped reviewer agents), defines repo-context tools with `defineTool`, and adds a custom `ContextStrategy` for token-aware PR-diff compression. Public code on `@open-multi-agent/core`.
-- **[StuFlow](https://github.com/znc15/StuFlow)** by [znc15](https://github.com/znc15). Terminal AI coding assistant on OMA's orchestration core: builds a team and drives it through `runAgent` / `runTasks` / `runTeam` with a custom `RunTeamOptions` coordinator, paired with DeepSeek. Public code on `@open-multi-agent/core`.
+- **[temodar-agent](https://github.com/xeloxa/temodar-agent)** by [Ali Sünbül](https://github.com/xeloxa). WordPress security analysis platform running OMA's built-in tools (`bash`, `file_*`, `grep`) inside a Docker runtime. Confirmed production use.
+- **[Mark Galyan](https://github.com/apollo-mg)** runs OMA fully offline on local quantized models, using the coordinator and context compaction to keep autonomous agent loops alive under tight VRAM limits. Contributor since the framework's first month.
+- **[PR-Copilot](https://github.com/kidoom/PR-Copilot)** by [kidoom](https://github.com/kidoom). AI pull-request review assistant running an OMA review team, with `defineTool` repo-context tools and a custom `ContextStrategy` for token-aware diff compression.
+- **[StuFlow](https://github.com/znc15/StuFlow)** by [znc15](https://github.com/znc15). Terminal AI coding assistant on OMA's orchestration core, driving `runAgent` / `runTasks` / `runTeam` with a custom coordinator, paired with DeepSeek.
+- **[Reports to Charts Studio](https://github.com/NARNIX0/Evident-Project)**. Turns documents and research tables into slide-ready charts, using a five-role extraction council with structured outputs and deterministic validation.
 
 **Integrations**
 
 - **[Engram](https://www.engram-memory.com)**: "Git for AI memory." Syncs knowledge across agents instantly and flags conflicts. ([repo](https://github.com/Agentscreator/engram-memory), ~80 stars)
 - **[@agentsonar/oma](https://github.com/agentsonar/agentsonar-oma)**: Sidecar detecting cross-run delegation cycles, repetition, and rate bursts.
 - **[CodingScaffold](https://github.com/JRS1986/CodingScaffold)**: Agentic-coding scaffold that lists OMA as an optional orchestration backend, with a `runTeam` workflow template.
+- **[Bilig WorkPaper](https://github.com/proompteng/bilig)**: Formula-workbook MCP server with a reciprocal OMA integration for editing inputs, recalculating formulas, verifying readback, and persisting WorkPaper JSON.
+- **[baize-oma](https://github.com/timywel/baize-oma)**: HTTP adapter exposing OMA `runAgent()` and `runTeam()` as Baize slot capabilities.
 
 **Provider sponsors**
 
@@ -100,7 +135,7 @@ Using `open-multi-agent` in production or a side project? [Open a discussion](ht
 
 ## When OMA fits
 
-OMA is designed for TypeScript teams that want the task graph to emerge from the goal at runtime. The coordinator creates the plan; the scheduler executes it as inspectable data.
+OMA is designed for TypeScript teams that want the task graph to emerge from the goal at runtime.
 
 Choose a graph-first framework when the workflow must be authored node by node. Use an LLM toolkit alone when one agent call is enough. OMA sits at the orchestration layer when several agents, dependencies, approvals, or recovery steps must work together.
 
@@ -110,21 +145,22 @@ For a named head-to-head against LangGraph, Mastra, CrewAI, the Vercel AI SDK, a
 
 - **[`@open-multi-agent/core`](packages/core/README.md)**: Orchestration runtime, tools, memory, checkpoints, traces, CLI, and offline Run Viewer.
 - **[`@open-multi-agent/otel`](packages/otel/README.md)**: Optional enterprise integration for production teams with a centralized OpenTelemetry stack.
+- **[`create-oma-app`](packages/create-oma-app/README.md)**: Scaffolder behind `npm create oma-app`; starter templates with a no-key local demo.
 
 Core users can store traces locally and inspect them with the offline Run Viewer. Install the OTel package only when OMA traces should appear in the same monitoring system as the rest of your application.
 
 ## Commercial support
 
-Need to embed agent capabilities in an existing product or business system? Email [jack@yuanasi.com](mailto:jack@yuanasi.com) for discovery and delivery support.
+Need to embed agent capabilities in an existing product or business system? We help teams scope AI use cases, embed agent capabilities, and support delivery. Email [jack@yuanasi.com](mailto:jack@yuanasi.com).
 
 ## Documentation
 
 | Goal | Start here |
 |---|---|
 | Install and run | [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) |
-| Configure models and tools | [Providers](docs/providers.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
-| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Context management](docs/context-management.md) |
-| Control orchestration | [Consensus](docs/consensus.md) · [Model routing](docs/model-routing.md) · [Plan replay](docs/plan-replay.md) |
+| Configure models and tools | [Providers](docs/providers.md) · [LLM egress policy](docs/egress-policy.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
+| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Durable approvals](docs/durable-approvals.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
+| Control orchestration | [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) |
 
 ## Contributing
 

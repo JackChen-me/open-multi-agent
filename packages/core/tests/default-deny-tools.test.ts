@@ -211,7 +211,9 @@ describe('default-deny: runTeam short-circuit', () => {
       text('finished'),
     ])
 
-    const oma = new OpenMultiAgent({})
+    const oma = new OpenMultiAgent({
+      executionRouting: { strategy: 'deterministic' },
+    })
     const team = oma.createTeam('t', {
       name: 't',
       agents: [{ name: 'solo', model: 'mock-model', adapter }],
@@ -235,7 +237,10 @@ describe('default-deny: runTeam short-circuit', () => {
       text('finished'),
     ])
 
-    const oma = new OpenMultiAgent({ defaultToolPreset: 'full' })
+    const oma = new OpenMultiAgent({
+      defaultToolPreset: 'full',
+      executionRouting: { strategy: 'deterministic' },
+    })
     const team = oma.createTeam('t', {
       name: 't',
       agents: [{ name: 'solo', model: 'mock-model', adapter }],
@@ -259,7 +264,11 @@ describe('default-deny: runTeam short-circuit', () => {
     ])
     const onToolCall = vi.fn(async () => ({ action: 'deny' as const, reason: 'blocked by policy' }))
 
-    const oma = new OpenMultiAgent({ defaultToolPreset: 'full', onToolCall })
+    const oma = new OpenMultiAgent({
+      defaultToolPreset: 'full',
+      executionRouting: { strategy: 'deterministic' },
+      onToolCall,
+    })
     const team = oma.createTeam('t', {
       name: 't',
       agents: [{ name: 'solo', model: 'mock-model', adapter }],
@@ -288,7 +297,10 @@ describe('default-deny: runTeam short-circuit', () => {
 
     // Default would grant bash, but the agent narrows itself to readonly,
     // which excludes bash.
-    const oma = new OpenMultiAgent({ defaultToolPreset: 'full' })
+    const oma = new OpenMultiAgent({
+      defaultToolPreset: 'full',
+      executionRouting: { strategy: 'deterministic' },
+    })
     const team = oma.createTeam('t', {
       name: 't',
       agents: [{ name: 'solo', model: 'mock-model', adapter, toolPreset: 'readonly' }],

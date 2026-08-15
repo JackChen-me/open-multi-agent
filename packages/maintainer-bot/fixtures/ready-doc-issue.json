@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "eventId": "fixture-ready-doc-001",
+  "receivedAt": "2026-08-10T00:00:00.000Z",
+  "baseSha": "$HEAD",
+  "issue": {
+    "repository": "open-multi-agent/open-multi-agent",
+    "number": 9001,
+    "title": "Clarify the maintainer-bot replay fixture greeting",
+    "body": "The fixture greeting should document its deterministic punctuation behavior.",
+    "state": "open",
+    "author": "fixture-author",
+    "updatedAt": "2026-08-10T00:00:00.000Z",
+    "labels": ["agent-ready"],
+    "comments": [],
+    "kind": "test",
+    "problem": "The replay fixture does not explain that its greeting always ends with an exclamation mark.",
+    "reproductionSteps": [
+      "Read packages/maintainer-bot/fixtures/replay-target.ts and observe the undocumented punctuation behavior."
+    ],
+    "currentBehavior": "The function returns deterministic punctuation without an explanatory comment.",
+    "expectedBehavior": "The fixture source explains the deterministic exclamation-mark behavior without changing runtime output.",
+    "acceptanceCriteria": [
+      "A source comment states that replayGreeting always ends with an exclamation mark.",
+      "The replayGreeting return value remains byte-for-byte unchanged."
+    ],
+    "targetWorkspaces": ["@open-multi-agent/maintainer-bot"],
+    "targetPaths": ["packages/maintainer-bot/fixtures/replay-target.ts"],
+    "outOfScope": ["Do not change production maintainer-bot behavior or any GitHub workflow."],
+    "openDecisions": [],
+    "riskFlags": [],
+    "linkedPullRequests": [],
+    "blockers": []
+  },
+  "authorization": {
+    "kind": "label",
+    "label": "agent-ready",
+    "grantedBy": "fixture-maintainer",
+    "grantedByPermission": "write",
+    "issueRevision": "$ISSUE_REVISION",
+    "baseSha": "$HEAD",
+    "grantedAt": "2026-08-10T00:00:01.000Z"
+  }
+}

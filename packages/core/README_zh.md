@@ -46,17 +46,18 @@
 
 <br />
 
-`@open-multi-agent/core` 是面向 TypeScript 后端的 OMA 编排运行时。你可以交给它一个 Agent、一张显式任务图，或一个由 Coordinator 在运行时拆解的目标。
+`@open-multi-agent/core` 是面向 TypeScript 后端的 OMA 编排运行时。你可以交给它一个 Agent、一张显式任务图，或一条由 Coordinator 在运行时从目标生成的**动态工作流（dynamic workflow）**。
 
 运行时负责依赖调度、并行执行、Agent 间上下文共享和可审查结果输出。产品定位与已知用户见[项目首页](https://github.com/open-multi-agent/open-multi-agent/blob/main/README_zh.md)。
 
 ## 目录
 
-[快速开始](#快速开始) · [执行模式](#执行模式) · [核心能力](#核心能力) · [架构](#架构) · [示例](#示例) · [Provider](#provider) · [生产配置](#生产配置) · [文档](#文档)
+[快速开始](#快速开始) · [执行模式](#执行模式) · [调度](#调度) · [核心能力](#核心能力) · [架构](#架构) · [示例](#示例) · [Provider](#provider) · [生产配置](#生产配置) · [文档](#文档)
 
 ## 快速开始
 
-要求 Node.js 18 或更高版本。一条命令初始化并运行 starter：
+要求 Node.js 20 或更高版本。生产环境请使用仍处于维护期的 Node.js LTS 版本。
+一条命令初始化并运行 starter：
 
 ```bash
 npm create oma-app@latest my-oma
@@ -109,17 +110,95 @@ console.log(result.agentResults.get('coordinator')?.output)
 
 用 `planOnly` 在执行前审查生成的任务图，再通过 `createPlanArtifact()` 和 `runFromPlan()` 回放。当一个答案需要额外把关时，`runConsensus()` 提供 proposer→judge 校验循环。
 
+### 结构化单 Agent 输入
+
+`Agent.run()`、`Agent.stream()` 与 `OpenMultiAgent.runAgent()` 除了原有字符串形式，也接受完整的 `LLMMessage[]`。应用需要传入自有对话历史或图片等内容块时，可使用消息形式：
+
+```typescript
+import { OpenMultiAgent, type LLMMessage } from '@open-multi-agent/core'
+
+const messages: LLMMessage[] = [{
+  role: 'user',
+  content: [
+    { type: 'text', text: '描述这张图片。' },
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: imageBase64 },
+    },
+  ],
+}]
+
+const result = await new OpenMultiAgent().runAgent(
+  { name: 'vision', model: 'claude-sonnet-4-6' },
+  messages,
+)
+```
+
+持久化对话的 `Agent.prompt()` 接受字符串或单个 `ContentBlock[]` 用户轮次；更早的轮次通过 `AgentConfig.history` 恢复。结构化输入会经过校验和防御性复制。`beforeRun` 同时收到完整的 `messages` 与向后兼容的最新用户文本 `prompt`。Process 和 ACP backend 仍只接受字符串，遇到结构化参数会明确拒绝，不会静默丢弃历史或图片。复制、hook、progress/评测与外部 backend 的完整语义见[结构化 Agent 输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)，可运行示例见 [`basics/structured-input`](examples/basics/structured-input.ts)。
+
+自动 `runTeam()` 默认使用确定性路由，不会产生额外模型调用。显式设置 `executionRouting: { strategy: 'hybrid' }` 才会启用混合语义路由：`DeterministicRouter` 直接保留 Team 决策，只把 Single 候选交给一次无工具调用的 `TaskProfiler`；随后由确定性 Policy 决定保持 Single、升级为 Team，或要求调用方显式声明治理约束。有效的自定义 `executionRouter` 决策、显式 `mode` 和治理声明仍具有更高优先级。自动路由结果通过 `routingDecision` 暴露实际决定；运行过 Profiler 时，还会提供 `semanticRoutingAssessment`。详见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)。Execution Routing 选择 Single 或 Team，[Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)选择该拓扑内使用的模型。
+
+启用 Hybrid 后，Profiler 会把目标文本发送给显式配置的路由 adapter；若未配置，则依次使用 Coordinator adapter 和 Orchestrator 的默认 Provider。最后一种回退即使在每个 worker 都有独立 adapter 时也可能产生默认 Provider 调用。若目标不能跨越该 Provider 边界，请配置 `executionRouting.adapter` 或使用 deterministic 策略。
+
+当应用必须强制使用具名的独立角色时，直接声明治理意图，而不是依赖目标里的措辞：
+
+```typescript
+const governed = await orchestrator.runTeam(team, 'Review the evidence and assess the risk.', {
+  governanceIntent: 'required',
+  requiredRoles: ['researcher', 'analyst'],
+  requiredOrder: ['researcher', 'analyst'],
+})
+
+if (governed.governanceConclusion !== 'satisfied') {
+  throw new Error('Required governance was not satisfied by the executed topology.')
+}
+```
+
+`required` 与 `preferred` 都会绕过自动拆解和简单目标短路。OMA 为每个声明的 roster 名称创建一个任务、指派给该 Agent，并按 `requiredOrder` 串联任务；依赖输出会传递给下游角色。拓扑只来自这些结构化字段，因此不同语言的等价目标会得到相同的角色与顺序。`none` 或省略 `governanceIntent` 时保持现有的自动 `runTeam()` 行为。
+
+执行结束后，`governanceConclusion` 的值为 `satisfied`、`unsatisfied` 或 `not-applicable`。对治理有要求的应用必须将它与 `success` 分开检查：该结论来自结构化执行回执，而不是模型回答中的角色名称或批准措辞。详见[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam)。
+
+## 调度
+
+在 `OpenMultiAgent` 上设置 `schedulingStrategy`，可以选择如何把未分配的任务映射给 Agent。该配置同时适用于 Coordinator 生成的 `runTeam()` 计划，以及显式或恢复的任务队列。已有显式 `assignee` 的任务会保留原分配。
+
+任务 DAG 按事件驱动执行：下游任务在依赖满足时立即启动，不等待同一 ready
+set 中无关的任务；依赖输出以任务级结果和经校验的结构化交接传给下游任务。
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  schedulingStrategy: 'composite',
+  schedulingWeights: { fit: 0.7, load: 0.3 },
+})
+```
+
+| 策略 | 分配行为 | 适用场景 |
+|------|----------|----------|
+| `dependency-first`（默认） | 优先分配能解锁最多下游工作的任务，并在合格 Agent 中轮转选择 | 任务图存在明确依赖关系 |
+| `round-robin` | 按队列顺序在合格 Agent 中轮转分配 | Agent 能力可以互换 |
+| `least-busy` | 选择当前活跃任务或本批新分配任务最少的合格 Agent | 任务耗时差异较大，需要负载均衡 |
+| `capability-match` | 先过滤显式任务要求，再优先匹配声明的能力标签，最后使用兼容的关键词亲和度 | 任务或 Agent 声明了有区分度的要求/能力 |
+| `composite` | 按阻塞的下游任务数排列任务，再在合格 Agent 中综合选择匹配度与可用容量最优者 | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
+
+Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
+任务可通过 `requires` 声明硬约束。任何调度策略无法满足这些约束时，都会在
+worker 执行前失败。Coordinator 计划默认也会在引用
+roster 之外的 Agent 时提前失败；仅在需要保留旧的自动重新分配行为时设置
+`strictAssignees: false`。权重语义、负载归一化、
+`NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
+见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
+
 ## 核心能力
 
 | 能力 | 说明 |
 |------|------|
-| **动态编排** | 运行时目标拆解、依赖调度、并行分支、可配置分配、可选的 worker 团队上下文注入（`revealCoordinator`）和最终合成。 |
+| **动态编排** | 运行时目标拆解、依赖调度、并行分支、可配置分配、任务级结果与交接、可选的 worker 团队上下文注入（`revealCoordinator`）和最终合成。 |
 | **模型与推理** | 混用内置、OpenAI 兼容、AI SDK 或本地模型；单个 `thinking` 配置映射到各 provider 的原生推理设置，按阶段路由，并仅在显式开启时保留推理内容。 |
-| **工具与委派** | 内置工具默认拒绝；自定义工具、MCP 和受保护的 `delegate_to_agent` 按需开启。 |
-| **可控输出** | 按 Agent 流式输出、Zod 校验、计划/任务轮次审批、用 `beforeRun` / `afterRun` 改写提示词或后处理结果，以及 `AbortSignal` 取消。 |
+| **工具与委派** | 内置工具默认拒绝；自定义工具、MCP 和受保护的 `delegate_to_agent` 按需开启；后果性工具出现在未声明治理的运行中时会被标记以供确认。 |
+| **可控输出** | 发送文本或结构化单 Agent 输入，按 Agent 流式输出、Zod 校验，可审批或持久化挂起计划、任务轮次、单任务派发与工具调用，用 `beforeRun` / `afterRun` 改写消息/提示词或后处理结果，以及 `AbortSignal` 取消。 |
 | **评测** | 对 EvalSet 做版本管理，运行参考 scorer，用离线报告把关 CI，持久化结果，或尽力而为地抽样生产运行。 |
 | **记忆与恢复** | 共享记忆可插拔；checkpoint 可在不重复已完成任务的前提下恢复运行。 |
-| **可观测性** | 无需托管服务即可使用稳定运行标识、trace、脱敏、TraceStore 和离线 DAG/Waterfall Viewer。 |
+| **可观测性** | 无需托管服务即可使用稳定运行标识、trace、执行回执、脱敏、TraceStore 和离线 DAG/Waterfall Viewer。 |
 | **外部 Agent** | ACP 和进程后端让编码 CLI 加入团队，OMA 继续管理调度、记忆和预算。 |
 
 ## 架构
@@ -133,10 +212,11 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
                     |                       `-- 工具 / 外部后端
                     |
                     |-- SharedMemory / checkpoint
-                    `-- TraceRecord -> TraceStore / Run Viewer / OTel
+                    |-- TraceRecord -> TraceStore / Run Viewer / OTel
+                    `-- 结果 -> 评测（离线 / 抽样，仅观察）
 ```
 
-Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。详细契约见下方各子系统指南。
+默认情况下，Coordinator 只负责产生一次计划，Scheduler 负责执行顺序。当任务结果需要修改任务图中尚未执行的部分时，应用可以选择启用仅追加式自适应恢复。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。评测只观察已完成的结果，不会改变它们。详细契约见下方各子系统指南。
 
 ## 示例
 
@@ -144,15 +224,18 @@ Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过�
 
 | 目标 | 示例 |
 |---|---|
+| 发送图片内容块与应用自有历史 | [`basics/structured-input`](examples/basics/structured-input.ts) |
 | 查看 Coordinator 规划 | [`basics/team-collaboration`](examples/basics/team-collaboration.ts) |
 | 构建显式 DAG | [`cookbook/contract-review-dag`](examples/cookbook/contract-review-dag.ts) |
+| 观察事件驱动 DAG 派发 | [`patterns/event-driven-dag`](examples/patterns/event-driven-dag.ts) |
 | 校验结构化输出 | [`patterns/structured-output`](examples/patterns/structured-output.ts) |
 | Agent 之间委派 | [`patterns/agent-handoff`](examples/patterns/agent-handoff.ts) |
 | 回放固定计划 | [`patterns/plan-replay`](examples/patterns/plan-replay.ts) |
+| 挂起并恢复审批 | [`patterns/durable-approval`](examples/patterns/durable-approval.ts) |
 | 嵌入真实后端 | [`integrations/express-customer-support`](examples/integrations/express-customer-support/) |
 | 导出离线 trace Viewer | [`integrations/observability-v2/run-viewer`](examples/integrations/observability-v2/run-viewer.ts) |
 
-[示例索引](examples/README.md)收录全部 basics、cookbook 流程、patterns、Provider 和 integrations。
+[示例索引](examples/README.md)收录 50+ 个可运行示例，覆盖 basics、cookbook 流程、patterns、Provider 和 integrations。
 
 ## Provider
 
@@ -182,17 +265,17 @@ Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过�
 | 限定工作量 | `maxTurns`、`timeoutMs`、`callTimeoutMs`、`contextStrategy`、`loopDetection` |
 | 控制成本 | `maxTokenBudget`；`maxCostBudget` + 应用自有 `estimateCost` |
 | 限制工具 | `tools` / `toolPreset`、`cwd` / `defaultCwd`、工具输出上限 |
-| 故障恢复 | 任务重试、checkpoint 与 `restore()` |
-| 人工把关 | `planOnly`、`onPlanReady` 与审批回调 |
-| 统一观测 | Trace sink、TraceStore、Run Viewer，或可选 OTel adapter |
+| 故障恢复 | 任务重试、checkpoint、`restore()` 与可选的自适应计划修复 |
+| 人工把关 | `planOnly`、同步审批回调或[持久化审批 gate](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md) |
+| 统一观测 | Trace sink、TraceStore、执行回执、Run Viewer，或可选 OTel adapter |
 
 预算检查发生在 turn 和任务边界，因此单次运行最多可能超出一个模型 turn，不是分厘精确的截停。`estimateCost` 收到每次调用的 token 用量，以及 agent、生效的 `model`、`provider`、阶段和 `taskId`；价格表由应用自己维护。
 
-内置工具默认拒绝，且每个工具结果都会发送给你的模型 provider，读取与执行权限应审慎授予。文件工具受配置的 `cwd` 限制；`bash` 一旦授权便不受该沙箱约束。trace、shell 输出和 Viewer payload 默认自动脱敏。
+内置工具默认拒绝，且每个对模型可见的工具结果都会发送给你的模型 provider，读取与执行权限应审慎授予。工具可通过 `modelOutput` 将应用自有数据与发送给模型的文本、图片或文件内容分开；完整契约见[工具配置指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#rich-image-and-file-results)。文件工具受配置的 `cwd` 限制；`bash` 一旦授权便不受该沙箱约束。trace、shell 输出和 Viewer payload 默认自动脱敏，但结果消息与 checkpoint 属于各自独立的持久化边界。
 
 ### 可观测性
 
-Core 已提供运行标识、trace sink、可查询的内存/文件存储和离线 Run Viewer，足以完成本地排障、审计留档与运行后分析，无需安装 OpenTelemetry。
+Core 已提供运行标识、trace sink、执行回执、可查询的内存/文件存储和离线 Run Viewer，足以完成本地排障、审计留档与运行后分析，无需安装 OpenTelemetry。
 
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) 是面向已有集中式 OpenTelemetry 平台团队的**可选企业集成**。它把 OMA trace 转成标准 OTel span，让多 agent 运行接入企业统一监控、告警和故障处理流程。应用负责 provider 及其生命周期；telemetry 故障不会改变业务运行结果。
 
@@ -202,8 +285,8 @@ Core 已提供运行标识、trace sink、可查询的内存/文件存储和离�
 
 | 主题 | 指南 |
 |---|---|
-| 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
+| 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[结构化输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
+| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[持久化审批](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | 控制流程 | [计划预览与回放](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md)、[共享记忆](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md)、[外部 agent](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产示例](examples/production/README.md) |
 
@@ -239,7 +322,7 @@ Core 已提供运行标识、trace sink、可查询的内存/文件存储和离�
 - [@mvanhorn](https://github.com/mvanhorn)（checkpoint & resume）
 - [@lesbass](https://github.com/lesbass)（`TeamRunResult` 运行级 metrics 汇总）
 - [@tlysanhuo](https://github.com/tlysanhuo)（trace span 父级链接）
-- [@LambIessz](https://github.com/LambIessz)（orchestrator 成本预算、MessageBus 持久化进 checkpoint）
+- [@LambIessz](https://github.com/LambIessz)（orchestrator 成本预算、MessageBus 持久化进 checkpoint、可重试路由回退）
 - [@Bobuyoucrypto](https://github.com/Bobuyoucrypto)（Windows bash 超时杀进程树）
 
 **Provider 集成**

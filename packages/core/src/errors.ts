@@ -2,6 +2,25 @@
  * @fileoverview Framework-specific error classes.
  */
 
+import type { SemanticRoutingAssessment, TaskRequirementIssue } from './types.js'
+
+/**
+ * Raised before task execution when a task has no eligible agent or its
+ * explicit assignee does not satisfy the task's hard requirements.
+ */
+export class InvalidTaskRequirementsError extends Error {
+  readonly code = 'INVALID_TASK_REQUIREMENTS'
+
+  constructor(readonly issues: readonly TaskRequirementIssue[]) {
+    super(
+      `Task requirements are unsatisfied: ${issues
+        .map((issue) => `${issue.code} for "${issue.taskTitle}"`)
+        .join(', ')}.`,
+    )
+    this.name = 'InvalidTaskRequirementsError'
+  }
+}
+
 /**
  * Raised when an agent or orchestrator run exceeds its configured token budget.
  */
@@ -61,11 +80,56 @@ export class LLMCallTimeoutError extends Error {
   }
 }
 
+/** Raised when routing infrastructure exceeds its configured deadline. */
+export class RoutingTimeoutError extends Error {
+  readonly code = 'ROUTING_TIMEOUT'
+
+  constructor(
+    readonly timeoutMs: number,
+    readonly stage: 'router' | 'profiler',
+  ) {
+    super(`Execution routing ${stage} exceeded its timeout of ${timeoutMs}ms`)
+    this.name = 'RoutingTimeoutError'
+  }
+}
+
+/** Raised when the semantic profiler cannot produce a valid task profile. */
+export class RoutingProfilerFailedError extends Error {
+  readonly code = 'ROUTING_PROFILER_FAILED'
+
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message, cause !== undefined ? { cause } : undefined)
+    this.name = 'RoutingProfilerFailedError'
+  }
+}
+
 /**
- * Raised when a message list passed to an adapter violates the
- * {@link LLMMessage}[] contract (e.g. a `content` that isn't a `ContentBlock[]`).
- * Surfaced at the adapter entry so the violation fails loudly instead of
- * crashing deep in provider-specific message conversion.
+ * Raised before execution when inferred high-risk semantics need an explicit
+ * governance topology rather than an automatic model-selected route.
+ */
+export class RoutingDeclarationRequiredError extends Error {
+  readonly code = 'ROUTING_DECLARATION_REQUIRED'
+
+  constructor(
+    readonly reasons: readonly string[],
+    readonly assessment?: SemanticRoutingAssessment,
+  ) {
+    super(
+      'Hybrid execution routing requires an explicit governance declaration: '
+      + reasons.join('; '),
+    )
+    this.name = 'RoutingDeclarationRequiredError'
+  }
+}
+
+/**
+ * Raised when structured input passed to a public Agent API or adapter violates
+ * the {@link LLMMessage}[] contract (e.g. a `content` that isn't a
+ * `ContentBlock[]`), cannot be copied safely, or crosses a text-only backend
+ * boundary. Surfaced before provider-specific conversion or external execution.
  */
 export class InvalidMessageError extends Error {
   readonly code = 'INVALID_MESSAGE'
@@ -73,6 +137,94 @@ export class InvalidMessageError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'InvalidMessageError'
+  }
+}
+
+/**
+ * Raised when an agent cannot satisfy its configured structured-output schema
+ * after the built-in corrective retry. Re-running the whole task with the same
+ * prompt is not a transport recovery strategy, so this failure is terminal for
+ * orchestrator-level retries.
+ */
+export class StructuredOutputValidationError extends Error {
+  readonly code = 'STRUCTURED_OUTPUT_VALIDATION_FAILED'
+
+  constructor(readonly cause?: unknown) {
+    super(
+      'Structured output validation failed after retry.',
+      cause !== undefined ? { cause } : undefined,
+    )
+    this.name = 'StructuredOutputValidationError'
+  }
+}
+
+/**
+ * Raised when a provider returns a tool-call type that OMA cannot execute.
+ *
+ * OMA exposes JSON-schema function tools. Failing loudly keeps an upstream
+ * custom-tool response from being mistaken for a successful empty turn.
+ */
+export class UnsupportedToolCallError extends Error {
+  readonly code = 'UNSUPPORTED_TOOL_CALL'
+
+  constructor(
+    readonly provider: string,
+    readonly toolType: string,
+  ) {
+    super(`${provider} returned unsupported tool-call type "${toolType}"`)
+    this.name = 'UnsupportedToolCallError'
+  }
+}
+
+export type EgressPolicyErrorReason =
+  | 'invalid-policy'
+  | 'denied'
+  | 'unsupported'
+  | 'unresolved-target'
+
+/**
+ * Raised before a framework-owned LLM transport opens a disallowed or
+ * unenforceable network request.
+ */
+export class EgressPolicyError extends Error {
+  readonly code: string
+
+  constructor(
+    readonly reason: EgressPolicyErrorReason,
+    message: string,
+    readonly provider?: string,
+    readonly origin?: string,
+  ) {
+    super(message)
+    this.name = 'EgressPolicyError'
+    this.code = reason === 'invalid-policy'
+      ? 'INVALID_EGRESS_POLICY'
+      : reason === 'denied'
+        ? 'EGRESS_POLICY_DENIED'
+        : reason === 'unresolved-target'
+          ? 'EGRESS_POLICY_TARGET_UNRESOLVED'
+          : 'EGRESS_POLICY_UNSUPPORTED'
+  }
+}
+
+/**
+ * Raised before an SDK request when a built-in adapter cannot faithfully map a
+ * model-visible tool-result part. This is terminal: retrying the same adapter
+ * and content cannot add a missing wire-format capability.
+ */
+export class UnsupportedToolResultContentError extends Error {
+  readonly code = 'UNSUPPORTED_TOOL_RESULT_CONTENT'
+
+  constructor(
+    readonly provider: string,
+    readonly contentType: string,
+    detail?: string,
+  ) {
+    super(
+      `${provider} cannot represent tool-result content type "${contentType}"` +
+        (detail ? `: ${detail}` : ''),
+    )
+    this.name = 'UnsupportedToolResultContentError'
   }
 }
 
@@ -90,6 +242,19 @@ function extractStatus(error: unknown): number | undefined {
 }
 
 /**
+ * Detect caller-driven cancellation errors without importing a provider SDK.
+ *
+ * Standard aborts use `.name === 'AbortError'`. OpenAI SDK's
+ * `APIUserAbortError` inherits the default `.name === 'Error'`, so its public
+ * constructor name is the stable discriminator available at this boundary.
+ */
+export function isCancellationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === 'AbortError'
+    || error.constructor.name === 'APIUserAbortError'
+}
+
+/**
  * Classify an error as retryable (transient — another attempt might succeed)
  * or terminal (a retry cannot help).
  *
@@ -97,16 +262,25 @@ function extractStatus(error: unknown): number | undefined {
  * *provably* terminal, so turning retry on never silently stops retrying an
  * error class that was retried before — it only skips attempts that are
  * pointless. Terminal cases are exhausted-budget, malformed input, an aborted
- * call, and 4xx client errors other than 408/409/429. Everything else —
+ * call (including OpenAI SDK's `APIUserAbortError`), and 4xx client errors
+ * other than 408/409/429. Everything else —
  * network blips (no status), request timeouts (408), conflicts (409), rate
  * limits (429), and all 5xx server errors — is retryable.
  */
 export function isRetryableError(error: unknown): boolean {
+  if (error instanceof InvalidTaskRequirementsError) return false
   if (error instanceof TokenBudgetExceededError) return false
   if (error instanceof CostBudgetExceededError) return false
   if (error instanceof InvalidMessageError) return false
+  if (error instanceof StructuredOutputValidationError) return false
+  if (error instanceof UnsupportedToolCallError) return false
+  if (error instanceof EgressPolicyError) return false
+  if (error instanceof UnsupportedToolResultContentError) return false
   if (error instanceof LLMCallTimeoutError) return true
-  if (error instanceof Error && error.name === 'AbortError') return false
+  if (error instanceof RoutingTimeoutError) return true
+  if (error instanceof RoutingProfilerFailedError) return false
+  if (error instanceof RoutingDeclarationRequiredError) return false
+  if (isCancellationError(error)) return false
   const status = extractStatus(error)
   if (status === undefined) return true
   if (status === 408 || status === 409 || status === 429) return true

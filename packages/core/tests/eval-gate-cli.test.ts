@@ -7,8 +7,9 @@ import { spawnSync } from 'node:child_process'
 
 import { describe, expect, it } from 'vitest'
 
+import { tsxCli } from './helpers/tsx-cli.js'
+
 const cliSource = fileURLToPath(new URL('../src/cli/oma.ts', import.meta.url))
-const tsxBinary = fileURLToPath(new URL('../../../node_modules/.bin/tsx', import.meta.url))
 const fixtures = fileURLToPath(new URL('./fixtures/eval/', import.meta.url))
 const setPath = join(fixtures, 'set.json')
 const targetPath = join(fixtures, 'target.mjs')
@@ -27,7 +28,7 @@ function temporaryDirectory(): string {
 }
 
 function runCli(args: readonly string[], cwd = temporaryDirectory()): CliRun {
-  const result = spawnSync(tsxBinary, [cliSource, ...args], {
+  const result = spawnSync(process.execPath, [tsxCli, cliSource, ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, NO_COLOR: '1' },

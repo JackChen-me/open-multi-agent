@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const tsx = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+// Resolved rather than joined onto `root`: a git worktree has no local
+// `node_modules` and resolves upwards to the main checkout.
+const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const example = join(
   root,
   'packages',

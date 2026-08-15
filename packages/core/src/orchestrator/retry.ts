@@ -7,6 +7,7 @@
 import type { AgentRunResult, Task, TokenUsage } from '../types.js'
 import { isRetryableError } from '../errors.js'
 import { abortableDelay } from '../utils/abort.js'
+import { DurableApprovalError } from '../approval/durable.js'
 
 /** Maximum delay cap to prevent runaway exponential backoff (30 seconds). */
 export const MAX_RETRY_DELAY_MS = 30_000
@@ -97,11 +98,20 @@ export async function executeWithRetry(
       if (result.success) {
         return { ...result, tokenUsage: totalUsage }
       }
+      // Suspension is a durable continuation boundary, not a retryable task
+      // failure. Re-running here would ask for the same approval again and
+      // could race the primary decision record.
+      if (result.status?.code === 'suspended') {
+        return { ...result, tokenUsage: totalUsage }
+      }
+      if (result.error instanceof DurableApprovalError) throw result.error
       lastError = result.output
 
-      // Non-streaming path carries the structured error on the result; a
-      // provably-terminal one (e.g. a 401) is not worth retrying.
-      const terminal = result.error !== undefined && !isRetryableError(result.error)
+      // Prefer the stable classification already attached to the outcome.
+      // This also covers framework failures (validation, cancellation, budget)
+      // whose raw Error may have been removed by a hook or serialization seam.
+      const terminal = result.errorInfo?.retryable === false
+        || (result.error !== undefined && !isRetryableError(result.error))
       if (!terminal && attempt < maxAttempts && !abortSignal?.aborted) {
         await backoffSleep(attempt)
         continue
@@ -109,6 +119,7 @@ export async function executeWithRetry(
 
       return { ...result, tokenUsage: totalUsage }
     } catch (err) {
+      if (err instanceof DurableApprovalError) throw err
       lastError = err instanceof Error ? err.message : String(err)
 
       // Streaming path: the structured error is in scope here. Skip retries on

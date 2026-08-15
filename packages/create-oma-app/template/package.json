@@ -3,11 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@open-multi-agent/core": "1.11.0"
+    "@open-multi-agent/core": "1.15.0"
   },
   "devDependencies": {
     "tsx": "^4.21.0"

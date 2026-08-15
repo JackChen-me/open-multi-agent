@@ -3,6 +3,7 @@ import type {
   AgentConfig,
   AgentRunResult,
   ConsensusResult,
+  ExecutionRoutingConfig,
   PlanArtifact,
   TeamRunResult,
   TraceAttributeValue,
@@ -31,6 +32,8 @@ export type EvalTarget = (
 export interface TargetFromRunOptions {
   /** Extra per-run metadata merged into RunIdentityOptions.metadata. */
   readonly metadata?: Readonly<Record<string, TraceAttributeValue>>
+  /** Per-run routing controls used by {@link targetFromTeam}. */
+  readonly executionRouting?: ExecutionRoutingConfig
 }
 
 function targetPrompt(input: unknown): string {
@@ -104,6 +107,9 @@ export function targetFromTeam(
     const result = await new OpenMultiAgent().runTeam(team, targetPrompt(input), {
       abortSignal: context.signal,
       metadata: runMetadata(context, options, teamFingerprint(team)),
+      ...(options?.executionRouting !== undefined
+        ? { executionRouting: options.executionRouting }
+        : {}),
     })
     return { output: teamOutput(result), result }
   }

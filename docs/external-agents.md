@@ -101,6 +101,15 @@ still shapes the external agent because OMA — lacking any ACP system-prompt fi
 prepends it to the agent's first prompt (once per session), on top of seeding the
 coordinator's routing as it does for every agent.
 
+External backends have a text transport boundary. Their public Agent APIs accept
+the existing string form, but reject structured `LLMMessage[]` / `ContentBlock[]`
+arguments with `InvalidMessageError` before spawning a process or opening an ACP
+session. This avoids silently dropping image blocks or caller-owned history.
+`beforeRun.prompt` remains supported; changing `beforeRun.messages` is rejected
+for the same reason. `AgentConfig.history` does not seed a process or ACP
+session; it restores messages only for LLM-backed `prompt()` conversations. See
+[Structured Agent Input](structured-input.md).
+
 For `process`, OMA starts a fresh subprocess per run. Use `input: 'stdin'` for
 commands that read a prompt from stdin, `input: 'argument'` when the command
 expects the prompt as the final argument, and `input: 'none'` for fixed adapters
@@ -133,6 +142,9 @@ The callback receives a minimal, SDK-agnostic `{ title, kind, optionKinds }` and
 > to a project you trust the backend with. ACP backends can use `permission` to
 > gate protocol permission prompts; process backends do not have protocol-level
 > permission prompts, so constrain the configured command, args, env, and cwd.
+> `egressPolicy` governs enforceable framework-owned LLM requests only; it does
+> not constrain network calls made by process or ACP children. See the
+> [egress enforcement matrix](egress-policy.md#enforcement-matrix).
 
 ## How it works
 
@@ -186,6 +198,12 @@ across turns telescopes to the latest figure instead of double-counting. That to
 aggregates into the run and honors `maxTokenBudget`. An agent that emits no
 `usage_update` reports `{0, 0}` and is therefore **not** budget-gated — size the
 budget on LLM agents, or bound the ACP agent with its own `--max-*` flags.
+
+On a Hybrid `runTeam()` Single short circuit, semantic-profiler usage is charged
+before the external backend starts. The backend's reported usage is then added
+at the run boundary, so an ACP usage delta can exhaust the remaining run budget.
+The process backend continues to contribute `{0, 0}` because it has no token
+signal.
 
 ## Programmatic API
 

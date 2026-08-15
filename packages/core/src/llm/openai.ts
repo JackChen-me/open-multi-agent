@@ -47,7 +47,9 @@ import type {
   LLMToolDef,
   StreamEvent,
   TextBlock,
+  ThinkingConfig,
   ToolUseBlock,
+  EgressPolicy,
 } from '../types.js'
 
 import {
@@ -57,10 +59,12 @@ import {
   buildOpenAIMessageList,
   getOpenAIReasoningText,
   repairToolArgs,
+  toOpenAISdkReasoningEffort,
 } from './openai-common.js'
 import { assertValidMessages } from './validate.js'
 import type { ReasoningOutboundOptions } from './reasoning-fallback.js'
 import { extractToolCallsFromText } from '../tool/text-tool-extractor.js'
+import { createEgressFetch } from './egress.js'
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
@@ -92,10 +96,18 @@ export class OpenAIAdapter implements LLMAdapter {
 
   readonly #client: OpenAI
 
-  constructor(apiKey?: string, baseURL?: string) {
+  constructor(
+    apiKey?: string,
+    baseURL?: string,
+    egressPolicy?: EgressPolicy,
+    egressProvider = 'openai',
+  ) {
     this.#client = new OpenAI({
       apiKey: apiKey ?? process.env['OPENAI_API_KEY'],
       baseURL,
+      ...(egressPolicy !== undefined
+        ? { fetch: createEgressFetch(egressPolicy, egressProvider) }
+        : {}),
     })
   }
 
@@ -129,6 +141,25 @@ export class OpenAIAdapter implements LLMAdapter {
     }
   }
 
+  /**
+   * Build provider-specific request fields while preserving the caller's
+   * `extraBody` as the final override layer.
+   *
+   * OpenAI-compatible subclasses can override this hook without duplicating
+   * the shared chat and streaming request construction.
+   */
+  protected buildExtraBody(options: LLMChatOptions): Record<string, unknown> | undefined {
+    return options.extraBody
+  }
+
+  /**
+   * Build the SDK-typed reasoning effort. DeepSeek overrides this to opt into
+   * its additional `max` value.
+   */
+  protected buildReasoningEffort(options: LLMChatOptions): ThinkingConfig['effort'] {
+    return toOpenAISdkReasoningEffort(options.thinking?.effort)
+  }
+
   // -------------------------------------------------------------------------
   // chat()
   // -------------------------------------------------------------------------
@@ -157,8 +188,8 @@ export class OpenAIAdapter implements LLMAdapter {
         top_k: options.topK,
         min_p: options.minP,
         parallel_tool_calls: options.parallelToolCalls,
-        reasoning_effort: options.thinking?.effort,
-        ...options.extraBody,
+        reasoning_effort: this.buildReasoningEffort(options),
+        ...this.buildExtraBody(options),
         model: options.model,
         messages: openAIMessages,
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,
@@ -209,8 +240,8 @@ export class OpenAIAdapter implements LLMAdapter {
         top_k: options.topK,
         min_p: options.minP,
         parallel_tool_calls: options.parallelToolCalls,
-        reasoning_effort: options.thinking?.effort,
-        ...options.extraBody,
+        reasoning_effort: this.buildReasoningEffort(options),
+        ...this.buildExtraBody(options),
         model: options.model,
         messages: openAIMessages,
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,

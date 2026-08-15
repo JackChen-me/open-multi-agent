@@ -100,7 +100,13 @@ export function materializeRun(recordsInput: readonly TraceRecord[], includeReco
     for (const value of stringAttributes(attrs, ['oma.task.id'])) tasks.add(value)
     for (const value of stringAttributes(attrs, MODEL_KEYS)) models.add(value)
     for (const value of stringAttributes(attrs, PROVIDER_KEYS)) providers.add(value)
-    if (record.recordType === 'span_end' && record.kind === 'llm') {
+    if (
+      record.recordType === 'span_end'
+      && (
+        record.kind === 'llm'
+        || (record.kind === 'routing' && record.name === 'profile_execution_route')
+      )
+    ) {
       tokens.input_tokens += numberAttribute(attrs, INPUT_TOKEN_KEYS)
       tokens.output_tokens += numberAttribute(attrs, OUTPUT_TOKEN_KEYS)
       tokens.cache_read_input_tokens += numberAttribute(attrs, CACHE_READ_KEYS)

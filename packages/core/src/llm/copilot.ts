@@ -40,6 +40,7 @@ import type {
   StreamEvent,
   TextBlock,
   ToolUseBlock,
+  EgressPolicy,
 } from '../types.js'
 
 import {
@@ -47,8 +48,10 @@ import {
   fromOpenAICompletion,
   normalizeFinishReason,
   buildOpenAIMessageList,
+  toOpenAISdkReasoningEffort,
 } from './openai-common.js'
 import { assertValidMessages } from './validate.js'
+import { assertEgressAllowed, createEgressFetch, normalizeEgressPolicy } from './egress.js'
 
 // ---------------------------------------------------------------------------
 // Copilot auth — OAuth2 device flow + token exchange
@@ -107,9 +110,12 @@ const defaultDeviceCodeCallback: DeviceCodeCallback = (uri, code) => {
  * until the user completes authorization. Returns a GitHub OAuth token
  * scoped for Copilot access.
  */
-async function deviceCodeLogin(onDeviceCode: DeviceCodeCallback): Promise<string> {
+async function deviceCodeLogin(
+  onDeviceCode: DeviceCodeCallback,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<string> {
   // Step 1: Request a device code
-  const codeRes = await fetch(DEVICE_CODE_URL, {
+  const codeRes = await fetchImpl(DEVICE_CODE_URL, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -135,7 +141,7 @@ async function deviceCodeLogin(onDeviceCode: DeviceCodeCallback): Promise<string
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, interval))
 
-    const pollRes = await fetch(POLL_URL, {
+    const pollRes = await fetchImpl(POLL_URL, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -176,8 +182,11 @@ async function deviceCodeLogin(onDeviceCode: DeviceCodeCallback): Promise<string
  * Note: the token exchange endpoint does NOT require the Copilot-specific
  * headers (Editor-Version etc.) — only the chat completions endpoint does.
  */
-async function fetchCopilotToken(githubToken: string): Promise<CopilotTokenResponse> {
-  const res = await fetch(COPILOT_TOKEN_URL, {
+async function fetchCopilotToken(
+  githubToken: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<CopilotTokenResponse> {
+  const res = await fetchImpl(COPILOT_TOKEN_URL, {
     method: 'GET',
     headers: {
       Authorization: `token ${githubToken}`,
@@ -209,6 +218,8 @@ export interface CopilotAdapterOptions {
    * Defaults to printing the verification URI and user code to stdout.
    */
   onDeviceCode?: DeviceCodeCallback
+  /** Framework-owned Copilot authentication/API egress restriction. */
+  egressPolicy?: EgressPolicy
 }
 
 /**
@@ -240,6 +251,8 @@ export class CopilotAdapter implements LLMAdapter {
   #tokenExpiresAt = 0
   #refreshPromise: Promise<string> | null = null
   readonly #onDeviceCode: DeviceCodeCallback
+  readonly #egressPolicy?: EgressPolicy
+  readonly #egressFetch?: typeof globalThis.fetch
 
   constructor(apiKeyOrOptions?: string | CopilotAdapterOptions) {
     const opts = typeof apiKeyOrOptions === 'string'
@@ -251,6 +264,10 @@ export class CopilotAdapter implements LLMAdapter {
       ?? process.env['GITHUB_TOKEN']
       ?? null
     this.#onDeviceCode = opts.onDeviceCode ?? defaultDeviceCodeCallback
+    this.#egressPolicy = normalizeEgressPolicy(opts.egressPolicy)
+    this.#egressFetch = this.#egressPolicy !== undefined
+      ? createEgressFetch(this.#egressPolicy, this.name)
+      : undefined
   }
 
   /**
@@ -279,10 +296,16 @@ export class CopilotAdapter implements LLMAdapter {
 
   async #doRefresh(): Promise<string> {
     if (!this.#githubToken) {
-      this.#githubToken = await deviceCodeLogin(this.#onDeviceCode)
+      this.#githubToken = await deviceCodeLogin(
+        this.#onDeviceCode,
+        this.#egressFetch ?? globalThis.fetch,
+      )
     }
 
-    const resp = await fetchCopilotToken(this.#githubToken)
+    const resp = await fetchCopilotToken(
+      this.#githubToken,
+      this.#egressFetch ?? globalThis.fetch,
+    )
     this.#cachedToken = resp.token
     this.#tokenExpiresAt = resp.expires_at
     return resp.token
@@ -290,11 +313,22 @@ export class CopilotAdapter implements LLMAdapter {
 
   /** Build a short-lived OpenAI client pointed at the Copilot endpoint. */
   async #createClient(): Promise<OpenAI> {
+    if (this.#egressPolicy !== undefined) {
+      // Validate every endpoint needed for this adapter before opening the
+      // first one. Device-flow endpoints are needed only without a GitHub token.
+      assertEgressAllowed(this.#egressPolicy, 'https://api.githubcopilot.com', this.name)
+      assertEgressAllowed(this.#egressPolicy, COPILOT_TOKEN_URL, this.name)
+      if (!this.#githubToken) {
+        assertEgressAllowed(this.#egressPolicy, DEVICE_CODE_URL, this.name)
+        assertEgressAllowed(this.#egressPolicy, POLL_URL, this.name)
+      }
+    }
     const sessionToken = await this.#getSessionToken()
     return new OpenAI({
       apiKey: sessionToken,
       baseURL: 'https://api.githubcopilot.com',
       defaultHeaders: COPILOT_HEADERS,
+      ...(this.#egressFetch !== undefined ? { fetch: this.#egressFetch } : {}),
     })
   }
 
@@ -316,7 +350,7 @@ export class CopilotAdapter implements LLMAdapter {
         messages: openAIMessages,
         max_tokens: options.maxTokens,
         temperature: options.temperature,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,
         stream: false,
       },
@@ -348,7 +382,7 @@ export class CopilotAdapter implements LLMAdapter {
         messages: openAIMessages,
         max_tokens: options.maxTokens,
         temperature: options.temperature,
-        reasoning_effort: options.thinking?.effort,
+        reasoning_effort: toOpenAISdkReasoningEffort(options.thinking?.effort),
         tools: options.tools ? options.tools.map(toOpenAITool) : undefined,
         stream: true,
         stream_options: { include_usage: true },

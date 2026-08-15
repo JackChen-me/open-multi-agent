@@ -439,6 +439,34 @@ describe('executeWithRetry', () => {
     expect(retryEvents).toHaveLength(0)  // terminal → no retry event
   })
 
+  it('skips retries when the stable outcome classification is terminal', async () => {
+    const run = vi.fn().mockResolvedValue({
+      ...FAILURE_RESULT,
+      errorInfo: {
+        kind: 'validation' as const,
+        retryable: false,
+      },
+    })
+    const task = createTask({
+      title: 'Terminal classified result',
+      description: 'test',
+      maxRetries: 3,
+      retryDelayMs: 10,
+    })
+
+    const retryEvents: unknown[] = []
+    const result = await executeWithRetry(
+      run,
+      task,
+      (data) => retryEvents.push(data),
+      noDelay,
+    )
+
+    expect(result.success).toBe(false)
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(retryEvents).toHaveLength(0)
+  })
+
   it('retries a retryable success:false result error (503) then succeeds', async () => {
     const run = vi.fn()
       .mockResolvedValueOnce({ ...FAILURE_RESULT, error: { status: 503 } })

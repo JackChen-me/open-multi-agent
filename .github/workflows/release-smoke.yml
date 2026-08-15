@@ -3,13 +3,19 @@ name: Release smoke
 # After a GitHub Release is published, prove that the packages we just pushed to
 # npm actually work from a *user's* point of view: `npx create-oma-app@latest`
 # scaffolds the recommended PR-review starter, the @open-multi-agent/core it
-# pins installs from npm, and the demo reaches the missing-key gate.
+# pins installs from npm, and the deterministic no-key demo produces all three
+# disclosed report formats without making a model request.
+#
+# The second job covers @open-multi-agent/otel, which rides its own version
+# track and carries no git tag of its own, so it would otherwise have no
+# post-publish coverage at all.
 #
 # This is a POST-publish alarm, not a gate. The release is already out, so a red
 # run here means "the published bytes are broken, cut a fix" — it does not block
-# anything. The pre-merge equivalent (the `scaffold-e2e` job in ci.yml) proves
-# the same chain from LOCAL tarballs during the release window; this one proves
-# it from the real npm registry once the version is actually live.
+# anything. The pre-merge equivalents (`scaffold-e2e` and the `package` job's
+# tarball consumers in ci.yml) prove the same chains from LOCAL tarballs during
+# the release window; this one proves them from the real npm registry once the
+# version is actually live.
 on:
   release:
     types: [published]
@@ -24,14 +30,15 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: Scaffold from the published npm package and reach the run gate
+          node-version: 22
+      - name: Scaffold from the published npm package and run the no-key demo
         env:
           # The tag is the core version (e.g. v1.11.0); create-oma-app has its
           # own version, so we resolve the scaffolder via @latest and verify it
           # pins THIS release's core below.
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          # Force the missing-key gate even if the runner ever grows these.
+          # Prove that the deterministic demo does not depend on ambient model
+          # configuration, even if the runner ever grows these variables.
           OPENAI_API_KEY: ''
           OMA_MODEL: ''
           OPENAI_BASE_URL: ''
@@ -76,16 +83,146 @@ jobs:
 
           echo "scaffolded the PR-review starter with create-oma-app@$(npm view create-oma-app version) → installed core@$want"
 
-          # No API key on purpose: the demo must exit non-zero at the env gate.
-          # Reaching that message proves core resolved from npm, imported, and
-          # ran under tsx — a broken import or syntax error would fail elsewhere.
+          # No API key on purpose: scripted model responses must drive the real
+          # scheduler and report generation without making a model request.
           set +e
           out=$( cd "$project" && npm run demo 2>&1 )
           code=$?
           set -e
           echo "$out"
-          if [ "$code" -eq 0 ] || ! printf '%s' "$out" | grep -q "Missing OPENAI_API_KEY"; then
-            echo "::error::expected a non-zero exit with 'Missing OPENAI_API_KEY'; got exit $code"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::expected the no-key demo to succeed; got exit $code"
             exit 1
           fi
-          echo "✓ create-oma-app@latest scaffolds the PR-review starter, installs core from npm, and reaches the run gate"
+          grep -q "Simulated model responses" <<<"$out"
+          grep -q "demo-fixture" <<<"$out"
+
+          if [ ! -d "$project/reports" ]; then
+            echo "::error::the no-key demo did not create its reports directory"
+            exit 1
+          fi
+          markdown=$(find "$project/reports" -maxdepth 1 -type f -name '*.md' -print -quit)
+          json=$(find "$project/reports" -maxdepth 1 -type f -name '*.json' -print -quit)
+          dashboard=$(find "$project/reports" -maxdepth 1 -type f -name '*.html' -print -quit)
+          if [ -z "$markdown" ] || [ -z "$json" ] || [ -z "$dashboard" ]; then
+            echo "::error::the no-key demo did not produce Markdown, JSON, and HTML reports"
+            exit 1
+          fi
+          grep -q "Demo mode" "$markdown"
+          grep -q '"mode": "demo"' "$json"
+          grep -q "Simulated model responses" "$dashboard"
+
+          echo "✓ create-oma-app@latest installs core@$want and runs the disclosed no-key demo from npm"
+
+  otel-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # For a release event GITHUB_SHA is the commit the tag points at, so a
+      # bare checkout lands on the release commit. Do not interpolate the tag
+      # name into `ref:`.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the published OTel adapter alongside the published core
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          # Re-check the registry on each retry instead of trusting a stale
+          # cached resolution of a version that was just published.
+          npm_config_prefer_online: 'true'
+        run: |
+          set -euo pipefail
+          core_want="${RELEASE_TAG#v}"   # v1.11.0 -> 1.11.0
+
+          # @open-multi-agent/otel rides its own version track and carries no git
+          # tag, so the version this release ships is whatever the release commit
+          # declares. When otel did not change this cycle that version is already
+          # live from an earlier release, and this job still proves the pairing
+          # holds against the core we just published.
+          otel_want=$(node -p "require('./packages/otel/package.json').version")
+          echo "this release ships core@$core_want with otel@$otel_want"
+
+          consumer="$RUNNER_TEMP/otel-consumer"
+          mkdir -p "$consumer"
+          printf '%s' '{"name":"otel-consumer","private":true,"type":"module"}' > "$consumer/package.json"
+
+          # The OpenTelemetry versions are pinned so an unrelated upstream
+          # release cannot turn this alarm red on its own.
+          install_consumer() {
+            ( cd "$consumer" && npm install --no-audit --no-fund \
+                "@open-multi-agent/core@$core_want" \
+                "@open-multi-agent/otel@$otel_want" \
+                '@opentelemetry/api@1.9.0' \
+                '@opentelemetry/sdk-trace-base@2.9.0' )
+          }
+
+          attempt=1
+          until install_consumer; do
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::otel@$otel_want failed to install alongside core@$core_want after $attempt attempts"
+              exit 1
+            fi
+            echo "retrying after npm propagation delay (attempt $attempt)…"
+            attempt=$((attempt + 1))
+            sleep 30
+          done
+
+          installed_otel=$(node -p "require('$consumer/node_modules/@open-multi-agent/otel/package.json').version")
+          installed_core=$(node -p "require('$consumer/node_modules/@open-multi-agent/core/package.json').version")
+          if [ "$installed_otel" != "$otel_want" ]; then
+            echo "::error::installed otel@$installed_otel but this release ships otel@$otel_want"
+            exit 1
+          fi
+          # A core release that outgrows otel's dependency range resolves an
+          # older core here instead of failing the install, so compare rather
+          # than trusting npm to have errored.
+          if [ "$installed_core" != "$core_want" ]; then
+            echo "::error::otel@$otel_want resolved core@$installed_core instead of the released core@$core_want"
+            exit 1
+          fi
+
+      - name: Export a span through the published adapter
+        run: |
+          set -euo pipefail
+          consumer="$RUNNER_TEMP/otel-consumer"
+          cat > "$consumer/smoke.mjs" <<'FIXTURE'
+          import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base'
+          import { createOtelTraceSink } from '@open-multi-agent/otel'
+
+          const exporter = new InMemorySpanExporter()
+          const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] })
+          const sink = createOtelTraceSink({ tracerProvider: provider })
+
+          const traceId = 'a'.repeat(32)
+          const spanId = '1'.repeat(16)
+          const base = (recordId, sequence) => ({
+            schemaVersion: 2, recordId, sequence, timestampUnixMs: sequence,
+            runId: 'release-smoke', attempt: 1, traceId, spanId,
+          })
+
+          sink.emit({
+            ...base('start', 1), recordType: 'span_start', kind: 'run',
+            name: 'oma.run', startUnixMs: 1, attributes: {},
+          })
+          sink.emit({
+            ...base('end', 2), recordType: 'span_end', kind: 'run',
+            name: 'oma.run', startUnixMs: 1, endUnixMs: 2, durationMs: 1,
+            status: { code: 'ok' }, attributes: {},
+          })
+
+          const flushed = await sink.forceFlush({ timeoutMs: 5000 })
+          if (flushed.status !== 'ok') throw new Error('OTel flush failed: ' + flushed.status)
+
+          const spans = exporter.getFinishedSpans()
+          if (!spans.some((span) => span.name === 'oma.run')) {
+            throw new Error('the published adapter did not export the run span')
+          }
+
+          await sink.shutdown({ timeoutMs: 5000 })
+          await provider.shutdown()
+          console.log('published OTel adapter exported ' + spans.length + ' span(s)')
+          FIXTURE
+          node "$consumer/smoke.mjs"
+
+          echo "✓ the published otel adapter installs against the released core and exports spans"

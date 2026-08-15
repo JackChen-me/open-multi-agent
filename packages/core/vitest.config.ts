@@ -5,6 +5,12 @@ export default defineConfig({
     coverage: {
       include: ['src/**'],
       reporter: ['text', 'html', 'lcov', 'json'],
+      thresholds: {
+        statements: 87,
+        branches: 84,
+        functions: 93,
+        lines: 87,
+      },
     },
     exclude: [
       ...configDefaults.exclude,
