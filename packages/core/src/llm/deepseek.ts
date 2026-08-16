@@ -15,8 +15,11 @@ import { OpenAIAdapter } from './openai.js'
  *
  * Usage:
  *   provider: 'deepseek'
- *   model: 'deepseek-v4-flash' (DeepSeek-V4-Flash-0731 public beta)
- *     or 'deepseek-v4-pro' (Preview API)
+ *   model: 'deepseek-v4-flash' (DeepSeek-V4-Flash-0731)
+ *     or 'deepseek-v4-pro' (DeepSeek-V4-Pro-0813)
+ *
+ * V4 models enable thinking by default at `high` effort. Pass
+ * `thinking: { enabled: false }` to opt out.
  *
  * Legacy `deepseek-chat` and `deepseek-reasoner` were retired by DeepSeek on
  * 2026-07-24.

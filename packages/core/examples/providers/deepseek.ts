@@ -11,8 +11,8 @@
  *   DEEPSEEK_API_KEY environment variable must be set.
  *
  * Available models:
- *   deepseek-v4-flash  — DeepSeek-V4-Flash-0731 public beta (1M context)
- *   deepseek-v4-pro    — Preview API (1M context)
+ *   deepseek-v4-flash  — DeepSeek-V4-Flash-0731 (1M context)
+ *   deepseek-v4-pro    — DeepSeek-V4-Pro-0813 (1M context)
  */
 
 import { join } from 'node:path'
