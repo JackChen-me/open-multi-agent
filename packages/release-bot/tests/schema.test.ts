@@ -48,6 +48,18 @@ describe('release decision', () => {
     expect(normalizeReleaseProposal(evidence, proposal).createOmaAppBump).toBe('patch')
   })
 
+  it('maps a core-only major (breaking) to a create-oma-app minor', () => {
+    const majorProposal = {
+      ...proposal,
+      coreBump: 'major' as const,
+      changelog: {
+        ...proposal.changelog,
+        breakingChanges: ['Existing callers must migrate to the new input shape.'],
+      },
+    }
+    expect(normalizeReleaseProposal(evidence, majorProposal).createOmaAppBump).toBe('minor')
+  })
+
   it('calculates concrete versions only after independent approval', () => {
     const decision = buildReleaseDecision(evidence, proposal, review, '2026-08-10')
     expect(decision.status).toBe('release')
@@ -69,6 +81,25 @@ describe('release decision', () => {
     expect(decision.status).toBe('release')
     if (decision.status !== 'release') throw new Error('expected release')
     expect(decision.plan.nextVersions.createOmaApp).toBe('0.8.0')
+    expect(decision.plan.bumps.createOmaApp).toBe('minor')
+  })
+
+  it('bumps create-oma-app minor when a core-only release is major (breaking)', () => {
+    const decision = buildReleaseDecision(evidence, {
+      ...proposal,
+      coreBump: 'major' as const,
+      changelog: {
+        ...proposal.changelog,
+        breakingChanges: ['Existing callers must migrate to the new input shape.'],
+      },
+    }, review, '2026-08-10')
+    expect(decision.status).toBe('release')
+    if (decision.status !== 'release') throw new Error('expected release')
+    expect(decision.plan.nextVersions).toEqual({
+      core: '2.0.0',
+      otel: '0.1.1',
+      createOmaApp: '0.8.0',
+    })
     expect(decision.plan.bumps.createOmaApp).toBe('minor')
   })
 

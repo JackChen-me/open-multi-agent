@@ -36,9 +36,12 @@ Each DAG task has one task-level attempt; malformed structured output may use
 OMA's single in-run correction, but the whole role is not restarted. Per-role
 turn and output budgets bound model work, and the complete planning DAG aborts
 after ten minutes. When core changes but `packages/create-oma-app` does not,
-deterministic policy forces a create-oma-app patch bump for the template pin.
-The planner's scaffolder bump class is authoritative only when that workspace
-has merged changes of its own; normalization occurs before independent review.
+deterministic policy maps core's bump to a create-oma-app bump by breaking
+nature: a core major bumps create-oma-app minor (its 0.x minor position carries
+the "breaking" signal), and any non-breaking core bump bumps create-oma-app
+patch. The planner's scaffolder bump class is authoritative only when that
+workspace has merged changes of its own; normalization occurs before
+independent review.
 
 The weekly workflow creates a **ready** release PR automatically. A maintainer
 reviews and merges it manually. Merge is the release approval, but it is not a
