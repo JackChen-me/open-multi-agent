@@ -56,13 +56,35 @@ Scaffold a PR review agent, security analysis agent, or teaching DAG:
 npm create oma-app@latest my-oma
 ```
 
-In an interactive terminal, that one command selects a starter and runtime, installs dependencies, and runs a deterministic local demo. The demo needs no API key and makes no model request: scripted model responses drive the real OMA scheduler, result aggregation, and offline dashboard. The [Core package guide](packages/core/README.md#quick-start) covers the flags and runtime choices.
+In an interactive terminal, that one command selects a starter and runtime, installs dependencies, and runs a deterministic local demo. The demo needs no API key and makes no model request: scripted model responses drive the real OMA scheduler, result aggregation, and offline dashboard.
 
 Or add OMA to an existing backend:
 
 ```bash
 npm install @open-multi-agent/core
 ```
+
+```typescript
+import { OpenMultiAgent } from '@open-multi-agent/core'
+
+const oma = new OpenMultiAgent({ defaultProvider: 'openai', defaultModel: 'gpt-5.4' })
+
+const team = oma.createTeam('research-team', {
+  name: 'research-team',
+  agents: [
+    { name: 'researcher', systemPrompt: 'Find the relevant facts.' },
+    { name: 'analyst', systemPrompt: 'Compare evidence and identify tradeoffs.' },
+  ],
+  sharedMemory: true,
+})
+
+const result = await oma.runTeam(team, 'Compare three approaches and recommend one.')
+
+console.log(result.agentResults.get('coordinator')?.output)
+```
+
+<details>
+<summary>Full example: DAG readback, token usage, and model overrides</summary>
 
 ```typescript
 import { OpenMultiAgent } from '@open-multi-agent/core'
@@ -92,11 +114,15 @@ console.log(result.agentResults.get('coordinator')?.output)
 console.log(result.totalTokenUsage)
 ```
 
+</details>
+
 Set `OPENAI_API_KEY` to run this example. [Providers](docs/providers.md) covers other hosted models, local servers, OpenAI-compatible endpoints, and AI SDK providers.
 
 `runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](packages/core/examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Why OMA
+
+**Every seam, an interface. Every run, a record.**
 
 OMA combines dynamic orchestration with the control, evidence, and recovery paths needed to move multi-agent systems from prototype to production.
 

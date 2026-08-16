@@ -55,13 +55,35 @@
 npm create oma-app@latest my-oma
 ```
 
-在交互式终端中，这一条命令会完成 starter 与 runtime 选择、依赖安装，并运行确定性的本地 Demo。Demo 不需要 API Key，也不会发起模型请求：预置模型响应负责模拟生成边界，OMA 的调度、结果聚合与离线 Dashboard 均真实运行。命令行参数与 runtime 选项见[核心包使用指南](packages/core/README_zh.md#快速开始)。
+在交互式终端中，这一条命令会完成 starter 与 runtime 选择、依赖安装，并运行确定性的本地 Demo。Demo 不需要 API Key，也不会发起模型请求：预置模型响应负责模拟生成边界，OMA 的调度、结果聚合与离线 Dashboard 均真实运行。
 
 也可以把 OMA 直接加入现有后端：
 
 ```bash
 npm install @open-multi-agent/core
 ```
+
+```typescript
+import { OpenMultiAgent } from '@open-multi-agent/core'
+
+const oma = new OpenMultiAgent({ defaultProvider: 'openai', defaultModel: 'gpt-5.4' })
+
+const team = oma.createTeam('research-team', {
+  name: 'research-team',
+  agents: [
+    { name: 'researcher', systemPrompt: 'Find the relevant facts.' },
+    { name: 'analyst', systemPrompt: 'Compare evidence and identify tradeoffs.' },
+  ],
+  sharedMemory: true,
+})
+
+const result = await oma.runTeam(team, 'Compare three approaches and recommend one.')
+
+console.log(result.agentResults.get('coordinator')?.output)
+```
+
+<details>
+<summary>完整示例：DAG 回读、token 统计与环境变量覆盖</summary>
 
 ```typescript
 import { OpenMultiAgent } from '@open-multi-agent/core'
@@ -91,11 +113,15 @@ console.log(result.agentResults.get('coordinator')?.output)
 console.log(result.totalTokenUsage)
 ```
 
+</details>
+
 运行这段示例需要设置 `OPENAI_API_KEY`。其他云端模型、本地服务、OpenAI 兼容端点与 AI SDK provider 的配置见 [Provider 文档](docs/providers.md)。
 
 `runTeam()` 从目标自动规划，`runAgent()` 运行单个 Agent，`runTasks()` 执行显式流水线。三种模式、Provider 与凭证配置、生产检查清单见[核心包使用指南](packages/core/README_zh.md)。[示例索引](packages/core/examples/README.md)收录 50+ 个可运行示例，覆盖基础、cookbook 流程、模式、Provider 与集成。
 
 ## 为什么选择 OMA
+
+**万物皆接口，一切皆数据。**
 
 OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来，帮助多智能体系统从原型走向生产环境。
 
