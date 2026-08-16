@@ -77,6 +77,21 @@ describe('release plan materialization', () => {
     expect(Math.max(...changelog.split('\n').map(line => line.length))).toBeLessThanOrEqual(80)
   })
 
+  it('bumps the otel version constant alongside package.json when otel releases', async () => {
+    const root = await createFixture()
+    const otelPlan: ReleasePlan = {
+      ...plan,
+      nextVersions: { ...plan.nextVersions, otel: '0.1.2' },
+      bumps: { ...plan.bumps, otel: 'patch' },
+    }
+    const changed = await applyReleasePlan(root, otelPlan)
+
+    expect(changed).toContain('packages/otel/src/version.ts')
+    expect(await version(root, 'packages/otel/package.json')).toBe('0.1.2')
+    const versionTs = await readFile(join(root, 'packages/otel/src/version.ts'), 'utf8')
+    expect(versionTs).toContain("export const PACKAGE_VERSION = '0.1.2'")
+  })
+
   it('unwraps hard-wrapped changelog prose for GitHub Release rendering', () => {
     const changelog = insertReleaseEntry(
       '# Changelog\n\n## Unreleased\n\n## 1.14.0 - 2026-08-01\n\nOld.\n',
@@ -100,6 +115,7 @@ async function createFixture(): Promise<string> {
   temporaryRoots.push(root)
   await writeJson(root, 'packages/core/package.json', { name: '@open-multi-agent/core', version: '1.14.0' })
   await writeJson(root, 'packages/otel/package.json', { name: '@open-multi-agent/otel', version: '0.1.1' })
+  await writeText(root, 'packages/otel/src/version.ts', "export const PACKAGE_VERSION = '0.1.1'\n")
   await writeJson(root, 'packages/create-oma-app/package.json', { name: 'create-oma-app', version: '0.7.0' })
   for (const path of [
     'packages/create-oma-app/template/package.json',
