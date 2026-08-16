@@ -78,10 +78,12 @@ export async function applyReleasePlan(
 
 export function insertReleaseEntry(changelog: string, plan: ReleasePlan): string {
   const section = findTopLevelSection(changelog, 'Unreleased')
-  const existing = changelog.slice(section.bodyStart, section.end).trim()
+  // The planner's changelog is the single source of truth for the new release.
+  // `## Unreleased` content already fed the planner as reference evidence, so
+  // appending it again here would duplicate the same changes under two sets of
+  // Added/Changed/Fixed headings.
   const generated = renderChangelogSections(plan.changelog)
-  const body = [existing, generated].filter(Boolean).join('\n\n')
-  const entry = `## Unreleased\n\n## ${plan.nextVersions.core} - ${plan.releaseDate}\n\n${body}\n\n`
+  const entry = `## Unreleased\n\n## ${plan.nextVersions.core} - ${plan.releaseDate}\n\n${generated}\n\n`
   return changelog.slice(0, section.start) + entry + changelog.slice(section.end)
 }
 

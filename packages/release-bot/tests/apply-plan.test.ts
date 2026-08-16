@@ -72,7 +72,7 @@ describe('release plan materialization', () => {
     const changelog = await readFile(join(root, 'CHANGELOG.md'), 'utf8')
     expect(changelog).toContain('## Unreleased\n\n## 1.15.0 - 2026-08-10')
     expect(changelog).toContain('### Added')
-    expect(changelog).toContain('Existing manually curated note.')
+    expect(changelog).not.toContain('Existing manually curated note.')
     expect(changelog).toContain('## 1.14.0 - 2026-08-01')
     expect(Math.max(...changelog.split('\n').map(line => line.length))).toBeLessThanOrEqual(80)
   })
@@ -90,6 +90,15 @@ describe('release plan materialization', () => {
     expect(await version(root, 'packages/otel/package.json')).toBe('0.1.2')
     const versionTs = await readFile(join(root, 'packages/otel/src/version.ts'), 'utf8')
     expect(versionTs).toContain("export const PACKAGE_VERSION = '0.1.2'")
+  })
+
+  it('does not duplicate Unreleased content into the new release section', () => {
+    const changelog = insertReleaseEntry(
+      '# Changelog\n\n## Unreleased\n\n### Added\n\n- Handwritten leftover.\n\n## 1.14.0 - 2026-08-01\n\nOld.\n',
+      plan,
+    )
+    expect(changelog).not.toContain('Handwritten leftover.')
+    expect((changelog.match(/### Added/g) ?? []).length).toBe(1)
   })
 
   it('unwraps hard-wrapped changelog prose for GitHub Release rendering', () => {
