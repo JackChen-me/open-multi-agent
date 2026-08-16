@@ -196,7 +196,7 @@ Approve only when a human maintainer could safely review the resulting release P
     defaultProvider: options.adapter ? undefined : 'deepseek',
     defaultApiKey: options.adapter ? undefined : options.apiKey,
     maxConcurrency: 2,
-    maxTokenBudget: 120_000,
+    maxTokenBudget: 500_000,
     onProgress: options.onProgress,
   })
   const team = orchestrator.createTeam('oma-release-bot', {
