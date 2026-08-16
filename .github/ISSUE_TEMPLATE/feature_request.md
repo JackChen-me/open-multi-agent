@@ -38,10 +38,7 @@ Describe the bounded behavior that should exist after this issue is complete.
 
 - `path/to/exact-file.ts`
 
-Use normalized repository-relative files or directories. Do not use globs. Issue
-text never grants edit authority by itself: only a write-authorized maintainer's
-later `agent-ready` label can authorize this exact revision, and trusted policy
-may narrow or reject the scope.
+Use normalized repository-relative files or directories. Do not use globs.
 
 ## Out of scope
 
