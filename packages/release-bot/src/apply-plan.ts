@@ -9,11 +9,14 @@ const TEMPLATE_MANIFESTS = [
   'packages/create-oma-app/templates/security/package.json',
 ] as const
 
+const OTEL_VERSION_CONSTANT_PATH = 'packages/otel/src/version.ts'
+
 export const RELEASE_PLAN_PATHS = [
   'CHANGELOG.md',
   'package-lock.json',
   'packages/core/package.json',
   'packages/otel/package.json',
+  OTEL_VERSION_CONSTANT_PATH,
   'packages/create-oma-app/package.json',
   ...TEMPLATE_MANIFESTS,
 ] as const
@@ -50,6 +53,7 @@ export async function applyReleasePlan(
       manifest => { manifest.version = plan.nextVersions.otel },
       changed,
     )
+    await updateOtelVersionConstant(repoRoot, plan.nextVersions.otel, changed)
   }
 
   for (const path of TEMPLATE_MANIFESTS) {
@@ -185,6 +189,27 @@ async function updateManifest(
     await writeFile(absolute, newContent)
     changed.add(path)
   }
+}
+
+async function updateOtelVersionConstant(
+  repoRoot: string,
+  nextVersion: string,
+  changed: Set<string>,
+): Promise<void> {
+  if (!/^\d+\.\d+\.\d+$/.test(nextVersion)) {
+    throw new Error(`Refusing to write an invalid otel version constant: "${nextVersion}".`)
+  }
+  const absolute = join(repoRoot, OTEL_VERSION_CONSTANT_PATH)
+  const oldContent = await readFile(absolute, 'utf8')
+  const newContent = oldContent.replace(
+    /export const PACKAGE_VERSION = '[^']+'/,
+    `export const PACKAGE_VERSION = '${nextVersion}'`,
+  )
+  if (newContent === oldContent) {
+    throw new Error(`${OTEL_VERSION_CONSTANT_PATH} does not declare a PACKAGE_VERSION constant.`)
+  }
+  await writeFile(absolute, newContent)
+  changed.add(OTEL_VERSION_CONSTANT_PATH)
 }
 
 function wrapBullet(text: string, width = 80): string {

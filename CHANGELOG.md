@@ -1,31 +1,62 @@
 # Changelog
 
-## Unreleased
+## 1.16.0 - 2026-08-16
 
 ### Added
 
-- `StructuredOutputValidationError` identifies schema failures that remain
-  after the agent's built-in corrective attempt and marks them as terminal for
-  task-level retry.
+- Add opt-in `EgressPolicy` (`offline` or `allowlist`) that restricts
+  framework-owned LLM network requests and intersects run-, agent-, and
+  orchestrator-level scopes.
+- Add pluggable `ShellExecutor` / `LocalShellExecutor` so callers control where
+  the built-in `bash` tool runs, exposed via the new
+  `@open-multi-agent/core/shell` subpath export.
+- Add `StructuredOutputValidationError`, which marks persistent schema failures
+  after the built-in corrective attempt as terminal for task-level retry.
+- Add `EgressPolicyError` with stable codes (`INVALID_EGRESS_POLICY`,
+  `EGRESS_POLICY_DENIED`, `EGRESS_POLICY_TARGET_UNRESOLVED`,
+  `EGRESS_POLICY_UNSUPPORTED`) for disallowed or unenforceable LLM egress.
 
 ### Changed
 
-- The private OMA release bot now feeds its evidence roles one deterministic,
-  risk-ranked diff bundle, applies smaller per-role turn and output budgets,
-  disables whole-task retries, and aborts the complete planning DAG after ten
-  minutes. Planner and reviewer roles consume structured dependency reports
-  without rereading repository tools.
-- A core-only release now forces a patch increment for `create-oma-app` when
-  the scaffolder workspace itself did not change; larger model-proposed bumps
-  apply only to merged scaffolder changes.
+- The built-in `bash` tool now executes through a configurable shell executor
+  with a fail-closed backstop and 127 exit code on execution failure.
+- LLM adapters now resolve provider default base URLs and enforce egress policy
+  before opening framework-owned requests; policy use is opt-in and preserves
+  legacy unrestricted behavior.
+- Task retry now respects a result's stable `errorInfo.retryable: false`
+  classification.
 
 ### Fixed
 
 - Structured-output agents no longer report a late valid response as success
   after their whole-run timeout fired.
-- Task retry now respects a result's stable `errorInfo.retryable: false`
-  classification, preventing validation, cancellation, and budget failures
-  from being rerun when the raw in-process error is unavailable.
+- Task retry no longer reruns validation, cancellation, and budget failures when
+  the raw in-process error is unavailable.
+
+### Security
+
+- Add framework-owned LLM egress restriction (`EgressPolicy`) that can confine
+  provider transports to loopback or an explicit origin allowlist.
+
+### Compatibility
+
+- All core additions are backward compatible: new exports, optional config
+  fields, and new error classes; no public export was removed or narrowed and
+  the Node engines floor is unchanged.
+- Egress policy is opt-in: omitting egressPolicy on run/agent/orchestrator
+  config preserves legacy unrestricted LLM egress behavior.
+- Shell executor is opt-in: AgentConfig.shellExecutor /
+  OrchestratorConfig.defaultShellExecutor default to LocalShellExecutor for the
+  built-in bash tool; callers that invoked bashTool.execute() directly now own
+  the executor lifecycle and may observe results with exitCode 127 instead of a
+  thrown tool error when execution fails.
+- StructuredOutputValidationError and EgressPolicyError are now classified as
+  non-retryable by isRetryableError and mapped to terminal failure states;
+  task-level retry behavior for such failures changes.
+- New public surface added in this release: ./shell subpath export
+  (LocalShellExecutor, ShellExecOptions, ShellExecResult, ShellExecutor),
+  StructuredOutputValidationError, EgressPolicyError, EgressPolicy, and
+  egressPolicy/shellExecutor config fields.
 
 ## 1.15.0 - 2026-08-09
 
