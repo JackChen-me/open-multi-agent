@@ -40,7 +40,7 @@ any global provider.
 Core `egressPolicy` does not wrap this application-owned provider or any
 exporter attached to it. Configure telemetry egress in the provider/exporter or
 at the infrastructure boundary; see the core
-[egress enforcement matrix](../../docs/egress-policy.md#enforcement-matrix).
+[egress enforcement matrix](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md#enforcement-matrix).
 
 ## Lifecycle and ownership
 
@@ -65,7 +65,7 @@ Use a `BatchingTraceSink` directly via `createOtelTraceExporter()` when the
 application owns batching configuration itself.
 
 For a complete no-network example with the official `InMemorySpanExporter`, see
-[`otel-provider.ts`](../core/examples/integrations/observability-v2/otel-provider.ts).
+[`otel-provider.ts`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/core/examples/integrations/observability-v2/otel-provider.ts).
 
 ### Process lifecycle
 
