@@ -171,7 +171,11 @@ describe('maintainer-bot vertical pipeline', () => {
     const trace = JSON.parse(await readFile(join(
       artifactDir,
       `${result.record.runKey}.pipeline-trace.json`,
-    ))) as { events: Array<{ stage: string; status: string }> }
+    ))) as {
+      omaTokenUsage: { input_tokens: number; output_tokens: number }
+      estimatedCostUsd: number
+      events: Array<{ stage: string; status: string }>
+    }
     expect(trace.events.map(event => `${event.stage}:${event.status}`)).toEqual([
       'admission:start', 'admission:complete',
       'coding:start', 'coding:complete',
@@ -179,6 +183,8 @@ describe('maintainer-bot vertical pipeline', () => {
       'review:start', 'review:complete',
       'proposal:start', 'proposal:complete',
     ])
+    expect(trace.omaTokenUsage).toEqual(result.tokenUsage)
+    expect(trace.estimatedCostUsd).toBe(result.estimatedCostUsd)
   })
 
   it('keeps trace persistence failure isolated from the authoritative pipeline result', async () => {

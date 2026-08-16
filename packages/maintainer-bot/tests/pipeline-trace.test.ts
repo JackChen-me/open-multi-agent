@@ -24,7 +24,10 @@ describe('bounded pipeline trace artifact', () => {
     const now = () => new Date(`2026-08-14T00:00:${String(tick++).padStart(2, '0')}.000Z`)
     for (const stage of ['admission', 'coding', 'validation', 'review', 'proposal'] as const) {
       await writer.record(stage, 'start', now)
-      await writer.record(stage, 'complete', now)
+      await writer.record(stage, 'complete', now, {
+        tokenUsage: { input_tokens: 123, output_tokens: 45 },
+        estimatedCostUsd: 0.000_03,
+      })
     }
 
     const raw = await readFile(writer.path, 'utf8')
@@ -37,6 +40,8 @@ describe('bounded pipeline trace artifact', () => {
       'proposal:start', 'proposal:complete',
     ])
     expect(artifact.claudeCodeTokenUsage).toBe('not_reported')
+    expect(artifact.omaTokenUsage).toEqual({ input_tokens: 123, output_tokens: 45 })
+    expect(artifact.estimatedCostUsd).toBe(0.000_03)
     expect(raw).not.toMatch(/prompt|source|diff|token=|ghp_|sk-/i)
     expect(raw.length).toBeLessThan(4_000)
     expect(pipelineTraceArtifactSchema.safeParse({

@@ -548,8 +548,9 @@ the actual PR checks; the bot never approves or merges based on CI alone.
 Each attempted engine run also writes one bounded, run-key-bound JSON trace for
 the fixed `admission`, `coding`, `validation`, `review`, and `proposal` stages.
 The workflow attempts to upload only that trace for seven days on success or
-failure. It contains stage status and timestamps, not prompts, source, diffs,
-model output, tokens, credentials, or error text. Trace persistence is
+failure. It contains stage status, timestamps, and the reported OMA token usage
+and estimated cost totals, not prompts, source, diffs, model output, credentials,
+or error text. Trace persistence is
 best-effort telemetry and never changes the authoritative pipeline result.
 Claude Code process token usage is reported as `unknown (not reported)` rather
 than zero.

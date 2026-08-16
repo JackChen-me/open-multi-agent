@@ -175,6 +175,8 @@ export async function runMaintainerBot(
     issueRevision: admission.issueRevision,
     baseSha: request.baseSha,
   })
+  let usage: TokenUsage = zeroUsage
+  let cost = 0
   const trace = new PipelineTraceWriter({
     artifactDir: input.artifactDir,
     runKey,
@@ -185,7 +187,7 @@ export async function runMaintainerBot(
   let activeTraceStage: PipelineTraceStage | undefined
   const traceStage = async (stage: PipelineTraceStage, status: 'start' | 'complete' | 'failure') => {
     try {
-      await trace.record(stage, status, now)
+      await trace.record(stage, status, now, { tokenUsage: usage, estimatedCostUsd: cost })
     } catch {
       // Telemetry is best-effort and must never change the authoritative pipeline result.
     }
@@ -216,8 +218,6 @@ export async function runMaintainerBot(
   const abortSignal = input.abortSignal === undefined
     ? deadline
     : mergeAbortSignals(input.abortSignal, deadline)
-  let usage: TokenUsage = zeroUsage
-  let cost = 0
   const appliedEdits: AppliedEdit[] = []
   let implementationSummary = ''
   let risks: string[] = []
