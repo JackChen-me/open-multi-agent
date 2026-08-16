@@ -88,6 +88,7 @@ export async function generateReleaseDecision(
   } satisfies Partial<AgentConfig>
   const synthesisRole = {
     ...shared,
+    thinking: { enabled: false },
     maxTurns: 3,
     maxTokens: 3_500,
     callTimeoutMs: 90_000,
