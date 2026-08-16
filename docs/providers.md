@@ -67,6 +67,10 @@ No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use 
 
 Other services can be connected the same way if they implement the OpenAI Chat Completions API, but they are not listed as verified providers here. For services where the key is not `OPENAI_API_KEY`, pass it explicitly via `apiKey`; otherwise the `openai` adapter falls back to `OPENAI_API_KEY`.
 
+### Sponsor listing
+
+[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan) is a paid sponsor of `open-multi-agent`; sponsorship does not affect technical decisions or model recommendations. It is reachable through the same OpenAI-compatible path (`provider: 'openai'` + `baseURL: 'https://api.atlascloud.ai/v1'` + `apiKey`) and is listed here as a sponsor rather than an OMA-verified provider. See the [Atlas Cloud setup guide](providers-atlascloud.md).
+
 OMA registers JSON-schema `function` tools. If an OpenAI-compatible response
 contains the separate `custom` tool-call variant, the adapter raises
 `UnsupportedToolCallError` instead of dropping the call or presenting an empty

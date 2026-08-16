@@ -35,10 +35,7 @@ A clear description of what you expected to happen.
 
 - `path/to/exact-file.test.ts`
 
-Use normalized repository-relative files or directories. Do not use globs. Issue
-text never grants edit authority by itself: only a write-authorized maintainer's
-later `agent-ready` label can authorize this exact revision, and trusted policy
-may narrow or reject the scope.
+Use normalized repository-relative files or directories. Do not use globs.
 
 ## Out of scope
 

@@ -88,6 +88,7 @@ export async function generateReleaseDecision(
   } satisfies Partial<AgentConfig>
   const synthesisRole = {
     ...shared,
+    thinking: { enabled: false },
     maxTurns: 3,
     maxTokens: 3_500,
     callTimeoutMs: 90_000,
@@ -196,7 +197,7 @@ Approve only when a human maintainer could safely review the resulting release P
     defaultProvider: options.adapter ? undefined : 'deepseek',
     defaultApiKey: options.adapter ? undefined : options.apiKey,
     maxConcurrency: 2,
-    maxTokenBudget: 120_000,
+    maxTokenBudget: 500_000,
     onProgress: options.onProgress,
   })
   const team = orchestrator.createTeam('oma-release-bot', {

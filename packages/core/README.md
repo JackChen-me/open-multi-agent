@@ -285,6 +285,12 @@ Optional integrations load only when used: core directly installs only `@anthrop
 
 See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [framework-owned LLM egress policy](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md), and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, local endpoints, and the exact network-enforcement boundary.
 
+**Provider sponsors**
+
+Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technical decisions or model recommendations.
+
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud.md).
+
 ## Production
 
 | Goal | Configure |
