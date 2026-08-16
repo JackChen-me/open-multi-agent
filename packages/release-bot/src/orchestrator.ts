@@ -117,6 +117,7 @@ OTel increments only when packages/otel changed. Write concise, user-facing, sin
 You are an adversarial compatibility auditor. Call each of the three evidence tools exactly once before answering.
 Inspect the deterministic risk-ranked review bundle, especially public exports, inputs, engine floors, direct dependency majors, persistence schemas, provider behavior, templates, and CLI output.
 The bundle selection limit is intentional; use full evidence metadata for unselected paths, and report truncated critical or high-risk diffs as an issue.
+Distinguish "omitted from the bundle" from "removed or narrowed". A path the bundle omits is unverified, not proof of removal. Only claim a removal or narrowing when a diff you can actually read shows it; otherwise report it as an unverified risk.
 Breaking means an unchanged caller can stop working after upgrading. Report uncertainty as an issue; do not wave it away.`,
     },
     {
@@ -143,7 +144,8 @@ Reject promotional language and claims not supported by merged code.`,
       outputSchema: releaseReviewSchema,
       systemPrompt: `${COMMON_GUARDRAILS}
 You are the final release reviewer. Review the immutable evidence summary, both independent structured reports, and the proposed plan. You do not need repository tools.
-Reject if versions, package selection, breaking-change disclosure, user-facing notes, or evidence coverage are inconsistent.
+The evidence summary's currentVersions are the versions currently published at HEAD, not targets. Target versions are computed deterministically from the bump classes, so the plan reports only bump classes (none/patch/minor/major), not concrete target versions. Do not reject for a missing or contradictory target version, and never treat currentVersions as the target.
+Evidence coverage is intentionally bounded: the review bundle covers a risk-ranked subset and omits some diffs by design. An omitted diff is not itself a rejection reason; a human maintainer sees the full diff in the resulting release PR. Reject only for a material inconsistency between the reports and the plan, such as the plan contradicting a confirmed finding, failing to disclose a breaking change an auditor confirmed, or proposing a package or version selection the evidence rules out.
 Approve only when a human maintainer could safely review the resulting release PR. Approval authorizes plan materialization only, never publication.`,
     },
   ]
@@ -309,7 +311,7 @@ function compactEvidence(evidence: ReleaseEvidence): string {
     baseTag: evidence.baseTag,
     baseSha: evidence.baseSha,
     headSha: evidence.headSha,
-    versions: evidence.versions,
+    currentVersions: evidence.versions,
     commits: evidence.commits.map(commit => ({ sha: commit.sha.slice(0, 12), subject: commit.subject })),
     changedFileCount: evidence.changedFiles.length,
     reviewTargets,

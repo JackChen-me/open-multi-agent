@@ -67,6 +67,7 @@ describe('OMA release orchestration', () => {
     expect(adapter.plannerMessages).toContain('Durable recovery is additive.')
     expect(adapter.reviewerMessages).toContain('Release durable recovery.')
     expect(adapter.reviewerMessages).toContain('\\"createOmaAppBump\\":\\"patch\\"')
+    expect(adapter.reviewerMessages).toContain('currentVersions')
     expect(adapter.toolSets).toHaveLength(4)
     for (const tools of adapter.toolSets.slice(0, 2)) {
       expect(tools).toEqual([
