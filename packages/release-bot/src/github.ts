@@ -146,7 +146,7 @@ export class GitHubApiClient implements GitHubClient {
         accept: 'application/vnd.github+json',
         authorization: `Bearer ${this.token}`,
         'content-type': 'application/json',
-        'user-agent': 'open-multi-agent-release-bot',
+        'user-agent': 'oma-release-bot',
         'x-github-api-version': '2026-03-10',
         ...init?.headers,
       },

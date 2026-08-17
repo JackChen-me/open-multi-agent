@@ -23,7 +23,7 @@ export class NpmRegistryClient implements RegistryClient {
       headers: {
         accept: 'application/json',
         'cache-control': 'no-cache',
-        'user-agent': 'open-multi-agent-release-bot',
+        'user-agent': 'oma-release-bot',
       },
     })
     if (response.status === 404) return null
