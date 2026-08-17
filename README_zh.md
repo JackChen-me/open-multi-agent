@@ -121,7 +121,7 @@ console.log(result.totalTokenUsage)
 
 ## 为什么选择 OMA
 
-**万物皆接口，一切皆数据。**
+**万物皆接口，每次运行皆可回溯。**
 
 OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来，帮助多智能体系统从原型走向生产环境。
 
@@ -201,7 +201,7 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
   <img src="https://contrib.rocks/image?repo=open-multi-agent/open-multi-agent&max=100" />
 </a>
 
-按领域展开的贡献者致谢见[核心包页](packages/core/README_zh.md#贡献者)。
+按领域展开的贡献者致谢见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。
 
 ## 许可证
 

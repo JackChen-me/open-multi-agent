@@ -21,10 +21,7 @@
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.6-blue" alt="TypeScript"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/stargazers"><img src="https://img.shields.io/github/stars/open-multi-agent/open-multi-agent" alt="GitHub stars"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/network/members"><img src="https://img.shields.io/github/forks/open-multi-agent/open-multi-agent" alt="GitHub forks"></a>
 </p>
 
 <p align="center">
@@ -71,8 +68,6 @@ To add OMA to an existing backend:
 npm install @open-multi-agent/core
 ```
 
-*Migrating from `@jackchen_me/open-multi-agent`? That package is deprecated; install `@open-multi-agent/core` instead.*
-
 ```typescript
 import { OpenMultiAgent, type AgentConfig } from '@open-multi-agent/core'
 
@@ -112,59 +107,13 @@ Use `planOnly` to inspect a generated task graph before execution, then `createP
 
 ### Structured single-agent input
 
-`Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` keep the string
-form above and also accept a complete `LLMMessage[]`. Use the message form for
-caller-owned conversation history or blocks such as base64 images:
+`Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` keep the string form above and also accept a complete `LLMMessage[]`, for caller-owned conversation history or blocks such as base64 images. Structured input is validated and defensively copied, and process and ACP backends stay string-only: they reject structured arguments rather than discarding history or images. See [structured agent input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md) for copy, hook, and external-backend semantics, or run [`basics/structured-input`](examples/basics/structured-input.ts).
 
-```typescript
-import { OpenMultiAgent, type LLMMessage } from '@open-multi-agent/core'
+### Execution routing
 
-const messages: LLMMessage[] = [{
-  role: 'user',
-  content: [
-    { type: 'text', text: 'Describe this image.' },
-    {
-      type: 'image',
-      source: { type: 'base64', media_type: 'image/png', data: imageBase64 },
-    },
-  ],
-}]
+`runTeam()` uses the deterministic router by default and makes no extra model call. `executionRouting: { strategy: 'hybrid' }` keeps deterministic Team decisions and sends only Single candidates to a one-call, no-tool `TaskProfiler`; results then expose `routingDecision` and `semanticRoutingAssessment`. The Profiler falls back to the Coordinator adapter and then the orchestrator's default provider, so it can make a provider call even when every worker has its own adapter. See [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md) for that provider boundary and the full policy precedence; [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md) selects models inside the chosen topology.
 
-const result = await new OpenMultiAgent().runAgent(
-  { name: 'vision', model: 'claude-sonnet-4-6' },
-  messages,
-)
-```
-
-For a persistent `Agent.prompt()` conversation, pass a string or one
-`ContentBlock[]` user turn; restore earlier turns through `AgentConfig.history`.
-Structured input is validated and defensively copied. `beforeRun` receives both
-the complete `messages` and its backwards-compatible latest-user `prompt` view.
-Process and ACP backends remain string-only and reject structured arguments
-instead of discarding history or images. See [Structured Agent
-Input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md) for copy, hook, progress/evaluation, and
-external-backend semantics, or run
-[`basics/structured-input`](examples/basics/structured-input.ts).
-
-Automatic `runTeam()` uses the deterministic router by default: no extra model
-call is made. Opt into Hybrid Semantic Routing with
-`executionRouting: { strategy: 'hybrid' }`; it keeps deterministic Team
-decisions and sends only Single candidates to a one-call, no-tool
-`TaskProfiler`. Deterministic policy may keep Single, upgrade to Team, or
-require an explicit governance declaration. Valid custom `executionRouter`
-decisions, explicit `mode`, and declared governance retain higher priority.
-Auto results expose `routingDecision` and, when profiling ran,
-`semanticRoutingAssessment`. See [Execution
-Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md).
-Execution Routing selects Single versus Team; [Model
-Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)
-selects models inside that topology.
-
-When Hybrid is enabled, the Profiler sends the goal to the configured routing adapter, then the
-Coordinator adapter, or finally the orchestrator's default provider. That last
-fallback can make a provider call even when every worker has its own adapter.
-Configure `executionRouting.adapter` or use deterministic strategy when the goal
-must not cross that provider boundary.
+### Declared governance roles
 
 When an application must enforce named independent roles, declare that governance intent instead of relying on wording in the goal:
 
@@ -180,9 +129,7 @@ if (governed.governanceConclusion !== 'satisfied') {
 }
 ```
 
-`required` and `preferred` both bypass automatic decomposition and the simple-goal short circuit. OMA creates one task per declared roster name, assigns it to that agent, and chains tasks in `requiredOrder`; dependency outputs are passed to downstream roles. The topology comes only from these structured fields, so equivalent goals in different languages use the same roles and order. `none` or an omitted `governanceIntent` preserves the existing automatic `runTeam()` behavior.
-
-After execution, `governanceConclusion` is `satisfied`, `unsatisfied`, or `not-applicable`. Governance-sensitive applications must check it separately from `success`: the verdict comes from the structured execution receipt, not from role names or approval wording in the model answer. See [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam).
+The topology comes only from these structured fields, so equivalent goals in different languages produce the same roles and order. `governanceConclusion` comes from the structured execution receipt rather than from role names or approval wording in the model answer, so governance-sensitive applications must check it separately from `success`. See [declared governance roles](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam).
 
 ## Scheduling
 
@@ -211,15 +158,7 @@ const orchestrator = new OpenMultiAgent({
 | `capability-match` | Filters explicit task requirements, then prefers declared capability tags before legacy keyword affinity | Tasks or agents declare differentiated requirements/capabilities |
 | `composite` | Ranks tasks by blocked dependents, then maximizes fit and available capacity across eligible agents | Criticality, capability fit, and current load should influence one decision |
 
-Agents may declare `description`, `capabilities`, `costTier`, and
-`latencyClass`, and tasks may add hard `requires` constraints. All strategies
-fail before worker execution when those constraints cannot be satisfied.
-Coordinator plans also fail fast by default when they name an agent outside
-the roster; set `strictAssignees: false` only to retain legacy reassignment.
-Weight semantics, load normalization, `NO_ELIGIBLE_AGENT` and
-`INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event migration
-are covered in
-[Task scheduling and dispatch](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md).
+Agents may declare `description`, `capabilities`, `costTier`, and `latencyClass`, and tasks may add hard `requires` constraints; every strategy fails before worker execution when they cannot be satisfied. Weight semantics, load normalization, `strictAssignees`, and the `NO_ELIGIBLE_AGENT` and `INVALID_ASSIGNEE` failure modes are covered in [task scheduling and dispatch](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md).
 
 ## Capabilities
 
@@ -307,7 +246,7 @@ Budget checks run at turn and task boundaries, so a run can overshoot by up to o
 Built-in tools are default-deny, and every model-visible tool result is sent to
 your model provider, so grant read and exec access deliberately. Tools may keep
 application-owned data separate while returning text, image, or file content
-through `modelOutput`; see the [tool configuration guide](../../docs/tool-configuration.md#rich-image-and-file-results).
+through `modelOutput`; see the [tool configuration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#rich-image-and-file-results).
 Filesystem tools stay within the configured `cwd`; granted `bash` is not
 sandboxed. Its execution target can be replaced through a
 [`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors),
@@ -343,75 +282,7 @@ Issues and PRs are welcome. For production examples, follow the [acceptance crit
   <img src="https://contrib.rocks/image?repo=open-multi-agent/open-multi-agent&max=100" />
 </a>
 
-<details>
-<summary>Contributor credits by area</summary>
-
-**Framework features**
-
-- [@ibrahimkzmv](https://github.com/ibrahimkzmv) (token budget, context strategy, dependency-scoped context, tool presets, glob, MCP integration, configurable coordinator, CLI, dashboard rendering, trace event types)
-- [@apollo-mg](https://github.com/apollo-mg) (context compaction fix, sampling parameters)
-- [@tizerluo](https://github.com/tizerluo) (onPlanReady, onAgentStream)
-- [@CodingBangboo](https://github.com/CodingBangboo) (planOnly mode)
-- [@Xin-Mai](https://github.com/Xin-Mai) (output schema validation)
-- [@JasonOA888](https://github.com/JasonOA888) (AbortSignal support)
-- [@EchoOfZion](https://github.com/EchoOfZion) (coordinator skip for simple goals)
-- voidborne-d (OpenAI mixed-content fix, text-tool-extractor depth fix)
-- [@NamelessNATM](https://github.com/NamelessNATM) (agent delegation base implementation)
-- [@MyPrototypeWhat](https://github.com/MyPrototypeWhat) (reasoning blocks, reasoning_effort, sampling parity, trace input/output)
-- [@SiMinus](https://github.com/SiMinus) (streaming reasoning events)
-- [@matthewYang08](https://github.com/matthewYang08) (OpenAI reasoning-to-text fallback)
-- [@dvirarad](https://github.com/dvirarad) (OpenAI-family adapter hardening)
-- [@cat0825](https://github.com/cat0825) (model routing policy, plan replay, structured shared-memory handoff)
-- [@mvanhorn](https://github.com/mvanhorn) (checkpoint & resume)
-- [@lesbass](https://github.com/lesbass) (run-level metrics rollup on `TeamRunResult`)
-- [@tlysanhuo](https://github.com/tlysanhuo) (trace span parent linkage)
-- [@LambIessz](https://github.com/LambIessz) (orchestrator cost budget, MessageBus persistence in checkpoints, retryable route fallback)
-- [@Bobuyoucrypto](https://github.com/Bobuyoucrypto) (Windows bash timeout process-tree kill)
-
-**Provider integrations**
-
-- [@ibrahimkzmv](https://github.com/ibrahimkzmv) (Gemini)
-- [@hkalex](https://github.com/hkalex) (DeepSeek, MiniMax)
-- [@marceloceccon](https://github.com/marceloceccon) (Grok)
-- [@Klarline](https://github.com/Klarline) (Azure OpenAI)
-- [@Deathwing](https://github.com/Deathwing) (GitHub Copilot)
-- [@JackChiang233](https://github.com/JackChiang233) (Qiniu)
-- [@CodingBangboo](https://github.com/CodingBangboo) (AWS Bedrock)
-- [@kidoom](https://github.com/kidoom) (MiMo, Doubao)
-- [@KaitlynFeng](https://github.com/KaitlynFeng) (Hunyuan)
-- [@octo-patch](https://github.com/octo-patch) (MiniMax-M3 model upgrade)
-
-**Examples & cookbook**
-
-- [@mvanhorn](https://github.com/mvanhorn) (research aggregation, code review, meeting summarizer, Groq example, Mistral example)
-- [@Kinoo0](https://github.com/Kinoo0) (code review upgrade)
-- [@Optimisttt](https://github.com/Optimisttt) (research aggregation upgrade)
-- [@Agentscreator](https://github.com/Agentscreator) (Engram memory integration)
-- [@fault-segment](https://github.com/fault-segment) (contract-review DAG)
-- [@HuXiangyu123](https://github.com/HuXiangyu123) (cost-tiered example)
-- [@zouhh22333-beep](https://github.com/zouhh22333-beep) (translation/backtranslation)
-- [@pei-pei45](https://github.com/pei-pei45) (competitive monitoring)
-- [@mmjwxbc](https://github.com/mmjwxbc) (interview simulator)
-- [@binghuaren96](https://github.com/binghuaren96) (incident postmortem DAG)
-- [@DaiMao-UT](https://github.com/DaiMao-UT) (paper replication triage)
-- [@oooooowoooooo](https://github.com/oooooowoooooo) (rare disease information triage)
-- [@CodingBangboo](https://github.com/CodingBangboo) (Express customer support pipeline)
-- [@nuthalapativarun](https://github.com/nuthalapativarun) (Doubao and Zhipu provider examples)
-- [@goodneamtakenbydogs](https://github.com/goodneamtakenbydogs) (Moonshot and Qwen provider examples)
-- [@suans4746-del](https://github.com/suans4746-del) (narrative puzzle hint arbitration)
-- [@gregkonush](https://github.com/gregkonush) (Bilig WorkPaper MCP integration)
-
-**Docs & tests**
-
-- [@tmchow](https://github.com/tmchow) (llama.cpp docs)
-- [@kenrogers](https://github.com/kenrogers) (OpenRouter docs)
-- [@jadegold55](https://github.com/jadegold55) (LLM adapter test coverage)
-- [@btroops](https://github.com/btroops) (DeepSeek tool-calling tests)
-- [@nuthalapativarun](https://github.com/nuthalapativarun) (context-management docs)
-- [@Oxygen56](https://github.com/Oxygen56) (errors.ts tests, provider docs for Grok/DeepSeek/Doubao)
-- [@RheagalFire](https://github.com/RheagalFire) (LiteLLM gateway docs)
-
-</details>
+Per-contributor credits by area are in [CONTRIBUTORS.md](https://github.com/open-multi-agent/open-multi-agent/blob/main/CONTRIBUTORS.md).
 
 ## License
 

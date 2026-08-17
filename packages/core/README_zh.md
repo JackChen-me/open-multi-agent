@@ -21,10 +21,7 @@
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.6-blue" alt="TypeScript"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/stargazers"><img src="https://img.shields.io/github/stars/open-multi-agent/open-multi-agent" alt="GitHub stars"></a>
-  <a href="https://github.com/open-multi-agent/open-multi-agent/network/members"><img src="https://img.shields.io/github/forks/open-multi-agent/open-multi-agent" alt="GitHub forks"></a>
 </p>
 
 <p align="center">
@@ -71,8 +68,6 @@ npm create oma-app@latest my-oma
 npm install @open-multi-agent/core
 ```
 
-*若正从 `@jackchen_me/open-multi-agent` 迁移：该包已弃用，请改用 `@open-multi-agent/core`。*
-
 ```typescript
 import { OpenMultiAgent, type AgentConfig } from '@open-multi-agent/core'
 
@@ -112,33 +107,13 @@ console.log(result.agentResults.get('coordinator')?.output)
 
 ### 结构化单 Agent 输入
 
-`Agent.run()`、`Agent.stream()` 与 `OpenMultiAgent.runAgent()` 除了原有字符串形式，也接受完整的 `LLMMessage[]`。应用需要传入自有对话历史或图片等内容块时，可使用消息形式：
+`Agent.run()`、`Agent.stream()` 与 `OpenMultiAgent.runAgent()` 除了原有字符串形式，也接受完整的 `LLMMessage[]`，用于传入应用自有对话历史或图片等内容块。结构化输入会经过校验和防御性复制；Process 和 ACP backend 仍只接受字符串，遇到结构化参数会明确拒绝，不会静默丢弃历史或图片。复制、hook 与外部 backend 的完整语义见[结构化 Agent 输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)，可运行示例见 [`basics/structured-input`](examples/basics/structured-input.ts)。
 
-```typescript
-import { OpenMultiAgent, type LLMMessage } from '@open-multi-agent/core'
+### 执行路由
 
-const messages: LLMMessage[] = [{
-  role: 'user',
-  content: [
-    { type: 'text', text: '描述这张图片。' },
-    {
-      type: 'image',
-      source: { type: 'base64', media_type: 'image/png', data: imageBase64 },
-    },
-  ],
-}]
+`runTeam()` 默认使用确定性路由，不产生额外模型调用。设置 `executionRouting: { strategy: 'hybrid' }` 后，Team 决策仍由确定性 Router 保留，只有 Single 候选会交给一次无工具调用的 `TaskProfiler`，结果通过 `routingDecision` 与 `semanticRoutingAssessment` 暴露。Profiler 会依次回退到 Coordinator adapter 和 Orchestrator 默认 Provider，因此即使每个 worker 都有独立 adapter 也可能产生默认 Provider 调用。该 Provider 边界与完整的优先级规则见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)；[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)负责选择该拓扑内使用的模型。
 
-const result = await new OpenMultiAgent().runAgent(
-  { name: 'vision', model: 'claude-sonnet-4-6' },
-  messages,
-)
-```
-
-持久化对话的 `Agent.prompt()` 接受字符串或单个 `ContentBlock[]` 用户轮次；更早的轮次通过 `AgentConfig.history` 恢复。结构化输入会经过校验和防御性复制。`beforeRun` 同时收到完整的 `messages` 与向后兼容的最新用户文本 `prompt`。Process 和 ACP backend 仍只接受字符串，遇到结构化参数会明确拒绝，不会静默丢弃历史或图片。复制、hook、progress/评测与外部 backend 的完整语义见[结构化 Agent 输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)，可运行示例见 [`basics/structured-input`](examples/basics/structured-input.ts)。
-
-自动 `runTeam()` 默认使用确定性路由，不会产生额外模型调用。显式设置 `executionRouting: { strategy: 'hybrid' }` 才会启用混合语义路由：`DeterministicRouter` 直接保留 Team 决策，只把 Single 候选交给一次无工具调用的 `TaskProfiler`；随后由确定性 Policy 决定保持 Single、升级为 Team，或要求调用方显式声明治理约束。有效的自定义 `executionRouter` 决策、显式 `mode` 和治理声明仍具有更高优先级。自动路由结果通过 `routingDecision` 暴露实际决定；运行过 Profiler 时，还会提供 `semanticRoutingAssessment`。详见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)。Execution Routing 选择 Single 或 Team，[Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)选择该拓扑内使用的模型。
-
-启用 Hybrid 后，Profiler 会把目标文本发送给显式配置的路由 adapter；若未配置，则依次使用 Coordinator adapter 和 Orchestrator 的默认 Provider。最后一种回退即使在每个 worker 都有独立 adapter 时也可能产生默认 Provider 调用。若目标不能跨越该 Provider 边界，请配置 `executionRouting.adapter` 或使用 deterministic 策略。
+### 声明式治理角色
 
 当应用必须强制使用具名的独立角色时，直接声明治理意图，而不是依赖目标里的措辞：
 
@@ -154,9 +129,7 @@ if (governed.governanceConclusion !== 'satisfied') {
 }
 ```
 
-`required` 与 `preferred` 都会绕过自动拆解和简单目标短路。OMA 为每个声明的 roster 名称创建一个任务、指派给该 Agent，并按 `requiredOrder` 串联任务；依赖输出会传递给下游角色。拓扑只来自这些结构化字段，因此不同语言的等价目标会得到相同的角色与顺序。`none` 或省略 `governanceIntent` 时保持现有的自动 `runTeam()` 行为。
-
-执行结束后，`governanceConclusion` 的值为 `satisfied`、`unsatisfied` 或 `not-applicable`。对治理有要求的应用必须将它与 `success` 分开检查：该结论来自结构化执行回执，而不是模型回答中的角色名称或批准措辞。详见[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam)。
+拓扑只来自这些结构化字段，因此不同语言的等价目标会得到相同的角色与顺序。`governanceConclusion` 来自结构化执行回执，而不是模型回答中的角色名称或批准措辞，对治理有要求的应用必须将它与 `success` 分开检查。详见[声明式治理角色](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#declared-governance-roles-in-runteam)。
 
 ## 调度
 
@@ -180,13 +153,7 @@ const orchestrator = new OpenMultiAgent({
 | `capability-match` | 先过滤显式任务要求，再优先匹配声明的能力标签，最后使用兼容的关键词亲和度 | 任务或 Agent 声明了有区分度的要求/能力 |
 | `composite` | 按阻塞的下游任务数排列任务，再在合格 Agent 中综合选择匹配度与可用容量最优者 | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
 
-Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
-任务可通过 `requires` 声明硬约束。任何调度策略无法满足这些约束时，都会在
-worker 执行前失败。Coordinator 计划默认也会在引用
-roster 之外的 Agent 时提前失败；仅在需要保留旧的自动重新分配行为时设置
-`strictAssignees: false`。权重语义、负载归一化、
-`NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
-见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
+Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，任务可通过 `requires` 声明硬约束；任何策略无法满足这些约束时，都会在 worker 执行前失败。权重语义、负载归一化、`strictAssignees`，以及 `NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 两种失败模式见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
 
 ## 核心能力
 
@@ -300,75 +267,7 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
   <img src="https://contrib.rocks/image?repo=open-multi-agent/open-multi-agent&max=100" />
 </a>
 
-<details>
-<summary>按领域展开贡献者致谢</summary>
-
-**框架功能**
-
-- [@ibrahimkzmv](https://github.com/ibrahimkzmv)（token 预算、上下文策略、依赖隔离上下文、工具预设、glob、MCP 集成、可配置 Coordinator、CLI、Dashboard 渲染、trace 事件类型）
-- [@apollo-mg](https://github.com/apollo-mg)（上下文压缩修复、采样参数）
-- [@tizerluo](https://github.com/tizerluo)（onPlanReady、onAgentStream）
-- [@CodingBangboo](https://github.com/CodingBangboo)（planOnly 模式）
-- [@Xin-Mai](https://github.com/Xin-Mai)（output schema 验证）
-- [@JasonOA888](https://github.com/JasonOA888)（AbortSignal 支持）
-- [@EchoOfZion](https://github.com/EchoOfZion)（简单目标跳过 Coordinator）
-- voidborne-d（OpenAI 混合内容修复、text-tool-extractor 深度修复）
-- [@NamelessNATM](https://github.com/NamelessNATM)（agent 委派基础实现）
-- [@MyPrototypeWhat](https://github.com/MyPrototypeWhat)（reasoning blocks、reasoning_effort、采样参数对齐、trace 输入输出）
-- [@SiMinus](https://github.com/SiMinus)（流式 reasoning 事件）
-- [@matthewYang08](https://github.com/matthewYang08)（OpenAI reasoning 转文本回退）
-- [@dvirarad](https://github.com/dvirarad)（OpenAI 系列 adapter 健壮性）
-- [@cat0825](https://github.com/cat0825)（model routing 策略、plan 重放、结构化共享记忆 handoff）
-- [@mvanhorn](https://github.com/mvanhorn)（checkpoint & resume）
-- [@lesbass](https://github.com/lesbass)（`TeamRunResult` 运行级 metrics 汇总）
-- [@tlysanhuo](https://github.com/tlysanhuo)（trace span 父级链接）
-- [@LambIessz](https://github.com/LambIessz)（orchestrator 成本预算、MessageBus 持久化进 checkpoint、可重试路由回退）
-- [@Bobuyoucrypto](https://github.com/Bobuyoucrypto)（Windows bash 超时杀进程树）
-
-**Provider 集成**
-
-- [@ibrahimkzmv](https://github.com/ibrahimkzmv)（Gemini）
-- [@hkalex](https://github.com/hkalex)（DeepSeek、MiniMax）
-- [@marceloceccon](https://github.com/marceloceccon)（Grok）
-- [@Klarline](https://github.com/Klarline)（Azure OpenAI）
-- [@Deathwing](https://github.com/Deathwing)（GitHub Copilot）
-- [@JackChiang233](https://github.com/JackChiang233)（Qiniu）
-- [@CodingBangboo](https://github.com/CodingBangboo)（AWS Bedrock）
-- [@kidoom](https://github.com/kidoom)（MiMo、Doubao）
-- [@KaitlynFeng](https://github.com/KaitlynFeng)（Hunyuan）
-- [@octo-patch](https://github.com/octo-patch)（MiniMax-M3 模型升级）
-
-**示例与 Cookbook**
-
-- [@mvanhorn](https://github.com/mvanhorn)（研究聚合、代码评审、会议总结、Groq 示例、Mistral 示例）
-- [@Kinoo0](https://github.com/Kinoo0)（代码评审升级）
-- [@Optimisttt](https://github.com/Optimisttt)（研究聚合升级）
-- [@Agentscreator](https://github.com/Agentscreator)（Engram 记忆集成）
-- [@fault-segment](https://github.com/fault-segment)（合同审查 DAG）
-- [@HuXiangyu123](https://github.com/HuXiangyu123)（分级成本示例）
-- [@zouhh22333-beep](https://github.com/zouhh22333-beep)（翻译/回译）
-- [@pei-pei45](https://github.com/pei-pei45)（竞品监测）
-- [@mmjwxbc](https://github.com/mmjwxbc)（面试模拟器）
-- [@binghuaren96](https://github.com/binghuaren96)（事故复盘 DAG）
-- [@DaiMao-UT](https://github.com/DaiMao-UT)（论文复现分诊）
-- [@oooooowoooooo](https://github.com/oooooowoooooo)（罕见病信息分诊）
-- [@CodingBangboo](https://github.com/CodingBangboo)（Express 客服流水线）
-- [@nuthalapativarun](https://github.com/nuthalapativarun)（Doubao、Zhipu provider 示例）
-- [@goodneamtakenbydogs](https://github.com/goodneamtakenbydogs)（Moonshot、Qwen provider 示例）
-- [@suans4746-del](https://github.com/suans4746-del)（叙事谜题提示仲裁）
-- [@gregkonush](https://github.com/gregkonush)（Bilig WorkPaper MCP 集成）
-
-**文档与测试**
-
-- [@tmchow](https://github.com/tmchow)（llama.cpp 文档）
-- [@kenrogers](https://github.com/kenrogers)（OpenRouter 文档）
-- [@jadegold55](https://github.com/jadegold55)（LLM adapter 测试覆盖）
-- [@btroops](https://github.com/btroops)（DeepSeek 工具调用测试）
-- [@nuthalapativarun](https://github.com/nuthalapativarun)（上下文管理文档）
-- [@Oxygen56](https://github.com/Oxygen56)（errors.ts 测试、Grok/DeepSeek/Doubao provider 文档）
-- [@RheagalFire](https://github.com/RheagalFire)（LiteLLM 网关文档）
-
-</details>
+按领域展开的逐人致谢见 [CONTRIBUTORS.md](https://github.com/open-multi-agent/open-multi-agent/blob/main/CONTRIBUTORS.md)。
 
 ## 许可证
 

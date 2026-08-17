@@ -198,7 +198,7 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](.github/CONTRIBUTING
   <img src="https://contrib.rocks/image?repo=open-multi-agent/open-multi-agent&max=100" />
 </a>
 
-Contributor credits by area are on the [Core package page](packages/core/README.md#contributors).
+Contributor credits by area are in [CONTRIBUTORS.md](CONTRIBUTORS.md).
 
 ## License
 
