@@ -217,7 +217,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 可选集成只在使用时加载：core 直接安装的只有 `@anthropic-ai/sdk`、`openai` 和 `zod`，其余 SDK 都是按需懒加载的可选 peer，OpenTelemetry 完全归属 `@open-multi-agent/otel`。依赖变更按实际价值与安全、体积、维护、兼容成本权衡，不设固定数量上限。
 
-凭证、模型、AI SDK 桥接、推理设置、MCP 与本地端点配置见 [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)和[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)。
+凭证、模型、AI SDK 桥接、推理设置、MCP、本地端点配置，以及出网管控的确切生效边界，见 [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[框架级 LLM 出网策略](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md)和[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)。
 
 **Provider 赞助商**
 
@@ -238,7 +238,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 预算检查发生在 turn 和任务边界，因此单次运行最多可能超出一个模型 turn，不是分厘精确的截停。`estimateCost` 收到每次调用的 token 用量，以及 agent、生效的 `model`、`provider`、阶段和 `taskId`；价格表由应用自己维护。
 
-内置工具默认拒绝，且每个对模型可见的工具结果都会发送给你的模型 provider，读取与执行权限应审慎授予。工具可通过 `modelOutput` 将应用自有数据与发送给模型的文本、图片或文件内容分开；完整契约见[工具配置指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#rich-image-and-file-results)。文件工具受配置的 `cwd` 限制；`bash` 一旦授权便不受该沙箱约束。trace、shell 输出和 Viewer payload 默认自动脱敏，但结果消息与 checkpoint 属于各自独立的持久化边界。
+内置工具默认拒绝，且每个对模型可见的工具结果都会发送给你的模型 provider，读取与执行权限应审慎授予。工具可通过 `modelOutput` 将应用自有数据与发送给模型的文本、图片或文件内容分开；完整契约见[工具配置指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#rich-image-and-file-results)。文件工具受配置的 `cwd` 限制；`bash` 一旦授权便不受该沙箱约束。其执行目标可通过 [`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors) 替换，而默认的 `LocalShellExecutor` 保持宿主执行，本身不构成安全边界。trace、shell 输出和 Viewer payload 默认自动脱敏，但结果消息与 checkpoint 属于各自独立的持久化边界。
 
 ### 可观测性
 
