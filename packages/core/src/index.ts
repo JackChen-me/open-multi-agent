@@ -337,6 +337,7 @@ export type {
   // Tools
   ToolDefinition,
   ToolResult,
+  ToolResultMetadata,
   ToolUseContext,
   ToolCallContext,
   ToolCallDecision,
@@ -381,12 +382,15 @@ export type {
   AcpAgentBackendConfig,
   AcpPermissionPolicy,
   AcpPermissionRequest,
+  ProcessAgentBackendConfig,
+  ProcessBackendInputMode,
   BeforeRunHookContext,
   BeforeRunHookResult,
   ToolCallRecord,
   LoopDetectionConfig,
   LoopDetectionInfo,
   ContextStrategy,
+  ThinkingConfig,
 
   // Team
   TeamConfig,
@@ -443,6 +447,7 @@ export type {
   OrchestratorConfig,
   OrchestratorEvent,
   CoordinatorConfig,
+  CostEstimateContext,
   CheckpointOptions,
   CheckpointSnapshot,
   CheckpointSnapshotV1,
@@ -458,6 +463,9 @@ export type {
   TaskQueueSnapshotV1,
   TaskQueueSnapshotV2,
   TaskSnapshot,
+  MessageBusSnapshot,
+  MessageSnapshot,
+  MessageReadStateSnapshot,
 
   // Trace
   TraceEventType,
