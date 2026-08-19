@@ -154,6 +154,8 @@ export interface ConsensusCoreParams {
   readonly prompt: string
   /** Proposed answer to scrutinise (proposer output, or the task result). */
   readonly initialAnswer: string
+  /** Parsed output paired with `initialAnswer`, when the proposer uses an output schema. */
+  readonly initialStructured?: unknown
   /** Usage attributable so far that should be reported back (proposer usage, or zero for the verify hook). */
   readonly initialUsage: TokenUsage
   /** Tokens already spent that count toward the budget but are not re-reported (e.g. prior task usage). */
@@ -181,12 +183,17 @@ export interface ConsensusCoreParams {
   readonly consensusSpan?: TraceSpan
 }
 
+/** Internal consensus result that preserves parsed output across revision rounds. */
+interface ConsensusCoreResult extends ConsensusResult {
+  readonly structured?: unknown
+}
+
 /**
  * Run the judge/refutation loop over a proposed answer: judges run sequentially
  * (so quorum and budget can stop the rest), dissent is recorded to shared memory
  * and trace, and `onDissent` decides whether to revise, reject, or keep.
  */
-export async function runConsensusCore(params: ConsensusCoreParams): Promise<ConsensusResult> {
+export async function runConsensusCore(params: ConsensusCoreParams): Promise<ConsensusCoreResult> {
   const {
     team, prompt, judges, mode, quorum, maxRounds, verdictSchema, onDissent,
     judgePrompt, budget, budgetBaseTokens, reviseProposer, defaults, onTrace, runId,
@@ -196,6 +203,7 @@ export async function runConsensusCore(params: ConsensusCoreParams): Promise<Con
   const sharedMem = team.getSharedMemoryInstance()
 
   let answer = params.initialAnswer
+  let structured = params.initialStructured
   let usage = params.initialUsage
   const dissent: string[] = []
   let rounds = 0
@@ -293,7 +301,10 @@ export async function runConsensusCore(params: ConsensusCoreParams): Promise<Con
       )
       usage = addUsage(usage, r.tokenUsage)
       if (!r.success && executionFailure === undefined) executionFailure = r
-      if (r.success && r.output) answer = r.output
+      if (r.success && r.output) {
+        answer = r.output
+        structured = r.structured
+      }
       if (overBudget() || params.shouldStop?.()) { budgetHit = true; break }
       continue
     }
@@ -304,6 +315,7 @@ export async function runConsensusCore(params: ConsensusCoreParams): Promise<Con
     accepted || (!budgetHit && onDissent === 'keep') ? 'accepted' : 'rejected'
   return {
     answer,
+    ...(structured !== undefined ? { structured } : {}),
     verdict,
     dissent,
     rounds,
@@ -352,6 +364,7 @@ export async function runTaskVerify(
     team,
     prompt: task.description,
     initialAnswer: result.output,
+    initialStructured: result.structured,
     initialUsage: ZERO_USAGE,
     budgetBaseTokens: ctx.cumulativeUsage.input_tokens + ctx.cumulativeUsage.output_tokens,
     judges: verify.judges,
@@ -429,6 +442,7 @@ export async function runTaskVerify(
     result: {
       ...result,
       output: useRevision ? consensus.answer : result.output,
+      structured: useRevision ? consensus.structured : result.structured,
       tokenUsage: addUsage(result.tokenUsage, consensus.tokenUsage),
     },
     verification: {
