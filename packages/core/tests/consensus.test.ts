@@ -489,6 +489,53 @@ describe('per-task verify hook', () => {
     expect((await mem.read(`worker/task:${taskId}:verdict`))?.value).toBe('accepted')
   })
 
+  it('replaces stale structured output when a verified task accepts a revision', async () => {
+    const worker = captureAdapter((p) =>
+      p.includes('previous answer')
+        ? '{"decision":"quarantine"}'
+        : '{"decision":"accept"}',
+    )
+    const judge = captureAdapter((p) =>
+      p.includes('quarantine') ? ACCEPT : DISSENT,
+    )
+    const consumer = captureAdapter('done')
+    const orch = new OpenMultiAgent()
+    const team = orch.createTeam('t', {
+      name: 't',
+      agents: [{
+        ...agent('worker', worker.adapter),
+        outputSchema: z.object({ decision: z.enum(['accept', 'quarantine']) }),
+      }, agent('consumer', consumer.adapter)],
+    })
+
+    const run = await orch.runTasks(team, [
+      {
+        title: 'verified',
+        description: 'classify the interval',
+        assignee: 'worker',
+        verify: {
+          judges: [agent('judge', judge.adapter)],
+          quorum: 1,
+          maxRounds: 2,
+          onDissent: 'revise',
+        },
+      },
+      {
+        title: 'consume-verdict',
+        description: 'use the verified structured decision',
+        assignee: 'consumer',
+        dependsOn: ['verified'],
+        dependencyPayload: 'structured',
+      },
+    ])
+    const taskId = run.tasks![0]!.id
+
+    expect(run.taskResults?.get(taskId)?.output).toBe('{"decision":"quarantine"}')
+    expect(run.taskResults?.get(taskId)?.structured).toEqual({ decision: 'quarantine' })
+    expect(consumer.prompts[0]).toContain('{"decision":"quarantine"}')
+    expect(consumer.prompts[0]).not.toContain('{"decision":"accept"}')
+  })
+
   it('feeds the prior answer into the revision prompt', async () => {
     const worker = captureAdapter((p) => (p.includes('previous answer') ? 'revised' : 'original'))
     const judge = captureAdapter(DISSENT)
