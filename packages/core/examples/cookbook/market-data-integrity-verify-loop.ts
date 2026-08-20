@@ -187,9 +187,11 @@ or collector assumption. Do not invent snapshot or reconnect facts.
 
 On a revision call, reviewer critiques are new evidence from source-specific
 judges. Address every critique, cite exact source values and affected ranges,
-and change the decision when the policy requires it. A proven boundary gap or
-an unverified reconnect overlapping active trades must never remain ACCEPT.
-Return only schema-valid JSON.`,
+and change the decision when the policy requires it. Preserve each literal
+source filename from the critiques in the matching violated_invariants[].source;
+in this recipe those filenames are snapshot-metadata.json and collector-log.txt.
+A proven boundary gap or an unverified reconnect overlapping active trades must
+never remain ACCEPT. Return only schema-valid JSON.`,
   outputSchema: IntegrityReport,
   afterRun: captureProposal,
   maxTurns: 1,
@@ -222,7 +224,10 @@ const judgeInstructions: Record<string, string> = {
 the MOCK source below. Apply its stated bridge invariant exactly. Reject any
 ACCEPT report when the first retained event does not bridge lastUpdateId + 1.
 A revised report passes only if it names the exact missing update-ID range,
-quarantines the interval, and recommends rebuilding a verified overlap.
+quarantines the interval, cites the literal filename snapshot-metadata.json in
+the matching violated invariant, and recommends rebuilding a verified overlap.
+When dissenting, include snapshot-metadata.json verbatim in the critique so the
+proposer can preserve it in the revised report.
 
 ## Judge-only MOCK source: snapshot-metadata.json
 ${snapshotMetadata}`,
@@ -232,7 +237,10 @@ Reject any ACCEPT report when a reconnect overlaps active trading and the
 collector admits that it skipped the snapshot bridge check. A revised report
 passes only if it follows the policy, records the disconnect-to-first-event
 window (2026-08-18T09:29:59.940Z to 09:30:00.210Z), and keeps the interval out
-of backtests until replacement data is verified.
+of backtests until replacement data is verified. The matching violated
+invariant must cite the literal filename collector-log.txt. When dissenting,
+include collector-log.txt verbatim in the critique so the proposer can preserve
+it in the revised report.
 
 ## Judge-only MOCK source: collector-log.txt
 ${collectorLog}
@@ -301,63 +309,71 @@ const team = orchestrator.createTeam('market-data-integrity-team', {
 // Execute and prove the intended conflict/revision path
 // ---------------------------------------------------------------------------
 
-function assertExpectedPath(report: IntegrityReport): void {
-  if (proposalAttempts[0]?.decision !== 'ACCEPT') {
-    throw new Error('Expected the seeded first proposal to be ACCEPT.')
-  }
-  if (proposalAttempts.at(-1)?.decision !== 'QUARANTINE') {
-    throw new Error('Expected judge dissent to revise the proposal to QUARANTINE.')
-  }
-
+function expectedPathAssertions(
+  report: IntegrityReport,
+): Array<{ name: string; pass: boolean }> {
   const roundOneJudges = new Set(
     consensusEvents.filter((event) => event.round === 1).map((event) => event.agent),
   )
-  for (const judge of ['protocol-continuity-judge', 'backtest-risk-judge']) {
-    if (!roundOneJudges.has(judge)) {
-      throw new Error(`Expected quorum: 2 to run ${judge} in round one.`)
-    }
-  }
-
   const roundTwoAccepted = new Set(
     consensusEvents
       .filter((event) => event.round === 2 && event.accepted)
       .map((event) => event.agent),
   )
-  if (roundTwoAccepted.size !== 2) {
-    throw new Error('Expected both source-specific judges to accept the revised report.')
-  }
-
   const missingRangeRecorded = report.affected_ranges.some(
     (item) => item.kind === 'update_id' && item.range.includes('900101') && item.range.includes('900104'),
   )
-  if (!missingRangeRecorded) {
-    throw new Error('Revised report omitted the proven 900101-900104 update-ID gap.')
-  }
-
   const reconnectWindowRecorded = report.affected_ranges.some(
     (item) =>
       item.kind === 'time' &&
       item.range.includes('09:29:59.940') &&
       item.range.includes('09:30:00.210'),
   )
-  if (!reconnectWindowRecorded) {
-    throw new Error('Revised report omitted the collector reconnect window.')
-  }
-
   const evidenceSources = new Set(report.violated_invariants.map((item) => item.source))
-  if (![...evidenceSources].some((source) => source.includes('snapshot-metadata.json'))) {
-    throw new Error('Revised report did not cite the protocol judge source.')
-  }
-  if (![...evidenceSources].some((source) => source.includes('collector-log.txt'))) {
-    throw new Error('Revised report did not cite the backtest-risk judge source.')
-  }
-
   const hasReplacementAction = report.recommended_actions.some((action) =>
     /re-?download|rebuild|replace/i.test(action),
   )
-  if (!hasReplacementAction) {
-    throw new Error('Revised report omitted a concrete replacement-data remediation.')
-  }
+
+  return [
+    {
+      name: 'the seeded first proposal is ACCEPT',
+      pass: proposalAttempts[0]?.decision === 'ACCEPT',
+    },
+    {
+      name: 'judge dissent revises the proposal to QUARANTINE',
+      pass: proposalAttempts.at(-1)?.decision === 'QUARANTINE',
+    },
+    {
+      name: 'both source-specific judges run in round one',
+      pass: ['protocol-continuity-judge', 'backtest-risk-judge'].every((judge) =>
+        roundOneJudges.has(judge),
+      ),
+    },
+    {
+      name: 'both source-specific judges accept the revised report',
+      pass: roundTwoAccepted.size === 2,
+    },
+    {
+      name: 'the revised report records the proven 900101-900104 update-ID gap',
+      pass: missingRangeRecorded,
+    },
+    {
+      name: 'the revised report records the collector reconnect window',
+      pass: reconnectWindowRecorded,
+    },
+    {
+      name: 'the revised report cites snapshot-metadata.json',
+      pass: [...evidenceSources].some((source) => source.includes('snapshot-metadata.json')),
+    },
+    {
+      name: 'the revised report cites collector-log.txt',
+      pass: [...evidenceSources].some((source) => source.includes('collector-log.txt')),
+    },
+    {
+      name: 'the revised report includes a concrete replacement-data remediation',
+      pass: hasReplacementAction,
+    },
+  ]
 }
 
 async function main(): Promise<void> {
@@ -372,8 +388,6 @@ async function main(): Promise<void> {
   const reportResult = reportTask ? result.taskResults?.get(reportTask.id) : undefined
   const report = IntegrityReport.parse(reportResult?.structured)
 
-  assertExpectedPath(report)
-
   console.log(`Decision path: ${proposalAttempts.map((item) => item.decision).join(' -> ')}`)
   console.log('\nJudge audit trail:')
   for (const event of consensusEvents) {
@@ -384,6 +398,18 @@ async function main(): Promise<void> {
 
   console.log('\nVerified Market Data Integrity Report:')
   console.log(JSON.stringify(report, null, 2))
+
+  console.log('\n## Runtime Assertions\n')
+  let hasFailure = false
+  for (const assertion of expectedPathAssertions(report)) {
+    console.log(`- ${assertion.pass ? 'PASS' : 'FAIL'}: ${assertion.name}`)
+    if (!assertion.pass) hasFailure = true
+  }
+
+  if (hasFailure) {
+    console.error('Runtime assertion failed.')
+    process.exit(1)
+  }
 }
 
 main().catch((error) => {
