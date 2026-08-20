@@ -253,12 +253,40 @@ describe('runConsensus onDissent', () => {
     expect(res.verdict).toBe('rejected')
   })
 
+
   it('keep stops but keeps the answer (accepted despite dissent)', async () => {
     const { res, proposerCalls } = await run('keep')
     expect(proposerCalls).toBe(1)
     expect(res.rounds).toBe(1)
     expect(res.verdict).toBe('accepted')
     expect(res.dissent.length).toBeGreaterThan(0)
+  })
+
+  it('does not surface the revision proposer\'s parsed output on the public result', async () => {
+    // A schema-bearing proposer parses its revision internally, but runConsensus
+    // may join several proposer answers into one string, so no single parsed value
+    // corresponds to `answer`. The public ConsensusResult must not carry one.
+    const proposer: AgentConfig = {
+      ...agent('proposer', captureAdapter((p) =>
+        p.includes('previous answer') ? '{"decision":"quarantine"}' : '{"decision":"accept"}',
+      ).adapter),
+      outputSchema: z.object({ decision: z.enum(['accept', 'quarantine']) }),
+    }
+    const judge = captureAdapter((p) => (p.includes('quarantine') ? ACCEPT : DISSENT))
+    const orch = new OpenMultiAgent()
+    const team = orch.createTeam('t', { name: 't', agents: [] })
+
+    const res = await orch.runConsensus(team, 'classify the interval', {
+      proposer,
+      judges: [agent('judge', judge.adapter)],
+      quorum: 1,
+      maxRounds: 2,
+      onDissent: 'revise',
+    })
+
+    expect(res.verdict).toBe('accepted')
+    expect(res.answer).toBe('{"decision":"quarantine"}')
+    expect(Object.keys(res)).not.toContain('structured')
   })
 })
 
@@ -534,6 +562,54 @@ describe('per-task verify hook', () => {
     expect(run.taskResults?.get(taskId)?.structured).toEqual({ decision: 'quarantine' })
     expect(consumer.prompts[0]).toContain('{"decision":"quarantine"}')
     expect(consumer.prompts[0]).not.toContain('{"decision":"accept"}')
+  })
+
+  it('keeps the original structured output when a revision is rejected', async () => {
+    // Mirror of the accepted-revision case: the worker still produces a revision,
+    // but no judge ever accepts it, so both halves of the original pair must survive.
+    const worker = captureAdapter((p) =>
+      p.includes('previous answer')
+        ? '{"decision":"quarantine"}'
+        : '{"decision":"accept"}',
+    )
+    const judge = captureAdapter(DISSENT) // never accepts -> verdict stays rejected
+    const consumer = captureAdapter('done')
+    const orch = new OpenMultiAgent()
+    const team = orch.createTeam('t', {
+      name: 't',
+      agents: [{
+        ...agent('worker', worker.adapter),
+        outputSchema: z.object({ decision: z.enum(['accept', 'quarantine']) }),
+      }, agent('consumer', consumer.adapter)],
+    })
+
+    const run = await orch.runTasks(team, [
+      {
+        title: 'verified',
+        description: 'classify the interval',
+        assignee: 'worker',
+        verify: {
+          judges: [agent('judge', judge.adapter)],
+          quorum: 1,
+          maxRounds: 2,
+          onDissent: 'revise',
+        },
+      },
+      {
+        title: 'consume-verdict',
+        description: 'use the verified structured decision',
+        assignee: 'consumer',
+        dependsOn: ['verified'],
+        dependencyPayload: 'structured',
+      },
+    ])
+    const taskId = run.tasks![0]!.id
+
+    // The rejected revision must not leak into either representation.
+    expect(run.taskResults?.get(taskId)?.output).toBe('{"decision":"accept"}')
+    expect(run.taskResults?.get(taskId)?.structured).toEqual({ decision: 'accept' })
+    expect(consumer.prompts[0]).toContain('{"decision":"accept"}')
+    expect(consumer.prompts[0]).not.toContain('{"decision":"quarantine"}')
   })
 
   it('feeds the prior answer into the revision prompt', async () => {

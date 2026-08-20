@@ -25,6 +25,7 @@ Opening your first PR gets you added here. See the [contribution guide](.github/
 - [@tlysanhuo](https://github.com/tlysanhuo) (trace span parent linkage)
 - [@LambIessz](https://github.com/LambIessz) (orchestrator cost budget, MessageBus persistence in checkpoints, retryable route fallback)
 - [@Bobuyoucrypto](https://github.com/Bobuyoucrypto) (Windows bash timeout process-tree kill)
+- [@green3sf](https://github.com/green3sf) (structured output refresh after an accepted verify revision)
 
 ## Provider integrations
 
