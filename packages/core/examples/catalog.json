@@ -165,6 +165,17 @@
       "level": "advanced"
     },
     {
+      "id": "market-data-integrity-verify-loop",
+      "path": "cookbook/market-data-integrity-verify-loop.ts",
+      "title": "Market Data Integrity Verify Loop",
+      "description": "Challenge a provisional Binance L2 integrity report with source-specific protocol and backtest-risk judges before revising it to quarantine.",
+      "section": "goal",
+      "goal": "use-case-recipes",
+      "capabilities": ["run-tasks", "task-dependencies", "structured-output", "consensus", "conflict-detection"],
+      "format": "script",
+      "level": "advanced"
+    },
+    {
       "id": "translation-backtranslation",
       "path": "cookbook/translation-backtranslation.ts",
       "title": "Translation and Backtranslation",

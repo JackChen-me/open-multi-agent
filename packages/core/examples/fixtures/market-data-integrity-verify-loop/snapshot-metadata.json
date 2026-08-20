@@ -1,0 +1,25 @@
+{
+  "fixture": {
+    "classification": "MOCK",
+    "description": "Synthetic REST snapshot and first retained stream-event metadata"
+  },
+  "symbol": "BTCUSDT",
+  "snapshot": {
+    "captured_at": "2026-08-18T09:30:00.052Z",
+    "last_update_id": 900100,
+    "best_bid": ["115000.10", "0.600"],
+    "best_ask": ["115000.20", "0.540"]
+  },
+  "first_retained_event": {
+    "event_time": "2026-08-18T09:30:00.210Z",
+    "first_update_id": 900105,
+    "final_update_id": 900106
+  },
+  "required_bridge_invariant": "first_update_id <= last_update_id + 1 <= final_update_id",
+  "expected_next_update_id": 900101,
+  "observed_first_update_id": 900105,
+  "missing_update_id_range": {
+    "from": 900101,
+    "to": 900104
+  }
+}

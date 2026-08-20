@@ -1,0 +1,7 @@
+# MOCK FIXTURE — synthetic collector lifecycle log
+2026-08-18T09:29:59.940Z WARN  depth-stream BTCUSDT websocket disconnected reason=abnormal_close
+2026-08-18T09:29:59.979Z INFO  depth-stream BTCUSDT websocket reconnected connection_id=conn-42
+2026-08-18T09:30:00.001Z INFO  snapshot     BTCUSDT REST snapshot requested request_id=snap-77
+2026-08-18T09:30:00.052Z INFO  snapshot     BTCUSDT REST snapshot received lastUpdateId=900100 request_id=snap-77
+2026-08-18T09:30:00.210Z INFO  depth-stream BTCUSDT first buffered event U=900105 u=900106 connection_id=conn-42
+2026-08-18T09:30:00.211Z WARN  depth-stream BTCUSDT snapshot bridge was not evaluated collector_mode=legacy

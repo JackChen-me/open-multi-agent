@@ -1,0 +1,58 @@
+{
+  "fixture": {
+    "classification": "MOCK",
+    "description": "Synthetic Binance-style BTCUSDT diff-depth events"
+  },
+  "symbol": "BTCUSDT",
+  "capture_interval": {
+    "start": "2026-08-18T09:30:00.000Z",
+    "end": "2026-08-18T09:30:01.000Z"
+  },
+  "events": [
+    {
+      "event_time": "2026-08-18T09:30:00.210Z",
+      "first_update_id": 900105,
+      "final_update_id": 900106,
+      "bids": [["115000.10", "0.420"]],
+      "asks": [["115000.20", "0.380"]],
+      "reconstructed_best_bid_after": "115000.10",
+      "reconstructed_best_ask_after": "115000.20"
+    },
+    {
+      "event_time": "2026-08-18T09:30:00.330Z",
+      "first_update_id": 900107,
+      "final_update_id": 900107,
+      "bids": [["115000.00", "0.510"]],
+      "asks": [],
+      "reconstructed_best_bid_after": "115000.10",
+      "reconstructed_best_ask_after": "115000.20"
+    },
+    {
+      "event_time": "2026-08-18T09:30:00.470Z",
+      "first_update_id": 900108,
+      "final_update_id": 900109,
+      "bids": [],
+      "asks": [["115000.30", "0.295"]],
+      "reconstructed_best_bid_after": "115000.10",
+      "reconstructed_best_ask_after": "115000.20"
+    },
+    {
+      "event_time": "2026-08-18T09:30:00.650Z",
+      "first_update_id": 900110,
+      "final_update_id": 900110,
+      "bids": [["115000.10", "0.000"]],
+      "asks": [["115000.20", "0.440"]],
+      "reconstructed_best_bid_after": "115000.00",
+      "reconstructed_best_ask_after": "115000.20"
+    },
+    {
+      "event_time": "2026-08-18T09:30:00.880Z",
+      "first_update_id": 900111,
+      "final_update_id": 900112,
+      "bids": [["114999.90", "0.620"]],
+      "asks": [["115000.40", "0.210"]],
+      "reconstructed_best_bid_after": "115000.00",
+      "reconstructed_best_ask_after": "115000.20"
+    }
+  ]
+}

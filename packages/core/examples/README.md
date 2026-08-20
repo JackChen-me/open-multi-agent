@@ -89,6 +89,7 @@ End-to-end examples framed around a concrete problem (meeting summarization, tra
 | [`cookbook/rare-disease-information-triage`](cookbook/rare-disease-information-triage.ts) | Source-isolated rare disease information triage with mock fixtures, seeded misinformation/conflict detection, and safety-boundary arbitration. |
 | [`cookbook/personalized-interview-simulator`](cookbook/personalized-interview-simulator.ts) | Interactive interviewer loop with observer flags, shared memory, and structured debrief. |
 | [`cookbook/narrative-puzzle-hint-arbitration`](cookbook/narrative-puzzle-hint-arbitration.ts) | Multi-source hint arbitration with an external safety veto that sits outside the generation loop. |
+| [`cookbook/market-data-integrity-verify-loop`](cookbook/market-data-integrity-verify-loop.ts) | Binance L2 integrity gate where source-specific judges refute a provisional report and require a verified quarantine revision. |
 | [`cookbook/translation-backtranslation`](cookbook/translation-backtranslation.ts) | Translate → back-translate with a different provider → flag semantic drift (cross-model). |
 
 ## integrations — external systems

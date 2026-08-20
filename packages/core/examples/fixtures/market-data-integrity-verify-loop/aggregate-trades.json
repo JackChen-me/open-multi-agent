@@ -1,0 +1,37 @@
+{
+  "fixture": {
+    "classification": "MOCK",
+    "description": "Synthetic Binance-style aggregate trades"
+  },
+  "symbol": "BTCUSDT",
+  "trades": [
+    {
+      "aggregate_trade_id": 700501,
+      "event_time": "2026-08-18T09:30:00.082Z",
+      "price": "115000.20",
+      "quantity": "0.180",
+      "buyer_was_maker": false
+    },
+    {
+      "aggregate_trade_id": 700502,
+      "event_time": "2026-08-18T09:30:00.119Z",
+      "price": "115000.10",
+      "quantity": "0.310",
+      "buyer_was_maker": true
+    },
+    {
+      "aggregate_trade_id": 700503,
+      "event_time": "2026-08-18T09:30:00.164Z",
+      "price": "115000.20",
+      "quantity": "0.260",
+      "buyer_was_maker": false
+    },
+    {
+      "aggregate_trade_id": 700504,
+      "event_time": "2026-08-18T09:30:00.196Z",
+      "price": "115000.30",
+      "quantity": "0.145",
+      "buyer_was_maker": false
+    }
+  ]
+}
