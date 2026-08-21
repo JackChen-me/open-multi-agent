@@ -2691,7 +2691,11 @@ export class OpenMultiAgent {
       })
     }
 
-    const result = await runConsensusCore({
+    // `structured` belongs to the per-task verify hook, where one task result
+    // carries one parsed value. Here several proposer answers may be joined into
+    // a single string, so no parsed value corresponds to it; drop it rather than
+    // leak an undeclared field onto the public ConsensusResult.
+    const { structured: _structured, ...result } = await runConsensusCore({
       team,
       prompt,
       initialAnswer: candidates.join('\n\n---\n\n'),

@@ -1995,7 +1995,7 @@ async function callAstaTool(
 }
 
 async function loadLiveSourceBundle(query: string): Promise<SourceBundle> {
-  const githubHeaders = process.env.GITHUB_TOKEN
+  const githubHeaders: Record<string, string> = process.env.GITHUB_TOKEN
     ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` }
     : {}
 

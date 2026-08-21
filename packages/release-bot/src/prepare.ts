@@ -115,9 +115,11 @@ export async function prepareReleasePr(
   await assertExpectedChanges(options, changedByPlan)
   await options.runner.run('git', ['diff', '--check'], { cwd: options.repoRoot })
   if (options.validate !== false) {
-    await options.runner.run('npm', ['run', 'lint'], { cwd: options.repoRoot })
-    await options.runner.run('npm', ['test'], { cwd: options.repoRoot })
-    await options.runner.run('npm', ['run', 'build'], { cwd: options.repoRoot })
+    // Echoed: these three dominate the step's wall clock, and a silent failure
+    // or hang here is otherwise indistinguishable from a slow model call.
+    await options.runner.run('npm', ['run', 'lint'], { cwd: options.repoRoot, echo: true })
+    await options.runner.run('npm', ['test'], { cwd: options.repoRoot, echo: true })
+    await options.runner.run('npm', ['run', 'build'], { cwd: options.repoRoot, echo: true })
   }
 
   const stagedPaths = [...new Set([...changedByPlan, 'package-lock.json'])]

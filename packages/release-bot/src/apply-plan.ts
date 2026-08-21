@@ -102,9 +102,82 @@ export function renderChangelogSections(sections: ChangelogSections): string {
     .join('\n\n')
 }
 
+const CORE_PACKAGE_NAME = '@open-multi-agent/core'
+const SCAFFOLDER_PACKAGE_NAME = 'create-oma-app'
+
 export function renderReleaseNotes(changelog: string, coreVersion: string): string {
   const section = findTopLevelSection(changelog, coreVersion, true)
   return unwrapMarkdown(changelog.slice(section.bodyStart, section.end).trim())
+}
+
+/** One published workspace as the release body reports it. */
+export interface ReleasePackageSummary {
+  readonly name: string
+  readonly version: string
+  /** False when this release left the package's version where it already was. */
+  readonly changed: boolean
+}
+
+/** One outside contributor and what they landed in this release. */
+export interface ReleaseContributor {
+  /** GitHub login when the commit carried a noreply address, else the author name. */
+  readonly name: string
+  /** What they landed, one entry per merged commit, already stripped of its type prefix. */
+  readonly contributions: readonly string[]
+}
+
+export interface ReleaseBodyInput {
+  /** Output of {@link renderReleaseNotes}. */
+  readonly notes: string
+  readonly coreVersion: string
+  readonly packages: readonly ReleasePackageSummary[]
+  /** Outside contributors only; omitted entirely when there are none. */
+  readonly contributors?: readonly ReleaseContributor[]
+}
+
+/**
+ * Compose the published release body.
+ *
+ * The changelog section alone answers "what changed" but not "what do I
+ * install", which is the first thing a reader of a release page needs. Both
+ * added sections are derived from the release commit's own manifests, so no
+ * model output reaches them.
+ */
+export function composeReleaseBody(input: ReleaseBodyInput): string {
+  const core = input.packages.find(item => item.name === CORE_PACKAGE_NAME)
+  if (!core) throw new Error(`Release body is missing the ${CORE_PACKAGE_NAME} package summary.`)
+  if (core.version !== input.coreVersion) {
+    throw new Error(`Release body core version ${core.version} does not match the rendered notes ${input.coreVersion}.`)
+  }
+
+  const packageLines = input.packages.map(item => {
+    if (!item.changed) return `- \`${item.name}\`: remains at \`${item.version}\` and is not republished`
+    if (item.name === SCAFFOLDER_PACKAGE_NAME) {
+      return `- \`${item.name}\`: \`${item.version}\`; generated starters pin core \`${input.coreVersion}\``
+    }
+    return `- \`${item.name}\`: \`${item.version}\``
+  })
+
+  // Plain names, never `@handle`: a release body that mentions an account
+  // notifies it, and this text is published without the person reviewing it.
+  const thanks = (input.contributors ?? [])
+    .filter(contributor => contributor.contributions.length > 0)
+    .map(contributor => `- ${contributor.name}: ${contributor.contributions.join('; ')}`)
+  const thanksSection = thanks.length > 0 ? `\n## Thanks\n\n${thanks.join('\n')}\n` : ''
+
+  return `${input.notes}
+
+## Packages
+
+${packageLines.join('\n')}
+${thanksSection}
+## Install
+
+\`\`\`bash
+npm i ${CORE_PACKAGE_NAME}@${input.coreVersion}
+npm create oma-app@latest my-oma
+\`\`\`
+`
 }
 
 export function buildReleasePrTitle(plan: ReleasePlan): string {

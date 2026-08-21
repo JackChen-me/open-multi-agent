@@ -89,6 +89,7 @@ End-to-end examples framed around a concrete problem (meeting summarization, tra
 | [`cookbook/rare-disease-information-triage`](cookbook/rare-disease-information-triage.ts) | Source-isolated rare disease information triage with mock fixtures, seeded misinformation/conflict detection, and safety-boundary arbitration. |
 | [`cookbook/personalized-interview-simulator`](cookbook/personalized-interview-simulator.ts) | Interactive interviewer loop with observer flags, shared memory, and structured debrief. |
 | [`cookbook/narrative-puzzle-hint-arbitration`](cookbook/narrative-puzzle-hint-arbitration.ts) | Multi-source hint arbitration with an external safety veto that sits outside the generation loop. |
+| [`cookbook/market-data-integrity-verify-loop`](cookbook/market-data-integrity-verify-loop.ts) | Binance L2 integrity gate where source-specific judges refute a provisional report and require a verified quarantine revision. |
 | [`cookbook/translation-backtranslation`](cookbook/translation-backtranslation.ts) | Translate → back-translate with a different provider → flag semantic drift (cross-model). |
 
 ## integrations — external systems
@@ -135,3 +136,4 @@ Conventions:
 - **Match the provider template** when adding a provider: three-agent team (architect / developer / reviewer) building a small REST API. Keeps comparisons honest.
 - **Add a row** to the table in this file for the corresponding category.
 - **Add exactly one entry** to [`catalog.json`](catalog.json), including its user goal, capability tags, format, level, and any directory entrypoints. Do not move an example merely to change its website grouping.
+- **Type-check before sending.** `npm run lint -w @open-multi-agent/core` compiles this directory together with `src/`, so an example that drifts from the current API fails CI. Examples with their own `package.json`/`tsconfig.json` are excluded from that pass and must be listed in [`tsconfig.lint.json`](../tsconfig.lint.json); they carry their own check instead.

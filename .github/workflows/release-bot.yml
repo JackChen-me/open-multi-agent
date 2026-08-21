@@ -19,6 +19,9 @@ jobs:
     if: github.repository == 'open-multi-agent/open-multi-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Create narrowly scoped GitHub App token
         id: app-token
@@ -70,3 +73,35 @@ jobs:
           RELEASE_BOT_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_BOT_MODEL: deepseek-v4-flash
         run: node packages/release-bot/dist/cli.js prepare-pr
+
+      # A weekly job that fails only into the Actions tab is a job nobody reads.
+      # Two consecutive Friday runs failed unnoticed before this step existed.
+      # Uses the built-in token, so it needs no App permission or new secret.
+      - name: Surface a failed run so the weekly cadence cannot fail silently
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: Release bot run failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Filter the plain list rather than the search index, which lags far
+          # enough behind creation to open a second issue for one incident.
+          number=$(gh issue list --state open --limit 100 --json number,title \
+            --jq 'map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty')
+          body=$(printf '%s\n' \
+            "The \`$TRIGGER\` release bot run did not finish." \
+            "" \
+            "- Run: $RUN_URL" \
+            "- Commit: \`$COMMIT_SHA\`" \
+            "" \
+            "Open the failing step's log for the cause. A token-budget stop or a" \
+            "skipped task now names itself on the \`OMA release analysis failed.\`" \
+            "line rather than leaving it blank.")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi

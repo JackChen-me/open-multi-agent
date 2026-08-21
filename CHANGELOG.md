@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+## 1.16.1 - 2026-08-21
+
+### Added
+
+- Export eight previously internal public types from the package root
+  (ThinkingConfig, ToolResultMetadata, ProcessAgentBackendConfig,
+  ProcessBackendInputMode, CostEstimateContext, MessageBusSnapshot,
+  MessageSnapshot, MessageReadStateSnapshot)
+- Document DeepSeek V4-Pro-0813 / V4-Flash-0731 GA snapshots and default
+  thinking at high effort
+
+### Changed
+
+- Accepted verify revisions now refresh structured output together with the
+  revised answer instead of leaving stale parsed output
+- Slim core package READMEs, move contributor credits to CONTRIBUTORS.md, and
+  add LLM egress policy / shell executor coverage to the Chinese READMEs
+
+### Compatibility
+
+- All public API changes are additive: eight new type-only exports from the
+  package root
+- No public export was removed or narrowed, so existing consumers can upgrade
+  without code changes
+
 ## 1.16.0 - 2026-08-16
 
 ### Added

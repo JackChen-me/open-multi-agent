@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   applyReleasePlan,
   buildReleasePrBody,
+  composeReleaseBody,
   insertReleaseEntry,
   renderReleaseNotes,
 } from '../src/apply-plan.js'
@@ -165,3 +166,48 @@ async function writeText(root: string, path: string, value: string): Promise<voi
 async function version(root: string, path: string): Promise<string> {
   return (JSON.parse(await readFile(join(root, path), 'utf8')) as { version: string }).version
 }
+
+describe('published release body', () => {
+  const packages = [
+    { name: '@open-multi-agent/core', version: '1.15.0', changed: true },
+    { name: '@open-multi-agent/otel', version: '0.1.1', changed: false },
+    { name: 'create-oma-app', version: '0.8.0', changed: true },
+  ]
+
+  it('states what shipped, what did not, and how to install it', () => {
+    const body = composeReleaseBody({ notes: '### Added\n\n- Something.', coreVersion: '1.15.0', packages })
+
+    expect(body).toContain('### Added')
+    expect(body).toContain('- `@open-multi-agent/core`: `1.15.0`')
+    expect(body).toContain('- `@open-multi-agent/otel`: remains at `0.1.1` and is not republished')
+    expect(body).toContain('- `create-oma-app`: `0.8.0`; generated starters pin core `1.15.0`')
+    expect(body).toContain('npm i @open-multi-agent/core@1.15.0')
+  })
+
+  it('keeps every line unwrapped so GFM hard breaks add no line breaks', () => {
+    // A release body renders with GFM hard line breaks, where a wrapped
+    // paragraph becomes a column of <br>-separated fragments.
+    const body = composeReleaseBody({ notes: '### Added\n\n- Something.', coreVersion: '1.15.0', packages })
+    const continuations = body
+      .split('\n')
+      .filter(line => line.length > 0 && /^\s+\S/.test(line))
+
+    expect(continuations).toEqual([])
+  })
+
+  it('refuses a package set that does not carry core', () => {
+    expect(() => composeReleaseBody({
+      notes: '### Added',
+      coreVersion: '1.15.0',
+      packages: packages.filter(item => item.name !== '@open-multi-agent/core'),
+    })).toThrow(/missing the @open-multi-agent\/core package summary/)
+  })
+
+  it('refuses a core version that disagrees with the rendered notes', () => {
+    expect(() => composeReleaseBody({
+      notes: '### Added',
+      coreVersion: '1.15.1',
+      packages,
+    })).toThrow(/does not match the rendered notes/)
+  })
+})

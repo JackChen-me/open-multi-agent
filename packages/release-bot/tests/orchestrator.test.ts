@@ -109,6 +109,61 @@ describe('OMA release orchestration', () => {
     expect(run.proposal.createOmaAppBump).toBe('patch')
   })
 
+  it('names the run status, token totals, and unfinished tasks when the budget is exhausted', async () => {
+    // A budget stop fails no individual agent, so reporting only per-agent
+    // failures used to produce a bare "OMA release analysis failed." and sent
+    // the reader to the raw [OMA] progress log to find the cause.
+    const failure = await generateReleaseDecision({
+      repoRoot: '/tmp/unused-release-bot-test',
+      runner: neverRunner,
+      evidence,
+      adapter: new ReleaseScriptAdapter(),
+      releaseDate: '2026-08-10',
+      requireEvidenceToolCalls: false,
+      maxTokenBudget: 20,
+    }).then(() => null, (error: unknown) => error as Error)
+
+    expect(failure).toBeInstanceOf(Error)
+    const message = failure?.message ?? ''
+    expect(message.replace('OMA release analysis failed.', '').trim()).not.toBe('')
+    expect(message).toMatch(/budget_exhausted \(\d+ of 20 tokens\)/)
+    // The 2026-08-14 scheduled run failed exactly this way: an evidence agent
+    // exhausted the budget and both synthesis tasks were skipped, so no agent
+    // result carried a failure to report.
+    expect(message).toContain('Propose bounded release plan [skipped]')
+    expect(message).toContain('Review bounded release plan [skipped]')
+  })
+
+  it('rejects a non-positive token budget before starting the DAG', async () => {
+    await expect(generateReleaseDecision({
+      repoRoot: '/tmp/unused-release-bot-test',
+      runner: neverRunner,
+      evidence,
+      adapter: new ReleaseScriptAdapter(),
+      releaseDate: '2026-08-10',
+      requireEvidenceToolCalls: false,
+      maxTokenBudget: 0,
+    })).rejects.toThrow(/maxTokenBudget must be a positive integer/)
+  })
+
+  it('retries a synthesis task through a transient provider failure', async () => {
+    // Only the two synthesis tasks carry a retry. The evidence tasks must not,
+    // because a second attempt re-calls their tools and would then trip the
+    // exactly-one-call coverage assertion.
+    const adapter = new FlakyPlannerAdapter()
+    const run = await generateReleaseDecision({
+      repoRoot: '/tmp/unused-release-bot-test',
+      runner: neverRunner,
+      evidence,
+      adapter,
+      releaseDate: '2026-08-10',
+      requireEvidenceToolCalls: false,
+    })
+
+    expect(adapter.plannerAttempts).toBe(2)
+    expect(run.decision.status).toBe('release')
+  })
+
   it('aborts the complete DAG at the configured global deadline', async () => {
     await expect(generateReleaseDecision({
       repoRoot: '/tmp/unused-release-bot-test',
@@ -218,6 +273,36 @@ class EvidenceToolScriptAdapter implements LLMAdapter {
       model: options.model,
       stop_reason: 'end_turn',
       usage: { input_tokens: 2, output_tokens: 1 },
+    }
+  }
+
+  async *stream(messages: LLMMessage[], options: LLMStreamOptions): AsyncIterable<StreamEvent> {
+    const response = await this.chat(messages, options)
+    yield { type: 'done', data: response }
+  }
+}
+
+/** Fails the planner's first call with a retryable upstream error, then behaves. */
+class FlakyPlannerAdapter implements LLMAdapter {
+  readonly name = 'flaky-planner-release-test'
+  plannerAttempts = 0
+  private sequence = 0
+
+  async chat(_messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
+    const role = identifyRole(options.systemPrompt ?? '')
+    if (role === 'release-planner') {
+      this.plannerAttempts += 1
+      if (this.plannerAttempts === 1) {
+        throw Object.assign(new Error('upstream unavailable'), { status: 503 })
+      }
+    }
+    this.sequence += 1
+    return {
+      id: `flaky-${this.sequence}`,
+      content: [{ type: 'text', text: JSON.stringify(responseFor(role)) }],
+      model: options.model,
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
     }
   }
 

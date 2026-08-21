@@ -83,6 +83,39 @@ runner, Node 22.14 or newer, npm 11.5.1 or newer, and `id-token: write`.
 - [`CHANGELOG.md`](../CHANGELOG.md) is a single root file keyed by core version,
   with an `## Unreleased` section at the top.
 
+## What earns a changelog entry
+
+[`CHANGELOG.md`](../CHANGELOG.md) documents what a consumer of the published
+packages experiences. The test is mechanical: an entry is warranted when the
+change reaches a consumer through the public API surface, runtime behavior, or
+a file that ships in an npm tarball. Each package's `files` field is the
+authority on what ships; for `@open-multi-agent/core` that is `dist`,
+`README.md`, and `LICENSE`.
+
+Warranted:
+
+- a public export added, removed, renamed, or changed in signature
+- runtime behavior an unchanged caller can observe
+- content in a shipped file, including `README.md` and the JSDoc that `dist`
+  carries into the published `.d.ts` files
+
+Not warranted:
+
+- `@open-multi-agent/release-bot`, which is private and never published
+- the release process and repository automation
+- examples, fixtures, tests, CI configuration, and tsconfig files, none of
+  which ship
+- a defect introduced and fixed between two releases, because no published
+  version ever carried it
+
+A comment-only diff changes a shipped file only when that comment reaches
+`dist`. Documentation under `docs/` does not ship; describe a provider or
+runtime behavior it documents only when that behavior is itself part of the
+release.
+
+When a change is genuinely ambiguous, leave it out. The release PR diff carries
+every commit regardless, so a maintainer still sees it.
+
 ## Breaking changes
 
 Decide whether a release contains one before the release commit, not while
@@ -193,6 +226,14 @@ jq -Rs '{text: ., mode: "gfm"}' < notes.md | gh api /markdown --input - | grep -
 
 That endpoint matches what the release page renders. A correct release body
 returns `0`.
+
+The published body is the version's changelog section followed by three sections
+the changelog does not carry. `## Packages` names every workspace version and
+says which ones were not republished. `## Thanks` credits contributors from
+outside the project, resolved from the commits between the previous release tag
+and the release commit, with the maintainer's own commits and bot commits
+excluded. `## Install` is copy-pasteable. All three are derived from the release
+commit and its own manifests, so no model output reaches them.
 
 ## What CI proves
 
