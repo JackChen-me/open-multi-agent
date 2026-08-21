@@ -1,0 +1,46 @@
+{
+  "$comment": "Controlled variables for the OMA A/B benchmark. Every field here is written into bench/REPORT.md verbatim. Do not change values between the pilot and the full run without re-running the pilot.",
+  "provider": "deepseek",
+  "models": {
+    "strong": "deepseek-v4-pro",
+    "cheap": "deepseek-v4-flash"
+  },
+  "temperature": 0.2,
+  "thinking": {
+    "enabled": false
+  },
+  "maxTurns": 1,
+  "cacheBusting": true,
+  "maxTokenBudget": 400000,
+  "repetitions": 5,
+  "tasks": [
+    "contract-review",
+    "meeting-report"
+  ],
+  "groups": [
+    "A",
+    "B",
+    "C"
+  ],
+  "judge": {
+    "enabled": true,
+    "provider": "deepseek",
+    "model": "deepseek-v4-pro",
+    "temperature": 0,
+    "rubricVersion": "1",
+    "$comment": "Same vendor as the models under test. Accepted here because both candidates in every pair come from that same vendor, so vendor self-preference applies symmetrically; position bias is handled by scoring each pair in both orders. REPORT.md must state this."
+  },
+  "pricing": {
+    "$comment": "USD per 1,000,000 tokens, PEAK rates from https://api-docs.deepseek.com/quick_start/pricing (verified 2026-08-18). DeepSeek charges peak rates 01:00-04:00 and 06:00-10:00 UTC and half that off-peak; the whole benchmark invocation must sit inside one window for these numbers to be exact, and REPORT.md records the window actually used.",
+    "deepseek-v4-pro": {
+      "input": 1.32,
+      "cachedInput": 0.044,
+      "output": 3.96
+    },
+    "deepseek-v4-flash": {
+      "input": 0.44,
+      "cachedInput": 0.014,
+      "output": 1.32
+    }
+  }
+}

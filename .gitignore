@@ -9,3 +9,9 @@ oma-dashboards/
 .claude/
 .npmrc
 .env
+
+# Benchmark output. The harness in bench/src/ is tracked; everything it
+# produces is local to whoever ran it.
+bench/runs/
+bench/results-*.csv
+bench/REPORT.md
