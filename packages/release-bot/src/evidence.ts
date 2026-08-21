@@ -266,7 +266,7 @@ function parseNumstat(output: string): Map<string, Pick<ChangedFile, 'additions'
   return result
 }
 
-function extractUnreleased(changelog: string): string {
+export function extractUnreleased(changelog: string): string {
   const match = /^## Unreleased[ \t]*(?:\n|$)/m.exec(changelog)
   if (!match) throw new Error('CHANGELOG.md is missing the "## Unreleased" section.')
   const bodyStart = match.index + match[0].length
