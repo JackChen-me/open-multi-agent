@@ -23,7 +23,7 @@ import { BENCH_ROOT, loadConfig, priceCall, type BenchConfig } from './config.mt
 import { Judge } from './judge.mts'
 import { startMockUpstream } from './mock-upstream.mts'
 import { RecordingProxy, summarizeCalls } from './proxy.mts'
-import { dispersion, toCSV, type RunRecord } from './results.mts'
+import { dispersion, foldPairScore, toCSV, type RunRecord } from './results.mts'
 import { readFixture } from './prompts.mts'
 import { DAG_VARIANTS, taskById, type BenchTaskDefinition, type DagVariant } from './tasks.mts'
 
@@ -426,6 +426,7 @@ async function main(): Promise<void> {
           records.push({
             run_id: runId,
             date,
+            run_stamp: stamp,
             task: taskId,
             task_kind: task.hypothesis,
             group,
@@ -445,6 +446,7 @@ async function main(): Promise<void> {
             llm_calls: stats.llmCalls,
             success: outcome.success,
             quality_score: null,
+            quality_by_opponent: '',
             judge_model: '',
             temperature: config.temperature,
             thinking: thinkingLabel(config),
@@ -517,9 +519,16 @@ async function main(): Promise<void> {
             for (const [group, score] of Object.entries(pair.scores)) {
               const record = records.find((r) => r.run_id === `${taskId}-${group}-r${repetition}`)
               if (!record) continue
-              record.quality_score = Number(score.toFixed(3))
+              const opponent = group === 'A' ? challenger : 'A'
+              // A is judged once per challenger, so this is its second visit for
+              // every challenger after the first. Fold, never assign: the report
+              // needs A's score from *this* pair to compare it against *this*
+              // opponent.
+              const folded = foldPairScore(record.quality_by_opponent, opponent, score)
+              record.quality_by_opponent = folded.byOpponent
+              record.quality_score = Number(folded.mean.toFixed(3))
               record.judge_model = judge.model
-              record.notes = [record.notes, `judge ${pair.preferred[group]} vs ${group === 'A' ? challenger : 'A'}`]
+              record.notes = [record.notes, `judge ${pair.preferred[group]} vs ${opponent}`]
                 .filter(Boolean)
                 .join(' | ')
             }

@@ -12,7 +12,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { priceCall, pricingIsComplete } from './config.mts'
 import { summarizeCalls, type CallRecord } from './proxy.mts'
-import { dispersion, percentDelta, toCSV, type RunRecord } from './results.mts'
+import {
+  decodeOpponentScores,
+  dispersion,
+  encodeOpponentScores,
+  foldPairScore,
+  percentDelta,
+  toCSV,
+  type RunRecord,
+} from './results.mts'
 import { assertLiteral, systemPromptOf } from './prompts.mts'
 import { BENCH_TASKS, DAG_VARIANTS } from './tasks.mts'
 
@@ -94,12 +102,50 @@ test('summarizeCalls counts non-200 responses as failures', () => {
   assert.equal(summarizeCalls([failed], 100).failedCalls, 1)
 })
 
+test('foldPairScore keeps every challenger a run was judged against', () => {
+  // Regression: group A is judged once per challenger, and the earlier code
+  // assigned each verdict to a single `quality_score`. With the shipped
+  // `groups: ["A","B","C"]` the A-vs-C verdict landed last and erased the
+  // A-vs-B one, so the report's headline subtracted A's score against C from
+  // B's score against A — two different pairs.
+  const vsB = foldPairScore('', 'B', 0.72)
+  assert.equal(vsB.byOpponent, 'B=0.720')
+  assert.equal(vsB.mean, 0.72)
+
+  const vsBandC = foldPairScore(vsB.byOpponent, 'C', 0.84)
+  assert.equal(vsBandC.byOpponent, 'B=0.720;C=0.840')
+  assert.equal(decodeOpponentScores(vsBandC.byOpponent).get('B'), 0.72)
+  assert.equal(decodeOpponentScores(vsBandC.byOpponent).get('C'), 0.84)
+  assert.equal(vsBandC.mean, 0.78)
+})
+
+test('foldPairScore is idempotent, so recovering verdicts twice is safe', () => {
+  // merge-judge.mts re-reads verdict files that run-bench.mts may already have
+  // folded in, and `readdirSync` order must not change the outcome.
+  const forward = foldPairScore(foldPairScore('', 'B', 0.5).byOpponent, 'C', 0.9)
+  const reverse = foldPairScore(foldPairScore('', 'C', 0.9).byOpponent, 'B', 0.5)
+  assert.equal(forward.byOpponent, reverse.byOpponent)
+  assert.equal(foldPairScore(forward.byOpponent, 'B', 0.5).byOpponent, forward.byOpponent)
+})
+
+test('opponent scores survive a CSV round trip and ignore junk cells', () => {
+  const scores = new Map([['C', 0.8125], ['B', 0.5]])
+  // Rounded to three places and ordered, so a re-run diffs cleanly.
+  assert.equal(encodeOpponentScores(scores), 'B=0.500;C=0.813')
+  assert.deepEqual([...decodeOpponentScores('B=0.500;C=0.813')], [['B', 0.5], ['C', 0.813]])
+  // An unscored run, and cells no longer parseable, are absent rather than zero.
+  assert.equal(decodeOpponentScores('').size, 0)
+  assert.equal(decodeOpponentScores('B=;=0.5;garbage').size, 0)
+})
+
 test('toCSV escapes separators and writes null as an empty cell', () => {
   const record = {
-    run_id: 'r1', date: '2026-01-01', task: 't', task_kind: 'favourable', group: 'A', variant: 'as-published', repetition: 1,
+    run_id: 'r1', date: '2026-01-01', run_stamp: '2026-01-01-pilot', task: 't', task_kind: 'favourable',
+    group: 'A', variant: 'as-published', repetition: 1,
     group_order: 'A>B', role_models: 'a=x;b=y', input_tokens: 1, output_tokens: 2, cached_tokens: 0,
     total_tokens: 3, est_cost_usd: null, wall_seconds: 1.5, agent_count: 4, parallelism: 2,
-    max_concurrent_calls: 2, llm_calls: 4, success: true, quality_score: null, judge_model: '',
+    max_concurrent_calls: 2, llm_calls: 4, success: true, quality_score: null,
+    quality_by_opponent: '', judge_model: '',
     temperature: 0.2, thinking: 'disabled', cache_busting: true, framework_input_tokens: 1,
     framework_output_tokens: 2, budget_exceeded: false, notes: 'a, b "quoted"',
   } satisfies RunRecord

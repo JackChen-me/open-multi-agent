@@ -112,13 +112,24 @@ re-run in every variant invocation.
 
 ## Reading and recovering a run
 
+An invocation is identified by its **stamp**: `<date>`, or `<date>-<label>` when
+`--label` was passed. It names both the CSV (`bench/results-<stamp>.csv`) and the
+raw-data directory (`bench/runs/<stamp>/`), and it is what `--date` below wants —
+`--date 2026-08-18-pilot`, not `--date 2026-08-18`.
+
 ```bash
-npx tsx bench/src/report.mts      --csv bench/results-<date>.csv   # regenerate REPORT.md
-npx tsx bench/src/show-runs.mts   --date <date>                    # per-run audit table
-npx tsx bench/src/show-calls.mts  --date <date>                    # per-HTTP-call audit table
-npx tsx bench/src/render-log.mts  --date <date> --view runs        # same table as an HTML page
-npx tsx bench/src/merge-judge.mts --date <date>                    # recover a stopped judging pass
+npx tsx bench/src/report.mts      --csv bench/results-<stamp>.csv  # regenerate REPORT.md
+npx tsx bench/src/show-runs.mts   --date <stamp>                   # per-run audit table
+npx tsx bench/src/show-calls.mts  --date <stamp>                   # per-HTTP-call audit table
+npx tsx bench/src/render-log.mts  --date <stamp> --view runs       # same table as an HTML page
+npx tsx bench/src/merge-judge.mts --date <stamp>                   # recover a stopped judging pass
 ```
+
+`report.mts` takes a CSV path rather than a stamp, and reads the stamp back out
+of the CSV's `run_stamp` column to locate `bench/runs/<stamp>/`. It refuses to
+run when the manifest is not there instead of emitting a report whose models and
+controlled variables all say `unknown`; pass `--manifest <path>` to point it
+somewhere else, or rebuild a missing manifest with `merge-judge`.
 
 `show-runs` works from the CSV plus each saved output's mtime, so it is
 available as soon as the runs finish. `show-calls` needs `calls.json`, which is
@@ -176,12 +187,13 @@ and copied into `REPORT.md`.
 
 ## CSV columns
 
-`run_id`, `date`, `task`, `task_kind`, `group`, `repetition`, `group_order`,
-`role_models` (`role=model;…`), `input_tokens`, `output_tokens`,
+`run_id`, `date`, `run_stamp`, `task`, `task_kind`, `group`, `variant`, `repetition`,
+`group_order`, `role_models` (`role=model;…`), `input_tokens`, `output_tokens`,
 `cached_tokens`, `total_tokens`, `est_cost_usd`, `wall_seconds`, `agent_count`,
 `parallelism`, `max_concurrent_calls`, `llm_calls`, `success`, `quality_score`,
-`judge_model`, `temperature`, `thinking`, `cache_busting`,
-`framework_input_tokens`, `framework_output_tokens`, `budget_exceeded`, `notes`.
+`quality_by_opponent` (`opponent=score;…`), `judge_model`, `temperature`,
+`thinking`, `cache_busting`, `framework_input_tokens`,
+`framework_output_tokens`, `budget_exceeded`, `notes`.
 
 Token counts come from a loopback recording proxy (`src/proxy.mts`) that reads
 `usage` off each provider response. OMA's own `TokenUsage` is
@@ -207,6 +219,18 @@ candidate's reported score is the mean of its two positions, so a judge that
 merely prefers whatever it reads first cannot move the result. Each number is
 validated through the repo's own `defineScorer()` contract from
 `@open-multi-agent/core/eval`.
+
+**A score belongs to a pairing, not to a run.** Group A is judged once against
+each challenger, so an A run carries one score per challenger — two readings of
+the same output taken under two different contrasts, not one number measured
+twice. `quality_by_opponent` keeps them all, and every comparison in `REPORT.md`
+uses the pairing it names: the A-minus-B row subtracts A's score against B, and
+A's score against C appears only in the A-vs-C row. `quality_score` is the mean
+across a run's pairings, carried for eyeballing a row rather than for any
+comparison.
+
+`merge-judge` re-folds the verdict files on disk, so a CSV written before this
+column existed is repaired by re-running it against the same `runs/<date>/`.
 
 `createJudgeScorer()` from that same subpath is single-candidate — its verdict
 contract hard-requires one top-level `score` — so it cannot carry a pairwise

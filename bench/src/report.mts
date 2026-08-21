@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { BENCH_ROOT } from './config.mts'
-import { dispersion, percentDelta, type Dispersion } from './results.mts'
+import { decodeOpponentScores, dispersion, percentDelta, type Dispersion } from './results.mts'
 import { DAG_VARIANTS, taskById } from './tasks.mts'
 
 interface Row {
@@ -37,6 +37,15 @@ function parseCSV(text: string): Row[] {
   if (field.length > 0 || record.length > 0) { record.push(field); rows.push(record) }
   const [header, ...body] = rows.filter((r) => r.some((cell) => cell !== ''))
   return body.map((cells) => Object.fromEntries(header!.map((name, i) => [name, cells[i] ?? ''])))
+}
+
+/**
+ * Recover the run stamp from a default-named CSV, for files written before the
+ * `run_stamp` column existed. Returns '' for a `--out`-named CSV, which carries
+ * no stamp and has to fall back to the `date` column.
+ */
+function stampFromCsvName(csvPath: string): string {
+  return /^results-(.+)\.csv$/.exec(path.basename(csvPath))?.[1] ?? ''
 }
 
 const num = (row: Row, column: string): number => Number(row[column])
@@ -71,16 +80,19 @@ function rangesOverlap(a: Dispersion | null, b: Dispersion | null): boolean {
 /**
  * Quality phrased so the number cannot be quoted without its evidence. When the
  * two groups' ranges overlap, the delta is a direction at best.
+ *
+ * Both spreads come from `pair`, so both were measured in the same pairing.
  */
-function qualityClause(a: GroupStats, b: GroupStats, delta: number | null): string {
-  const n = Math.min(a.quality?.n ?? 0, b.quality?.n ?? 0)
-  if (n === 0 || delta === null) return 'judge quality not scored'
-  const spread = `A ${a.quality!.median.toFixed(2)} [${a.quality!.min.toFixed(2)}, ${a.quality!.max.toFixed(2)}] `
-    + `vs ${b.group} ${b.quality!.median.toFixed(2)} [${b.quality!.min.toFixed(2)}, ${b.quality!.max.toFixed(2)}]`
-  if (rangesOverlap(a.quality, b.quality)) {
+function qualityClause(b: GroupStats, pair: Comparison): string {
+  const { aQuality, bQuality, quality } = pair
+  const n = Math.min(aQuality?.n ?? 0, bQuality?.n ?? 0)
+  if (n === 0 || quality === null) return 'judge quality not scored'
+  const spread = `A ${aQuality!.median.toFixed(2)} [${aQuality!.min.toFixed(2)}, ${aQuality!.max.toFixed(2)}] `
+    + `vs ${b.group} ${bQuality!.median.toFixed(2)} [${bQuality!.min.toFixed(2)}, ${bQuality!.max.toFixed(2)}]`
+  if (rangesOverlap(aQuality, bQuality)) {
     return `judge quality inconclusive — the two groups' observed ranges overlap (${spread}, n=${n})`
   }
-  return `judge quality ${signedAbs(delta)} (${spread}, n=${n})`
+  return `judge quality ${signedAbs(quality)} (${spread}, n=${n})`
 }
 
 interface GroupStats {
@@ -93,6 +105,16 @@ interface GroupStats {
   readonly cached: number
   readonly wall: Dispersion | null
   readonly cost: Dispersion | null
+  /**
+   * Judge score per opponent this group was paired against.
+   *
+   * Group A is judged once per challenger, so it has one entry per challenger
+   * and those entries are not interchangeable: a score earned against the cheap
+   * single-agent baseline is not a score earned against the strong one. Every
+   * comparison reads the entry for its own opponent.
+   */
+  readonly qualityByOpponent: ReadonlyMap<string, Dispersion | null>
+  /** Mean across this group's pairings. A summary only; never a comparison input. */
   readonly quality: Dispersion | null
   readonly calls: Dispersion | null
   readonly parallelism: Dispersion | null
@@ -104,6 +126,12 @@ function statsFor(rows: readonly Row[], group: string): GroupStats {
   const ok = subset.filter((row) => row['success'] === 'true')
   const costs = ok.map((row) => maybeNum(row, 'est_cost_usd')).filter((v): v is number => v !== null)
   const quality = ok.map((row) => maybeNum(row, 'quality_score')).filter((v): v is number => v !== null)
+  const perOpponent = new Map<string, number[]>()
+  for (const row of ok) {
+    for (const [opponent, score] of decodeOpponentScores(row['quality_by_opponent'] ?? '')) {
+      perOpponent.set(opponent, [...(perOpponent.get(opponent) ?? []), score])
+    }
+  }
   return {
     group,
     n: subset.length,
@@ -114,6 +142,7 @@ function statsFor(rows: readonly Row[], group: string): GroupStats {
     cached: ok.reduce((sum, row) => sum + num(row, 'cached_tokens'), 0),
     wall: dispersion(ok.map((row) => num(row, 'wall_seconds'))),
     cost: costs.length === ok.length ? dispersion(costs) : null,
+    qualityByOpponent: new Map([...perOpponent].map(([opponent, values]) => [opponent, dispersion(values)])),
     quality: dispersion(quality),
     calls: dispersion(ok.map((row) => num(row, 'llm_calls'))),
     parallelism: dispersion(ok.map((row) => num(row, 'parallelism'))),
@@ -121,13 +150,40 @@ function statsFor(rows: readonly Row[], group: string): GroupStats {
   }
 }
 
-function comparison(a: GroupStats, b: GroupStats) {
+interface Comparison {
+  readonly tokens: number | null
+  readonly wall: number | null
+  readonly cost: number | null
+  readonly quality: number | null
+  /** `a`'s score in the `a`-vs-`b` pairing, not its mean across all pairings. */
+  readonly aQuality: Dispersion | null
+  /** `b`'s score in the same pairing. */
+  readonly bQuality: Dispersion | null
+}
+
+function comparison(a: GroupStats, b: GroupStats): Comparison {
+  // Both sides of the quality delta must come from the same pair. A is judged
+  // once per challenger, so A's score against B is a different measurement from
+  // A's score against C, and subtracting across the two compares nothing.
+  const aQuality = a.qualityByOpponent.get(b.group) ?? null
+  const bQuality = b.qualityByOpponent.get(a.group) ?? null
   return {
     tokens: a.tokens && b.tokens ? percentDelta(a.tokens.median, b.tokens.median) : null,
     wall: a.wall && b.wall ? percentDelta(a.wall.median, b.wall.median) : null,
     cost: a.cost && b.cost ? percentDelta(a.cost.median, b.cost.median) : null,
-    quality: a.quality && b.quality ? a.quality.median - b.quality.median : null,
+    quality: aQuality && bQuality ? aQuality.median - bQuality.median : null,
+    aQuality,
+    bQuality,
   }
+}
+
+/** Judge scores for one group, split by the opponent each was measured against. */
+function qualityCell(stats: GroupStats): string {
+  if (stats.qualityByOpponent.size === 0) return 'not scored'
+  return [...stats.qualityByOpponent.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([opponent, stat]) => (stat ? `vs ${opponent} ${range(stat, 3)} (n=${stat.n})` : `vs ${opponent} n/a`))
+    .join('<br>')
 }
 
 function main(): void {
@@ -142,10 +198,25 @@ function main(): void {
   if (rows.length === 0) throw new Error(`bench: ${csvPath} has no data rows.`)
 
   const date = rows[0]!['date']!
-  const manifestPath = flag('manifest') ?? path.join(BENCH_ROOT, 'runs', date, 'manifest.json')
-  const manifest = existsSync(manifestPath)
-    ? (JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, any>)
-    : {}
+  // Raw data lives under the invocation's stamp, which is `<date>-<label>` for
+  // any run that passed --label. Deriving the directory from the `date` column
+  // instead sends every labelled run to a path that does not exist.
+  const stamp = rows[0]!['run_stamp'] || stampFromCsvName(csvPath) || date
+  const manifestPath = flag('manifest') ?? path.join(BENCH_ROOT, 'runs', stamp, 'manifest.json')
+  if (!existsSync(manifestPath)) {
+    // Every controlled variable in the report comes out of the manifest. Without
+    // it the models, temperature, thinking, budget, git SHA and invocation window
+    // all render as "unknown", which reads as a finished report rather than as a
+    // missing file. Stop instead, and say what to do about it.
+    throw new Error(
+      `bench: no manifest at ${manifestPath}.\n`
+      + `  The report's controlled variables, model names and git SHA come from it.\n`
+      + `  - Wrong stamp? Pass --manifest <path> explicitly.\n`
+      + '  - Invocation stopped before it wrote one? Rebuild it with:\n'
+      + `      npx tsx bench/src/merge-judge.mts --date ${stamp}`,
+    )
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, any>
   const config = (manifest['config'] ?? {}) as Record<string, any>
   const outPath = path.resolve(flag('out') ?? path.join(BENCH_ROOT, 'REPORT.md'))
 
@@ -189,7 +260,7 @@ function main(): void {
     push(
       `**${task.label} (${task.hypothesis} case).** ${kind}, against a single agent pursuing the same goal `
       + `on ${strong}: tokens ${signedPercent(delta.tokens)}, wall-clock ${signedPercent(delta.wall)}, `
-      + `cost ${signedPercent(delta.cost)} (n=${repetitions}); ${qualityClause(a, b, delta.quality)}. `
+      + `cost ${signedPercent(delta.cost)} (n=${repetitions}); ${qualityClause(b, delta)}. `
       + `${strong}/${cheap}, ${date}.`,
       '',
     )
@@ -207,14 +278,17 @@ function main(): void {
     if (!a || !b) continue
     const delta = comparison(a, b)
     const kind = task.hypothesis === 'favourable' ? '在需要分工与并行的任务上' : '在单 agent 一次就能做完的任务上'
-    const qualityN = Math.min(a.quality?.n ?? 0, b.quality?.n ?? 0)
+    // Same pairing on both sides as the English headline above.
+    const aQuality = delta.aQuality
+    const bQuality = delta.bQuality
+    const qualityN = Math.min(aQuality?.n ?? 0, bQuality?.n ?? 0)
     const zh = qualityN === 0 || delta.quality === null
       ? '质量未评分'
-      : rangesOverlap(a.quality, b.quality)
-        ? `judge 质量分不可判定——两组实测区间重叠（A ${a.quality!.median.toFixed(2)} [${a.quality!.min.toFixed(2)}, ${a.quality!.max.toFixed(2)}]，`
-          + `${b.group} ${b.quality!.median.toFixed(2)} [${b.quality!.min.toFixed(2)}, ${b.quality!.max.toFixed(2)}]，n=${qualityN}）`
-        : `judge 质量分 ${signedAbs(delta.quality)}（A ${a.quality!.median.toFixed(2)} [${a.quality!.min.toFixed(2)}, ${a.quality!.max.toFixed(2)}]，`
-          + `${b.group} ${b.quality!.median.toFixed(2)} [${b.quality!.min.toFixed(2)}, ${b.quality!.max.toFixed(2)}]，n=${qualityN}）`
+      : rangesOverlap(aQuality, bQuality)
+        ? `judge 质量分不可判定——两组实测区间重叠（A ${aQuality!.median.toFixed(2)} [${aQuality!.min.toFixed(2)}, ${aQuality!.max.toFixed(2)}]，`
+          + `${b.group} ${bQuality!.median.toFixed(2)} [${bQuality!.min.toFixed(2)}, ${bQuality!.max.toFixed(2)}]，n=${qualityN}）`
+        : `judge 质量分 ${signedAbs(delta.quality)}（A ${aQuality!.median.toFixed(2)} [${aQuality!.min.toFixed(2)}, ${aQuality!.max.toFixed(2)}]，`
+          + `${b.group} ${bQuality!.median.toFixed(2)} [${bQuality!.min.toFixed(2)}, ${bQuality!.max.toFixed(2)}]，n=${qualityN}）`
     push(
       `- ${kind}，同一目标：token ${signedPercent(delta.tokens)}、墙钟时间 ${signedPercent(delta.wall)}、`
       + `成本 ${signedPercent(delta.cost)}（n=${repetitions}）；${zh}。模型 ${strong}/${cheap}，${date}`,
@@ -240,7 +314,7 @@ function main(): void {
       const s = stats.get(group)!
       push(
         `| ${group} | ${s.successes}/${s.n} | ${range(s.calls)} | ${range(s.tokens)} | ${range(s.wall, 1)} `
-        + `| ${s.cost ? range(s.cost, 4) : 'n/a'} | ${s.quality ? `${range(s.quality, 3)} (n=${s.quality.n})` : 'not scored'} `
+        + `| ${s.cost ? range(s.cost, 4) : 'n/a'} | ${qualityCell(s)} `
         + `| ${range(s.parallelism, 2)} |`,
       )
     }
@@ -263,10 +337,14 @@ function main(): void {
         rows.filter((row) => row['task'] === taskId && Number(row['cached_tokens']) > 0)
           .map((row) => `r${row['repetition']}`),
       )]
+      // Read per pairing, not off the mean: an A run that the judge put below
+      // 0.5 against B is a defective run even when its score against C pulls the
+      // mean back over the line.
       const defective = rows
-        .filter((row) => row['task'] === taskId && row['success'] === 'true'
-          && row['quality_score'] !== '' && Number(row['quality_score']) < 0.5)
-        .map((row) => `${row['run_id']} scored ${Number(row['quality_score']).toFixed(2)}`)
+        .filter((row) => row['task'] === taskId && row['success'] === 'true')
+        .flatMap((row) => [...decodeOpponentScores(row['quality_by_opponent'] ?? '')]
+          .filter(([, score]) => score < 0.5)
+          .map(([opponent, score]) => `${row['run_id']} scored ${score.toFixed(2)} against ${opponent}`))
       if (defective.length > 0) {
         push(
           `Runs the judge scored below 0.5 despite completing without error: ${defective.join(', ')}. `
@@ -334,11 +412,15 @@ function main(): void {
           rowsFor(variantRows, 'A'), rowsFor(variantRows, 'B')])
       }
       for (const [name, day, n, a, b] of entries) {
-        const gap = a.quality && b.quality ? a.quality.median - b.quality.median : null
+        // The A-vs-B pairing on both sides. The baseline invocation also judged
+        // A against C; that score belongs to a different contrast and would make
+        // this gap incomparable with the variant's, which only ran A and B.
+        const pair = comparison(a, b)
+        const gap = pair.quality
         push(
           `| ${label} | ${name} | ${day} | ${n} | ${range(a.tokens)} | ${range(a.wall, 1)} `
-          + `| ${a.cost ? range(a.cost, 4) : 'n/a'} | ${a.quality ? range(a.quality, 3) : 'n/a'} `
-          + `| ${b.quality ? range(b.quality, 3) : 'n/a'} | ${signedAbs(gap)} |`,
+          + `| ${a.cost ? range(a.cost, 4) : 'n/a'} | ${pair.aQuality ? range(pair.aQuality, 3) : 'n/a'} `
+          + `| ${pair.bQuality ? range(pair.bQuality, 3) : 'n/a'} | ${signedAbs(gap)} |`,
         )
         if (name === variantName) {
           const entry = gaps.find((g) => g.task === label)
@@ -367,8 +449,9 @@ function main(): void {
     // the published wiring produced. That cuts against the fix and belongs here.
     for (const taskId of taskIds) {
       const label = taskById(taskId).label
-      const basePublished = perTask.get(taskId)!.get('A')?.quality
-      const baseFixed = statsFor(variantRows.filter((row) => row['task'] === taskId), 'A').quality
+      const basePublished = perTask.get(taskId)!.get('A')?.qualityByOpponent.get('B') ?? null
+      const baseFixed = statsFor(variantRows.filter((row) => row['task'] === taskId), 'A')
+        .qualityByOpponent.get('B') ?? null
       if (!basePublished || !baseFixed) continue
       if (baseFixed.min < basePublished.min) {
         push(
@@ -448,7 +531,7 @@ function main(): void {
     + 'framework. OMA\'s `TokenUsage` is `{ input_tokens, output_tokens }` with no cache field and no per-model '
     + 'split, so it cannot price a group-A run that deliberately mixes two tiers. The framework\'s own counts are '
     + 'recorded alongside in `framework_*_tokens`; any disagreement is written into the row\'s `notes` rather than '
-    + 'reconciled silently. `bench/runs/<date>/calls.json` holds every individual call, so cost stays recomputable '
+    + `reconciled silently. \`bench/runs/${stamp}/calls.json\` holds every individual call, so cost stays recomputable `
     + 'if a rate is later corrected.',
     '',
     '`parallelism` is the sum of per-call latency divided by the run\'s wall time: 1.0 is fully serial, 3.0 means '
@@ -463,6 +546,12 @@ function main(): void {
     + 'the mean of its two positions, so a judge that merely prefers whatever it reads first cannot move the '
     + 'result. Each number is validated through the repo\'s `defineScorer()` contract from '
     + '`@open-multi-agent/core/eval`.',
+    '',
+    'Scores are per pairing, and every comparison above uses the pairing it names. Group A is judged once against '
+    + 'each challenger, so an A run carries one score per challenger — two readings of the same output taken under '
+    + 'two different contrasts, not one number measured twice. The A-minus-B row subtracts A\'s score against B; '
+    + 'A\'s score against C appears only in the A-vs-C row. The CSV keeps both in `quality_by_opponent`, and '
+    + '`quality_score` is their mean, carried for eyeballing a row rather than for any comparison.',
     '',
   )
   for (const taskId of taskIds) {
@@ -554,11 +643,11 @@ function main(): void {
     '```bash',
     'export DEEPSEEK_API_KEY=...',
     `npx tsx bench/src/run-bench.mts --repetitions ${repetitions}`,
-    `npx tsx bench/src/report.mts --csv bench/results-${date}.csv`,
+    `npx tsx bench/src/report.mts --csv bench/results-${stamp}.csv`,
     '```',
     '',
     `Harness details and every flag: [bench/README.md](README.md). Raw outputs, per-call log, and the manifest `
-    + `(git SHA, node version, full config, UTC window) are in \`bench/runs/${date}/\`.`,
+    + `(git SHA, node version, full config, UTC window) are in \`bench/runs/${stamp}/\`.`,
     '',
   )
 

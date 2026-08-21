@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from '
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { BENCH_ROOT, loadConfig } from './config.mts'
-import { CSV_COLUMNS, toCSV, type RunRecord } from './results.mts'
+import { CSV_COLUMNS, foldPairScore, toCSV, type RunRecord } from './results.mts'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
@@ -84,9 +84,18 @@ for (const file of files) {
     const runId = `${task}-${group}-r${repetition}`
     const row = rows.find((candidate) => candidate['run_id'] === runId)
     if (!row) { console.warn(`no CSV row for ${runId}`); continue }
-    row['quality_score'] = String(Number(score.toFixed(3)))
+    // `date` here is the invocation stamp. Backfill it on CSVs written before
+    // the column existed, so report.mts can find this runs directory again.
+    if (!row['run_stamp']) row['run_stamp'] = date
+    const opponent = group === 'A' ? challenger : 'A'
+    // Fold rather than assign, and for the same reason as in run-bench.mts: an
+    // A run has one verdict file per challenger, and `readdirSync` order must
+    // not decide which of them survives into the CSV.
+    const folded = foldPairScore(row['quality_by_opponent'] ?? '', opponent, score)
+    row['quality_by_opponent'] = folded.byOpponent
+    row['quality_score'] = String(Number(folded.mean.toFixed(3)))
     row['judge_model'] = judgeModel
-    const note = `judge ${verdict.preferred[group]} vs ${group === 'A' ? challenger : 'A'}`
+    const note = `judge ${verdict.preferred[group]} vs ${opponent}`
     if (!row['notes']!.includes(note)) {
       row['notes'] = [row['notes'], note].filter(Boolean).join(' | ')
     }
