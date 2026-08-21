@@ -39,6 +39,11 @@ const oma = new OpenMultiAgent({
   defaultModel: 'claude-sonnet-4-6',
   defaultProvider: 'anthropic',
   maxConcurrency: 3,
+  onProgress: (event) => {
+    if (event.type === 'task_complete') {
+      console.log(`✓ ${event.agent} finished task ${event.task}`)
+    }
+  },
 })
 
 const team = oma.createTeam('hybrid-dev', {
@@ -81,13 +86,6 @@ const result = await oma.runTeam(
   team,
   'Add a `slugify(text)` utility (lowercase, spaces and punctuation to single hyphens) ' +
     'with a couple of unit tests, then review the change.',
-  {
-    onProgress: (event) => {
-      if (event.type === 'task_complete') {
-        console.log(`✓ ${event.agent} finished task ${event.task}`)
-      }
-    },
-  },
 )
 
 console.log('\n=== Final output ===\n')

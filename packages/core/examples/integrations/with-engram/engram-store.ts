@@ -85,7 +85,7 @@ export class EngramMemoryStore implements MemoryStore {
 
     if (!res.ok) return null
 
-    const facts: EngramFact[] = await res.json()
+    const facts = (await res.json()) as EngramFact[]
     if (facts.length === 0) return null
 
     return this.toMemoryEntry(facts[0])
@@ -101,7 +101,7 @@ export class EngramMemoryStore implements MemoryStore {
 
     if (!res.ok) return []
 
-    const facts: EngramFact[] = await res.json()
+    const facts = (await res.json()) as EngramFact[]
     return facts.map((f) => this.toMemoryEntry(f))
   }
 
@@ -155,7 +155,7 @@ export class EngramMemoryStore implements MemoryStore {
     const url = `${this.baseUrl}/api/facts?scope=${encodeURIComponent(scope)}&limit=1`
     const res = await fetch(url, { headers: this.headers() })
     if (!res.ok) return null
-    const facts: EngramFact[] = await res.json()
+    const facts = (await res.json()) as EngramFact[]
     return facts.length > 0 ? facts[0] : null
   }
 

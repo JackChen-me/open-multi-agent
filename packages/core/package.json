@@ -69,7 +69,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit -p tsconfig.lint.json",
     "test:e2e": "RUN_E2E=1 vitest run tests/e2e/",
     "test:e2e:deepseek": "RUN_E2E=1 vitest run tests/e2e/deepseek-e2e.test.ts",
     "test:semantic-routing-shadow": "RUN_E2E=1 vitest run --reporter=dot tests/e2e/semantic-routing-shadow.test.ts",
