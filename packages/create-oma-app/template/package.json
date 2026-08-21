@@ -10,7 +10,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@open-multi-agent/core": "1.16.0"
+    "@open-multi-agent/core": "1.16.1"
   },
   "devDependencies": {
     "tsx": "^4.21.0"

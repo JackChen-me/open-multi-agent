@@ -11,7 +11,7 @@
     "demo": "tsx src/index.ts --demo"
   },
   "dependencies": {
-    "@open-multi-agent/core": "1.16.0",
+    "@open-multi-agent/core": "1.16.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {

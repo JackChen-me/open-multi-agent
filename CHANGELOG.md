@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 1.16.1 - 2026-08-21
+
+### Added
+
+- Export eight previously internal public types from the package root
+  (ThinkingConfig, ToolResultMetadata, ProcessAgentBackendConfig,
+  ProcessBackendInputMode, CostEstimateContext, MessageBusSnapshot,
+  MessageSnapshot, MessageReadStateSnapshot)
+- Add market-data integrity verify-loop cookbook example with synthetic fixtures
+  and catalog entry
+- Document DeepSeek V4-Pro-0813 / V4-Flash-0731 GA snapshots and default
+  thinking at high effort
+
+### Changed
+
+- Accepted verify revisions now refresh structured output together with the
+  revised answer instead of leaving stale parsed output
+- create-oma-app bump for core-only releases now follows core's breaking nature
+  (core major -> create minor; non-breaking core -> create patch)
+- Slim core package READMEs, move contributor credits to CONTRIBUTORS.md, and
+  add LLM egress policy / shell executor coverage to the Chinese READMEs
+
+### Fixed
+
+- Standalone consensus results no longer leak an undeclared structured field
+  onto the public ConsensusResult
+- Release-bot changelog no longer duplicates Unreleased content and the
+  Unreleased anchor is restored with an invariant test
+- Release-bot outbound user-agent headers match the renamed oma-release-bot
+  GitHub App slug
+
+### Compatibility
+
+- All public API changes are additive: new type-only exports, an optional
+  initialStructured consensus parameter, and a widened runConsensusCore return
+  type that remains assignable to ConsensusResult
+- No public export was removed or narrowed, so existing consumers can upgrade
+  without code changes
+
 ## 1.16.0 - 2026-08-16
 
 ### Added

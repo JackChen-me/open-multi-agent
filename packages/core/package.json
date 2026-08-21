@@ -1,6 +1,6 @@
 {
   "name": "@open-multi-agent/core",
-  "version": "1.16.0",
+  "version": "1.16.1",
   "description": "TypeScript multi-agent framework: one runTeam() call from goal to result. Auto task decomposition and parallel execution for multi-step LLM jobs. Deploys anywhere Node.js runs.",
   "files": [
     "dist",
