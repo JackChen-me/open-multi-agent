@@ -1,10 +1,19 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { renderReleaseNotes } from './apply-plan.js'
+import { composeReleaseBody, renderReleaseNotes, type ReleaseContributor } from './apply-plan.js'
 import type { CommandRunner } from './command.js'
 import type { GitHubClient } from './github.js'
 import type { RegistryClient } from './registry.js'
 import { compareVersions } from './semver.js'
+
+/**
+ * Accounts the Thanks section never credits.
+ *
+ * The section exists to credit people outside the project, so the maintainer's
+ * own commits are excluded. Both forms appear depending on whether a commit
+ * carried a GitHub noreply address.
+ */
+const DEFAULT_EXCLUDED_CONTRIBUTORS: readonly string[] = ['Jack Chen', 'JackChen-me']
 
 interface PackageManifest {
   readonly name?: unknown
@@ -37,6 +46,8 @@ export interface PublishReleaseOptions {
   readonly sleep?: (milliseconds: number) => Promise<void>
   /** Test seam; production always uses the npm trusted-publishing preflight. */
   readonly preflightRuntime?: () => Promise<void>
+  /** Accounts the Thanks section skips. Defaults to the maintainer's own. */
+  readonly excludedContributors?: readonly string[]
 }
 
 interface PublishTarget {
@@ -57,7 +68,20 @@ export async function publishRelease(
   const core = targets[0]
   if (!core) throw new Error('Core publish target is missing.')
   const changelog = await readFile(join(options.repoRoot, 'CHANGELOG.md'), 'utf8')
-  const releaseNotes = renderReleaseNotes(changelog, core.version)
+  // Composed before anything is published so a malformed changelog or an
+  // inconsistent manifest set still fails ahead of the registry, exactly as the
+  // notes rendering alone used to.
+  const parentVersions = await readParentVersions(options)
+  const releaseNotes = composeReleaseBody({
+    notes: renderReleaseNotes(changelog, core.version),
+    coreVersion: core.version,
+    packages: targets.map(target => ({
+      name: target.name,
+      version: target.version,
+      changed: parentVersions.get(target.path) !== target.version,
+    })),
+    contributors: await collectReleaseContributors(options),
+  })
   const tag = `v${core.version}`
 
   const localTag = await resolveTag(options.runner, options.repoRoot, tag)
@@ -131,6 +155,84 @@ export async function publishRelease(
     releaseAction: 'created',
     releaseUrl: release.htmlUrl,
   }
+}
+
+
+/** Versions this release commit's first parent carried, keyed by manifest path. */
+async function readParentVersions(
+  options: PublishReleaseOptions,
+): Promise<ReadonlyMap<string, string>> {
+  const parent = (await options.runner.run('git', ['rev-parse', `${options.expectedSha}^`], {
+    cwd: options.repoRoot,
+  })).stdout.trim()
+  const versions = new Map<string, string>()
+  for (const path of [
+    'packages/core/package.json',
+    'packages/otel/package.json',
+    'packages/create-oma-app/package.json',
+  ]) {
+    const raw = await options.runner.run('git', ['show', `${parent}:${path}`], { cwd: options.repoRoot })
+    const manifest = JSON.parse(raw.stdout) as PackageManifest
+    if (typeof manifest.version !== 'string') {
+      throw new Error(`${path} has no readable version at the release commit's parent.`)
+    }
+    versions.set(path, manifest.version)
+  }
+  return versions
+}
+
+
+/**
+ * Outside contributors whose commits land in this release, newest first.
+ *
+ * Resolved from the previous release tag reachable from the release commit's
+ * parent, not from HEAD: on an idempotent re-run this release's tag already
+ * exists, and describing from HEAD would then report an empty range and drop
+ * every contributor from the body.
+ */
+export async function collectReleaseContributors(
+  options: PublishReleaseOptions,
+): Promise<readonly ReleaseContributor[]> {
+  const previousTag = (await options.runner.run(
+    'git',
+    ['describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', `${options.expectedSha}^`],
+    { cwd: options.repoRoot },
+  )).stdout.trim()
+  if (!/^v\d+\.\d+\.\d+$/.test(previousTag)) {
+    throw new Error(`Cannot resolve a previous release tag from the release commit's parent; got "${previousTag}".`)
+  }
+
+  const log = await options.runner.run(
+    'git',
+    ['log', '--format=%an%x1f%ae%x1f%s%x1e', `${previousTag}..${options.expectedSha}`],
+    { cwd: options.repoRoot },
+  )
+  const excluded = new Set(options.excludedContributors ?? DEFAULT_EXCLUDED_CONTRIBUTORS)
+  const byName = new Map<string, string[]>()
+  for (const record of log.stdout.split('\u001e')) {
+    const line = record.trim()
+    if (line === '') continue
+    const [author = '', email = '', subject = ''] = line.split('\u001f')
+    const name = resolveContributorName(author, email)
+    if (name === '' || name.endsWith('[bot]') || excluded.has(name)) continue
+    const contribution = describeContribution(subject)
+    if (contribution === '') continue
+    const existing = byName.get(name)
+    if (existing) existing.push(contribution)
+    else byName.set(name, [contribution])
+  }
+  return [...byName].map(([name, contributions]) => ({ name, contributions }))
+}
+
+/** A GitHub noreply address carries the login; anything else only has a display name. */
+function resolveContributorName(author: string, email: string): string {
+  const noreply = /^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/.exec(email.trim())
+  return (noreply?.[1] ?? author).trim()
+}
+
+/** `feat(examples): add a thing (#12)` becomes `add a thing (#12)`. */
+function describeContribution(subject: string): string {
+  return subject.replace(/^[a-z]+(?:\([^)]*\))?!?:\s*/i, '').trim()
 }
 
 async function assertReleaseCommit(options: PublishReleaseOptions): Promise<void> {

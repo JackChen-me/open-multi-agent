@@ -194,6 +194,14 @@ jq -Rs '{text: ., mode: "gfm"}' < notes.md | gh api /markdown --input - | grep -
 That endpoint matches what the release page renders. A correct release body
 returns `0`.
 
+The published body is the version's changelog section followed by three sections
+the changelog does not carry. `## Packages` names every workspace version and
+says which ones were not republished. `## Thanks` credits contributors from
+outside the project, resolved from the commits between the previous release tag
+and the release commit, with the maintainer's own commits and bot commits
+excluded. `## Install` is copy-pasteable. All three are derived from the release
+commit and its own manifests, so no model output reaches them.
+
 ## What CI proves
 
 ### Before merge
