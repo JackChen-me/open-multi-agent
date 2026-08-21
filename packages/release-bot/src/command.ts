@@ -11,6 +11,14 @@ export interface RunCommandOptions {
   readonly env?: NodeJS.ProcessEnv
   readonly allowFailure?: boolean
   readonly stdin?: string
+  /**
+   * Also write the child's output to this process's own streams.
+   *
+   * Output is always captured. Long validation commands are otherwise silent
+   * for their whole duration, which leaves a CI log with no evidence that they
+   * ran and no way to see where a hang occurred.
+   */
+  readonly echo?: boolean
 }
 
 export interface CommandRunner {
@@ -59,8 +67,14 @@ export class NodeCommandRunner implements CommandRunner {
 
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
-      child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)))
-      child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)))
+      child.stdout.on('data', chunk => {
+        stdout.push(Buffer.from(chunk))
+        if (options.echo) process.stdout.write(chunk)
+      })
+      child.stderr.on('data', chunk => {
+        stderr.push(Buffer.from(chunk))
+        if (options.echo) process.stderr.write(chunk)
+      })
       child.on('error', reject)
       child.on('close', code => {
         resolve({
