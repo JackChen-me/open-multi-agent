@@ -23,7 +23,7 @@
  *   OPENAI_API_KEY (uses an o-series model for the reasoning emit)
  */
 
-import { Agent } from '../../src/index.js'
+import { Agent, ToolExecutor, ToolRegistry } from '../../src/index.js'
 
 // --- Caveat: loop-detector interaction --------------------------------------
 //
@@ -53,18 +53,25 @@ async function main(): Promise<void> {
   // Step 1: a reasoning-capable OpenAI model produces a turn that includes
   // a `reasoning_content` chunk. The adapter extracts it into a ReasoningBlock
   // with `provenance: 'openai'`, stored in the agent's persistent history.
-  const agent = new Agent({
-    name: 'cross-provider-demo',
-    model: 'gpt-5',  // o-series-style reasoning model
-    provider: 'openai',
-    systemPrompt: 'You reason carefully then give a short final answer.',
-    preserveReasoningAsText: true,
-    // compressReasoningText defaults to `true` whenever preserve is true,
-    // so long reasoning chains are head+tail truncated to 1200 chars by
-    // default. Override with `{ minChars: N }` to tune, or `false` to disable
-    // (footgun — long CoT will eat your prompt budget).
-    compressReasoningText: { minChars: 1500 },
-  })
+  const registry = new ToolRegistry()
+  const executor = new ToolExecutor(registry)
+
+  const agent = new Agent(
+    {
+      name: 'cross-provider-demo',
+      model: 'gpt-5',  // o-series-style reasoning model
+      provider: 'openai',
+      systemPrompt: 'You reason carefully then give a short final answer.',
+      preserveReasoningAsText: true,
+      // compressReasoningText defaults to `true` whenever preserve is true,
+      // so long reasoning chains are head+tail truncated to 1200 chars by
+      // default. Override with `{ minChars: N }` to tune, or `false` to disable
+      // (footgun — long CoT will eat your prompt budget).
+      compressReasoningText: { minChars: 1500 },
+    },
+    registry,
+    executor,
+  )
 
   const firstAnswer = await agent.prompt(
     'A train leaves Boston at 60 mph heading west. Another leaves NYC at 80 mph heading north. ' +

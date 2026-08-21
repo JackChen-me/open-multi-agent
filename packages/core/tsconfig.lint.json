@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src/**/*",
+    "examples/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests",
+    "examples/fixtures",
+    "examples/integrations/express-customer-support",
+    "examples/integrations/observability-v2",
+    "examples/integrations/with-vercel-ai-sdk"
+  ]
+}

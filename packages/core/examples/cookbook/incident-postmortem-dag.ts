@@ -157,7 +157,7 @@ interface TaskConfig {
   title: string
   description: string
   assignee?: string
-  dependsOn?: readonly string[]
+  dependsOn?: string[]
   maxRetries?: number
   retryDelayMs?: number
   retryBackoff?: number

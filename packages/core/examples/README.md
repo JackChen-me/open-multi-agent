@@ -136,3 +136,4 @@ Conventions:
 - **Match the provider template** when adding a provider: three-agent team (architect / developer / reviewer) building a small REST API. Keeps comparisons honest.
 - **Add a row** to the table in this file for the corresponding category.
 - **Add exactly one entry** to [`catalog.json`](catalog.json), including its user goal, capability tags, format, level, and any directory entrypoints. Do not move an example merely to change its website grouping.
+- **Type-check before sending.** `npm run lint -w @open-multi-agent/core` compiles this directory together with `src/`, so an example that drifts from the current API fails CI. Examples with their own `package.json`/`tsconfig.json` are excluded from that pass and must be listed in [`tsconfig.lint.json`](../tsconfig.lint.json); they carry their own check instead.
