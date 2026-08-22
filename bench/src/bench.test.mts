@@ -11,7 +11,12 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { priceCall, pricingIsComplete } from './config.mts'
+import {
+  classifyInvocationWindow,
+  priceCall,
+  pricingIsComplete,
+  TIME_OF_DAY_PRICING,
+} from './config.mts'
 import { summarizeCalls, type CallRecord } from './proxy.mts'
 import {
   CSV_COLUMNS,
@@ -468,4 +473,79 @@ test('rangesOverlap refuses to separate two groups whose observed ranges touch',
   assert.equal(rangesOverlap(span(0.1, 0.4), span(0.5, 0.8)), false)
   // Missing data is not evidence of separation.
   assert.equal(rangesOverlap(null, span(0.5, 0.8)), true)
+})
+
+// ---------------------------------------------------------------------------
+// Which rate schedule the invocation was actually billed on
+// ---------------------------------------------------------------------------
+
+const DEEPSEEK = TIME_OF_DAY_PRICING['deepseek']!
+const at = (iso: string) => `2026-08-18T${iso}Z`
+
+test('classifyInvocationWindow separates peak, off-peak and a straddled boundary', () => {
+  // DeepSeek peak is 01:00-04:00 and 06:00-10:00 UTC.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('01:30:00'), at('03:45:00')), 'peak')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('06:05:00'), at('09:55:00')), 'peak')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('12:00:00'), at('13:00:00')), 'off-peak')
+  // 04:00-06:00 is the gap between the two peak windows.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('04:10:00'), at('05:50:00')), 'off-peak')
+  // Started in peak, finished after it closed.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('03:30:00'), at('04:30:00')), 'mixed')
+  // Started off-peak, ran into a window.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('05:30:00'), at('06:30:00')), 'mixed')
+  // Spanning both windows necessarily covers the off-peak gap between them.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('02:00:00'), at('08:00:00')), 'mixed')
+})
+
+test('classifyInvocationWindow handles boundaries, midnight, and long runs', () => {
+  // The window is half-open: 04:00 is already off-peak.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('01:00:00'), at('04:00:00')), 'peak')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('04:00:00'), at('04:00:00')), 'off-peak')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('01:00:00'), at('01:00:00')), 'peak')
+  // Crossing UTC midnight into the 01:00 window, which needs the previous day's
+  // windows to be considered too.
+  assert.equal(
+    classifyInvocationWindow(DEEPSEEK, '2026-08-18T23:30:00Z', '2026-08-19T00:30:00Z'),
+    'off-peak',
+  )
+  assert.equal(
+    classifyInvocationWindow(DEEPSEEK, '2026-08-18T23:30:00Z', '2026-08-19T01:30:00Z'),
+    'mixed',
+  )
+  // A daily schedule cannot be uniform across a whole day.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('01:30:00'), '2026-08-19T02:00:00Z'), 'mixed')
+})
+
+test('classifyInvocationWindow refuses to guess without a usable window', () => {
+  assert.equal(classifyInvocationWindow(undefined, at('01:30:00'), at('02:00:00')), 'unknown')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, undefined, at('02:00:00')), 'unknown')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('01:30:00'), null), 'unknown')
+  assert.equal(classifyInvocationWindow(DEEPSEEK, 'not a date', at('02:00:00')), 'unknown')
+  // Finishing before starting is a broken manifest, not an instant.
+  assert.equal(classifyInvocationWindow(DEEPSEEK, at('03:00:00'), at('02:00:00')), 'unknown')
+})
+
+test('pricingLimit says which schedule the run was billed on rather than assuming peak', () => {
+  // Regression: this line asserted "Pricing is DeepSeek's published peak rate at
+  // the time of the run" for every run, including runs that were entirely
+  // off-peak and therefore billed half of what the cost column reports.
+  const inPeak = pricingLimit('deepseek', { startedAtUtc: at('01:30:00'), finishedAtUtc: at('03:00:00') })
+  assert.match(inPeak, /ran entirely inside the peak window/)
+  assert.match(inPeak, /needs no adjustment/)
+
+  const offPeak = pricingLimit('deepseek', { startedAtUtc: at('12:00:00'), finishedAtUtc: at('13:00:00') })
+  assert.match(offPeak, /ran entirely off-peak/)
+  assert.match(offPeak, /about 2x what was actually billed/)
+
+  const straddled = pricingLimit('deepseek', { startedAtUtc: at('03:30:00'), finishedAtUtc: at('04:30:00') })
+  assert.match(straddled, /crossed a peak boundary/)
+  assert.match(straddled, /weakest number in this report/)
+
+  // No manifest window is stated as unchecked, not as peak.
+  const unchecked = pricingLimit('deepseek', {})
+  assert.match(unchecked, /was not checked/)
+  assert.doesNotMatch(unchecked, /entirely inside|entirely off-peak/)
+
+  // A provider with no time-of-day schedule says nothing about windows at all.
+  assert.doesNotMatch(pricingLimit('openai', { startedAtUtc: at('12:00:00'), finishedAtUtc: at('13:00:00') }), /peak/)
 })

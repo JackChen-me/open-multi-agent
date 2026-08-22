@@ -72,10 +72,86 @@ export const PROVIDER_KEY_ENV: Readonly<Record<string, string>> = {
  * The report states the peak/off-peak caveat only for these. Asserting it for
  * every provider would put a DeepSeek billing fact into a report about someone
  * else's models.
+ *
+ * The windows are here rather than in the report so that all vendor knowledge
+ * stays in one file, and so the report can check the invocation against them
+ * instead of asserting which schedule applied.
  */
-export const TIME_OF_DAY_PRICING: Readonly<Record<string, string>> = {
-  deepseek: 'DeepSeek charges peak rates 01:00-04:00 and 06:00-10:00 UTC and half that off-peak, so absolute '
-    + 'cost figures halve outside the peak window while the ratios between groups do not move.',
+export interface TimeOfDayPricing {
+  /** The schedule in words, quoted into the report. */
+  readonly description: string
+  /** Peak windows as `[fromHourUtc, toHourUtc)` pairs. Rates in `pricing` are the peak rates. */
+  readonly peakWindowsUtc: ReadonlyArray<readonly [number, number]>
+  /** Off-peak rate as a multiple of the peak rate. */
+  readonly offPeakMultiplier: number
+}
+
+export const TIME_OF_DAY_PRICING: Readonly<Record<string, TimeOfDayPricing>> = {
+  deepseek: {
+    description: 'DeepSeek charges peak rates 01:00-04:00 and 06:00-10:00 UTC and half that off-peak.',
+    peakWindowsUtc: [[1, 4], [6, 10]],
+    offPeakMultiplier: 0.5,
+  },
+}
+
+/** Which rate schedule an invocation was billed on. */
+export type RateWindow = 'peak' | 'off-peak' | 'mixed' | 'unknown'
+
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
+
+/** Merge overlapping/adjacent intervals so overlap can be summed without double counting. */
+function merge(intervals: Array<[number, number]>): Array<[number, number]> {
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0])
+  const merged: Array<[number, number]> = []
+  for (const [from, to] of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to)
+    else merged.push([from, to])
+  }
+  return merged
+}
+
+/**
+ * Classify the invocation's UTC window against a vendor's peak schedule.
+ *
+ * `bench/config.json` holds peak rates, so an invocation that ran entirely
+ * off-peak was billed less than the report's cost column says, and one that
+ * crossed a boundary was billed on two schedules at once. The report used to
+ * assert the peak rate applied; this is what lets it check.
+ */
+export function classifyInvocationWindow(
+  schedule: TimeOfDayPricing | undefined,
+  startedAtUtc: unknown,
+  finishedAtUtc: unknown,
+): RateWindow {
+  if (!schedule) return 'unknown'
+  if (typeof startedAtUtc !== 'string' || typeof finishedAtUtc !== 'string') return 'unknown'
+  const start = Date.parse(startedAtUtc)
+  const finish = Date.parse(finishedAtUtc)
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return 'unknown'
+  // The schedule repeats daily, so anything spanning a full day necessarily
+  // covers both peak and off-peak hours.
+  if (finish - start >= DAY_MS) return 'mixed'
+
+  const windows: Array<[number, number]> = []
+  const firstMidnight = Math.floor(start / DAY_MS) * DAY_MS
+  for (let day = firstMidnight - DAY_MS; day <= finish + DAY_MS; day += DAY_MS) {
+    for (const [from, to] of schedule.peakWindowsUtc) {
+      windows.push([day + from * HOUR_MS, day + to * HOUR_MS])
+    }
+  }
+  const peak = merge(windows)
+
+  if (finish === start) {
+    return peak.some(([from, to]) => start >= from && start < to) ? 'peak' : 'off-peak'
+  }
+  let inPeak = 0
+  for (const [from, to] of peak) {
+    inPeak += Math.max(0, Math.min(to, finish) - Math.max(from, start))
+  }
+  if (inPeak === 0) return 'off-peak'
+  return inPeak >= finish - start ? 'peak' : 'mixed'
 }
 
 function fail(message: string): never {

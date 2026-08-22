@@ -11,7 +11,12 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BENCH_ROOT, PROVIDER_KEY_ENV, TIME_OF_DAY_PRICING } from './config.mts'
+import {
+  BENCH_ROOT,
+  classifyInvocationWindow,
+  PROVIDER_KEY_ENV,
+  TIME_OF_DAY_PRICING,
+} from './config.mts'
 import {
   decodeOpponentScores,
   dispersion,
@@ -54,11 +59,40 @@ export function cacheNote(provider: string): string {
     + 'cache identically for every group. The `cached_tokens` column verifies this rather than assuming it.'
 }
 
-export function pricingLimit(provider: string): string {
-  const timeOfDay = TIME_OF_DAY_PRICING[provider]
-  return '- **Prices are operator-supplied**, taken from `bench/config.json` rather than fetched, so every cost '
-    + 'figure is only as current as that file. '
-    + (timeOfDay ?? 'Rates that change over time are not tracked; the run date is on every row.')
+export function pricingLimit(provider: string, manifest: Record<string, any> = {}): string {
+  const opening = '- **Prices are operator-supplied**, taken from `bench/config.json` rather than fetched, so every '
+    + 'cost figure is only as current as that file. '
+  const schedule = TIME_OF_DAY_PRICING[provider]
+  if (!schedule) {
+    return opening + 'Rates that change over time are not tracked; the run date is on every row.'
+  }
+
+  // Checked against the manifest's own clock rather than assumed. The rates in
+  // config.json are the peak rates, so an invocation that ran off-peak was
+  // billed less than this report says, and one that straddled a boundary was
+  // billed on two schedules at once.
+  const window = classifyInvocationWindow(schedule, manifest['startedAtUtc'], manifest['finishedAtUtc'])
+  const span = `${manifest['startedAtUtc']} to ${manifest['finishedAtUtc']} UTC`
+  const multiple = schedule.offPeakMultiplier > 0
+    ? `${(1 / schedule.offPeakMultiplier).toFixed(schedule.offPeakMultiplier === 0.5 ? 0 : 2)}x`
+    : 'more than'
+  switch (window) {
+    case 'peak':
+      return `${opening}${schedule.description} This invocation ran entirely inside the peak window (${span}), `
+        + 'which is the schedule those rates are on, so the cost column needs no adjustment.'
+    case 'off-peak':
+      return `${opening}${schedule.description} The rates in \`bench/config.json\` are the peak ones and this `
+        + `invocation ran entirely off-peak (${span}), so every cost figure here is about ${multiple} what was `
+        + 'actually billed. The ratios between groups are unaffected.'
+    case 'mixed':
+      return `${opening}${schedule.description} This invocation crossed a peak boundary (${span}), so its runs `
+        + 'were not all billed on the same schedule and the cost column mixes the two. Group order rotates per '
+        + 'repetition but does not guarantee the groups were affected equally, so the cost comparison between '
+        + 'groups is the weakest number in this report. Re-run inside one window for exact costs.'
+    default:
+      return `${opening}${schedule.description} The manifest carries no usable invocation window, so which `
+        + 'schedule these runs were billed on was not checked.'
+  }
 }
 
 /**
@@ -804,7 +838,7 @@ function main(): void {
   push(
     '- **Two tasks, one provider, one day.** Nothing here extrapolates to other task shapes, other providers, '
     + 'longer inputs, or tool-using agents. Model behaviour drifts; the date is on every row.',
-    pricingLimit(provider),
+    pricingLimit(provider, manifest),
     budgetLimit(rows, config),
     '- **Retries are off on both sides.** The contract-review example configures step-level retry; the benchmark '
     + 'disables it so both groups face identical failure handling. Group A issues more calls per run than B or C '
