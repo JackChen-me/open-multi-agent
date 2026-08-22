@@ -51,10 +51,18 @@ requires. That is the one structural deviation from the example.
 ## Prerequisites
 
 - `DEEPSEEK_API_KEY` for the models under test.
-- An API key for the **judge**, which must be a different vendor from the models
-  being scored. Set `judge.provider` and `judge.model` in `config.json`; the
-  runner refuses to start without the matching key, or warns loudly if the judge
-  vendor matches the vendor under test.
+- An API key for the **judge**. Set `judge.provider` and `judge.model` in
+  `config.json`; the runner refuses to start without the matching key.
+
+  A different vendor from the models under test is the stronger control and is
+  worth preferring. The shipped config does not use one: it judges DeepSeek with
+  DeepSeek, because both candidates in every A-vs-B pair are the same vendor and
+  the same model, so vendor self-preference applies to both sides equally, and
+  position bias is handled separately by scoring each pair in both orders. That
+  symmetry is weaker for A-vs-C, where the two candidates sit on different tiers.
+  The runner warns when the judge vendor matches the vendor under test, and
+  `REPORT.md` states it in Limits either way. Change `judge.provider` if you want
+  the stronger control.
 - Prices in `config.json` under `pricing`. Left `null`, the cost column stays
   empty and the report says cost was not computed. The harness never invents a
   rate.
@@ -79,11 +87,17 @@ Full run:
 npx tsx bench/src/run-bench.mts --repetitions 5
 ```
 
-Harness unit tests (pricing, dispersion, concurrency, CSV escaping, prompt provenance):
+Harness unit tests (pricing, dispersion, concurrency, CSV round-tripping, judge
+aggregation, prompt provenance):
 
 ```bash
-npx tsx --test bench/src/bench.test.mts
+npm run bench:ab:test
 ```
+
+`bench/` is not an npm workspace, so it is reached through explicit root scripts
+rather than by `--workspaces`. Both are wired into the repository-wide commands
+and run in CI: `npm test` ends with `bench:ab:test`, and `npm run lint` ends with
+`lint:bench` (`tsc --noEmit -p bench/tsconfig.json`).
 
 Flags: `--repetitions N`, `--tasks a,b`, `--groups A,B,C`, `--config <path>`,
 `--out <csv>`, `--label <suffix>`, `--variant <name>`, `--verbose`, `--skip-judge`, `--mock`.

@@ -100,6 +100,42 @@ export function toCSV(records: readonly RunRecord[]): string {
   return [header, ...rows].join('\n') + '\n'
 }
 
+/** One CSV row, keyed by header name. Values are always strings. */
+export interface CsvRow {
+  readonly [column: string]: string
+}
+
+/**
+ * Read a results CSV back into header-keyed rows.
+ *
+ * The single reader for every tool that consumes a CSV. There used to be four
+ * of these: one complete, one that handled `""` escapes, one that dropped them,
+ * and one that was a bare `line.split(',')`. All four happened to work only
+ * because `notes` is the last column, so a comma inside it corrupted cells that
+ * nothing read. That is a coincidence, not a design.
+ */
+export function fromCSV(text: string): CsvRow[] {
+  const rows: string[][] = []
+  let field = ''
+  let record: string[] = []
+  let quoted = false
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!
+    if (quoted) {
+      if (char === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 1 } else quoted = false
+      } else field += char
+    } else if (char === '"') quoted = true
+    else if (char === ',') { record.push(field); field = '' }
+    else if (char === '\n') { record.push(field); rows.push(record); record = []; field = '' }
+    else if (char !== '\r') field += char
+  }
+  if (field.length > 0 || record.length > 0) { record.push(field); rows.push(record) }
+  const [header, ...body] = rows.filter((cells) => cells.some((cell) => cell !== ''))
+  if (!header) return []
+  return body.map((cells) => Object.fromEntries(header.map((name, i) => [name, cells[i] ?? ''])))
+}
+
 // ---------------------------------------------------------------------------
 // Per-pairing judge scores
 // ---------------------------------------------------------------------------

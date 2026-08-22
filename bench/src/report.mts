@@ -8,35 +8,57 @@
  * prose that states a result is not.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { BENCH_ROOT } from './config.mts'
-import { decodeOpponentScores, dispersion, percentDelta, type Dispersion } from './results.mts'
+import { fileURLToPath } from 'node:url'
+import { BENCH_ROOT, PROVIDER_KEY_ENV, TIME_OF_DAY_PRICING } from './config.mts'
+import {
+  decodeOpponentScores,
+  dispersion,
+  fromCSV,
+  percentDelta,
+  type CsvRow,
+  type Dispersion,
+} from './results.mts'
 import { DAG_VARIANTS, taskById } from './tasks.mts'
 
-interface Row {
-  readonly [column: string]: string
+export type Row = CsvRow
+
+/**
+ * Vendor-specific method notes.
+ *
+ * These state facts about one provider's product (its default reasoning effort,
+ * whether its prompt cache can be turned off, how it prices by time of day).
+ * Printing them for a run against a different provider would put a false vendor
+ * claim in the report, so each is emitted only for the provider it is true of
+ * and every other provider gets the vendor-neutral statement of what the
+ * harness did.
+ */
+export function thinkingNote(provider: string, config: Record<string, any>): string {
+  const enabled = config['thinking']?.enabled === true
+  const vendor = provider === 'deepseek'
+    ? 'DeepSeek V4 enables thinking by default at `high` effort, which would put a large and highly variable '
+      + 'block of reasoning tokens into the output column. '
+    : ''
+  return vendor
+    + `Thinking is ${enabled ? 'enabled' : 'disabled'} identically for every agent in every group. Either `
+    + 'setting is defensible; letting the two sides differ is not.'
 }
 
-function parseCSV(text: string): Row[] {
-  const rows: string[][] = []
-  let field = ''
-  let record: string[] = []
-  let quoted = false
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i]!
-    if (quoted) {
-      if (char === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 1 } else { quoted = false }
-      } else field += char
-    } else if (char === '"') quoted = true
-    else if (char === ',') { record.push(field); field = '' }
-    else if (char === '\n') { record.push(field); rows.push(record); record = []; field = '' }
-    else if (char !== '\r') field += char
-  }
-  if (field.length > 0 || record.length > 0) { record.push(field); rows.push(record) }
-  const [header, ...body] = rows.filter((r) => r.some((cell) => cell !== ''))
-  return body.map((cells) => Object.fromEntries(header!.map((name, i) => [name, cells[i] ?? ''])))
+export function cacheNote(provider: string): string {
+  const vendor = provider === 'deepseek'
+    ? 'DeepSeek\'s context cache cannot be switched off, so '
+    : `Prompt caching is a ${provider} server-side behaviour the harness does not control, so `
+  return vendor
+    + 'each run\'s system prompts carry a unique `[bench <nonce> <run_id>]` prefix that defeats the prefix '
+    + 'cache identically for every group. The `cached_tokens` column verifies this rather than assuming it.'
+}
+
+export function pricingLimit(provider: string): string {
+  const timeOfDay = TIME_OF_DAY_PRICING[provider]
+  return '- **Prices are operator-supplied**, taken from `bench/config.json` rather than fetched, so every cost '
+    + 'figure is only as current as that file. '
+    + (timeOfDay ?? 'Rates that change over time are not tracked; the run date is on every row.')
 }
 
 /**
@@ -46,6 +68,30 @@ function parseCSV(text: string): Row[] {
  */
 function stampFromCsvName(csvPath: string): string {
   return /^results-(.+)\.csv$/.exec(path.basename(csvPath))?.[1] ?? ''
+}
+
+/**
+ * The CSV to report on when `--csv` is not given: the most recently written one.
+ *
+ * The default used to be `results-<today>.csv`, which no labelled run ever
+ * writes, so `npm run bench:ab:mock && npm run bench:ab:report` died on ENOENT
+ * even though the mock had just produced a perfectly good CSV.
+ */
+function newestCsv(): string {
+  const candidates = readdirSync(BENCH_ROOT)
+    .filter((name) => /^results-.+\.csv$/.test(name))
+    .map((name) => path.join(BENCH_ROOT, name))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
+  const newest = candidates[0]
+  if (!newest) {
+    throw new Error(
+      `bench: no results CSV in ${BENCH_ROOT}. Run the benchmark first, or pass --csv <path>.`,
+    )
+  }
+  if (candidates.length > 1) {
+    console.log(`[report] --csv not given; using the most recent of ${candidates.length}: ${path.basename(newest)}`)
+  }
+  return newest
 }
 
 const num = (row: Row, column: string): number => Number(row[column])
@@ -72,7 +118,7 @@ function signedAbs(value: number | null, digits = 2): string {
 }
 
 /** True when the two observed ranges overlap, so their medians cannot be separated. */
-function rangesOverlap(a: Dispersion | null, b: Dispersion | null): boolean {
+export function rangesOverlap(a: Dispersion | null, b: Dispersion | null): boolean {
   if (!a || !b) return true
   return a.min <= b.max && b.min <= a.max
 }
@@ -161,6 +207,75 @@ interface Comparison {
   readonly bQuality: Dispersion | null
 }
 
+/**
+ * How far each headline percentage moves when a subset of rows is dropped, and
+ * whether it changes sign.
+ *
+ * The cache-contamination limit used to assert that recomputing without the
+ * affected repetitions "moves the headline percentages by a few points without
+ * changing any direction". That was one run's finding, hard-coded and reprinted
+ * for any run that had cache hits at all. It is computed here instead.
+ */
+export interface DeltaShift {
+  readonly metric: 'tokens' | 'wall' | 'cost'
+  readonly full: number | null
+  readonly clean: number | null
+  /** Percentage points moved. Null when either side could not be computed. */
+  readonly movedPoints: number | null
+  readonly flipped: boolean
+}
+
+/**
+ * The token-budget limit, stated from the data.
+ *
+ * This line used to read "The token budget never bound ... no run approached
+ * it" unconditionally, while `budget_exceeded` sat unread in every row. A run
+ * that actually hit the ceiling got a report denying it had happened.
+ *
+ * The headroom figure uses `framework_*_tokens`, not the proxy's counts: the
+ * budget is enforced against OMA's own accounting, so that is the number it
+ * was compared against.
+ */
+export function budgetLimit(rows: readonly Row[], config: Record<string, any>): string {
+  const configured = Number(config['maxTokenBudget'])
+  const bound = rows.filter((row) => row['budget_exceeded'] === 'true')
+  if (bound.length > 0) {
+    return `- **The token budget bound on ${bound.length} run(s):** `
+      + `${bound.map((row) => row['run_id']).join(', ')}. A run stopped at the ceiling did not finish the work `
+      + 'the others finished, so its tokens, cost, wall-clock and quality are not comparable with theirs. Read '
+      + 'those rows as truncated, not as cheap.'
+  }
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return '- **No token budget was configured.** Nothing here says anything about behaviour under budget '
+      + 'pressure, and nothing stopped a run from spending more than the others.'
+  }
+  const peak = Math.max(
+    0,
+    ...rows.map((row) => num(row, 'framework_input_tokens') + num(row, 'framework_output_tokens')),
+  )
+  const share = (peak / configured) * 100
+  return '- **The token budget never bound.** The largest run used '
+    + `${fmt(peak)} tokens of the ${fmt(configured)} configured (${share.toFixed(1)}%), on the framework's own `
+    + 'accounting, which is what the budget is enforced against. These numbers therefore say nothing about '
+    + 'behaviour under budget pressure.'
+}
+
+export function deltaShifts(full: Comparison, clean: Comparison): DeltaShift[] {
+  return (['tokens', 'wall', 'cost'] as const).map((metric) => {
+    const a = full[metric]
+    const b = clean[metric]
+    return {
+      metric,
+      full: a,
+      clean: b,
+      movedPoints: a === null || b === null ? null : b - a,
+      // A sign flip needs two non-zero sides: a delta sitting exactly on zero
+      // has no direction to reverse.
+      flipped: a !== null && b !== null && a !== 0 && b !== 0 && Math.sign(a) !== Math.sign(b),
+    }
+  })
+}
+
 function comparison(a: GroupStats, b: GroupStats): Comparison {
   // Both sides of the quality delta must come from the same pair. A is judged
   // once per challenger, so A's score against B is a different measurement from
@@ -193,8 +308,9 @@ function main(): void {
     return index === -1 ? undefined : argv[index + 1]
   }
 
-  const csvPath = path.resolve(flag('csv') ?? path.join(BENCH_ROOT, `results-${new Date().toISOString().slice(0, 10)}.csv`))
-  const rows = parseCSV(readFileSync(csvPath, 'utf-8'))
+  const csvFlag = flag('csv')
+  const csvPath = csvFlag ? path.resolve(csvFlag) : newestCsv()
+  const rows = fromCSV(readFileSync(csvPath, 'utf-8'))
   if (rows.length === 0) throw new Error(`bench: ${csvPath} has no data rows.`)
 
   const date = rows[0]!['date']!
@@ -226,6 +342,7 @@ function main(): void {
   const judgeModel = rows.find((row) => row['judge_model'])?.['judge_model'] ?? 'not scored'
   const strong = config['models']?.strong ?? 'unknown'
   const cheap = config['models']?.cheap ?? 'unknown'
+  const provider = String(config['provider'] ?? 'unknown')
 
   const perTask = new Map<string, Map<string, GroupStats>>()
   for (const taskId of taskIds) {
@@ -239,7 +356,7 @@ function main(): void {
   push(
     '# OMA multi-agent vs single-agent: measured A/B',
     '',
-    `Run date ${date}. Models ${strong} and ${cheap} (DeepSeek), judge ${judgeModel}.`,
+    `Run date ${date}. Provider ${provider}, models ${strong} and ${cheap}, judge ${judgeModel}.`,
     `n = ${repetitions} repetitions per task per group.`,
     '',
     '## Headline',
@@ -371,21 +488,31 @@ function main(): void {
   // -- DAG variant comparison -------------------------------------------------
   const variantCsv = flag('variant-csv')
   if (variantCsv) {
-    const variantRows = parseCSV(readFileSync(path.resolve(variantCsv), 'utf-8'))
+    const variantRows = fromCSV(readFileSync(path.resolve(variantCsv), 'utf-8'))
     const variantDate = variantRows[0]?.['date'] ?? 'unknown'
     const variantName = variantRows[0]?.['variant'] ?? 'fixed-merge'
+    if (variantName === 'as-published') {
+      console.warn(
+        `[report] WARNING: ${variantCsv} records its variant as "as-published", so this section compares the `
+        + 'baseline against itself. Pass a CSV from a --variant run.',
+      )
+    }
     const variantGroups = [...new Set(variantRows.map((row) => row['group']!))]
     const variantReps = new Set(variantRows.map((row) => row['repetition'])).size
 
     push(
       '## DAG variant: is the quality gap the wiring or the orchestration?',
       '',
-      'The judge faulted group A repeatedly, and specifically: a compliance table that contradicted the '
-      + 'report\'s own risk section, clauses dropped from the table, and a clause invented by splitting '
-      + 'another. That is the signature of a merge with nothing to arbitrate against. In the published task '
-      + 'graph the terminal task receives only its direct dependencies\' output, so the agent writing the '
-      + 'final report never sees the contract, and cannot tell which of its two inputs is right when they '
-      + 'disagree.',
+      // Mechanism and hypothesis only. An earlier draft narrated what one
+      // specific judge said about one specific run, which would have been
+      // reprinted verbatim above every future variant comparison regardless of
+      // what that run's judge actually found.
+      'In the published task graph the terminal task receives only its direct dependencies\' output, so the '
+      + 'agent writing the final report never sees the source material and cannot tell which of its inputs '
+      + 'is right when they disagree. Whether that costs group A quality is the hypothesis under test here.',
+      '',
+      `The judge's own reasons, per pair and per presentation order, are in \`bench/runs/${stamp}/judge-*.json\`. `
+      + 'This section reports the scores and nothing about why they came out that way.',
       '',
       `**Change under test (\`${variantName}\`).** ${DAG_VARIANTS[variantName as keyof typeof DAG_VARIANTS] ?? 'see bench/src/tasks.mts'}`,
       '',
@@ -403,15 +530,35 @@ function main(): void {
     for (const taskId of taskIds) {
       const label = taskById(taskId).label
       const rowsFor = (source: Row[], group: string) => statsFor(source.filter((row) => row['task'] === taskId), group)
-      const entries: Array<[string, string, number, GroupStats, GroupStats]> = []
+      // Keyed by an explicit `kind`, not by comparing the row's name against
+      // `variantName`. When a variant CSV records its own variant as
+      // `as-published`, that name test matched the baseline row too, both rows
+      // landed in the `fixed` slot, `published` stayed null for every task and
+      // the entire comparison paragraph below silently vanished.
+      const entries: Array<{
+        kind: 'baseline' | 'variant'
+        name: string
+        day: string
+        n: number
+        a: GroupStats
+        b: GroupStats
+      }> = []
       const baseA = perTask.get(taskId)!.get('A')
       const baseB = perTask.get(taskId)!.get('B')
-      if (baseA && baseB) entries.push(['as-published', date, repetitions, baseA, baseB])
-      if (variantGroups.includes('A') && variantGroups.includes('B')) {
-        entries.push([variantName, variantDate, variantReps,
-          rowsFor(variantRows, 'A'), rowsFor(variantRows, 'B')])
+      if (baseA && baseB) {
+        entries.push({ kind: 'baseline', name: 'as-published', day: date, n: repetitions, a: baseA, b: baseB })
       }
-      for (const [name, day, n, a, b] of entries) {
+      if (variantGroups.includes('A') && variantGroups.includes('B')) {
+        entries.push({
+          kind: 'variant',
+          name: variantName,
+          day: variantDate,
+          n: variantReps,
+          a: rowsFor(variantRows, 'A'),
+          b: rowsFor(variantRows, 'B'),
+        })
+      }
+      for (const { kind, name, day, n, a, b } of entries) {
         // The A-vs-B pairing on both sides. The baseline invocation also judged
         // A against C; that score belongs to a different contrast and would make
         // this gap incomparable with the variant's, which only ran A and B.
@@ -422,13 +569,10 @@ function main(): void {
           + `| ${a.cost ? range(a.cost, 4) : 'n/a'} | ${pair.aQuality ? range(pair.aQuality, 3) : 'n/a'} `
           + `| ${pair.bQuality ? range(pair.bQuality, 3) : 'n/a'} | ${signedAbs(gap)} |`,
         )
-        if (name === variantName) {
-          const entry = gaps.find((g) => g.task === label)
-          if (entry) entry.fixed = gap
-          else gaps.push({ task: label, published: null, fixed: gap })
-        } else {
-          gaps.push({ task: label, published: gap, fixed: null })
-        }
+        const entry = gaps.find((g) => g.task === label)
+        const slot = kind === 'variant' ? 'fixed' : 'published'
+        if (entry) entry[slot] = gap
+        else gaps.push({ task: label, published: null, fixed: null, [slot]: gap })
       }
     }
     push('')
@@ -517,13 +661,9 @@ function main(): void {
     `| Run order | group order rotated each repetition, recorded per row |`,
     `| Repetitions | ${repetitions} per task per group |`,
     '',
-    'DeepSeek V4 enables thinking by default at `high` effort, which would put a large and highly variable block '
-    + 'of reasoning tokens into the output column. It is disabled on both sides. Either setting is defensible; '
-    + 'letting the two sides differ is not.',
+    thinkingNote(provider, config),
     '',
-    'DeepSeek\'s context cache cannot be switched off, so each run\'s system prompts carry a unique '
-    + '`[bench <run_id>]` prefix that defeats the prefix cache identically for every group. The `cached_tokens` '
-    + 'column verifies this rather than assuming it.',
+    cacheNote(provider),
     '',
     '### Measurement',
     '',
@@ -599,13 +739,50 @@ function main(): void {
   if (cachedRows.length > 0) {
     const reps = [...new Set(cachedRows.map((row) => `r${row['repetition']}`))].join(', ')
     const tasks = [...new Set(cachedRows.map((row) => row['task']))].join(', ')
+    // What dropping the affected repetitions actually does to the headline,
+    // recomputed per task rather than asserted.
+    const recomputed: string[] = []
+    let anyFlipped = false
+    let unrecomputable = false
+    for (const taskId of taskIds) {
+      const taskRows = rows.filter((row) => row['task'] === taskId)
+      const dirtyReps = new Set(
+        taskRows.filter((row) => Number(row['cached_tokens']) > 0).map((row) => row['repetition']),
+      )
+      if (dirtyReps.size === 0) continue
+      const cleanRows = taskRows.filter((row) => !dirtyReps.has(row['repetition']))
+      const cleanA = statsFor(cleanRows, 'A')
+      const cleanB = statsFor(cleanRows, 'B')
+      if (cleanA.successes === 0 || cleanB.successes === 0) {
+        unrecomputable = true
+        recomputed.push(`${taskId}: every repetition is affected, so there is nothing left to recompute from`)
+        continue
+      }
+      const shifts = deltaShifts(
+        comparison(statsFor(taskRows, 'A'), statsFor(taskRows, 'B')),
+        comparison(cleanA, cleanB),
+      )
+      if (shifts.some((shift) => shift.flipped)) anyFlipped = true
+      recomputed.push(
+        `${taskId} (n=${cleanA.successes} clean): `
+        + shifts
+          .map((shift) => `${shift.metric} ${signedPercent(shift.full)} to ${signedPercent(shift.clean)}`
+            + (shift.flipped ? ' **(direction reverses)**' : ''))
+          .join(', '),
+      )
+    }
     push(
       `- **Cache busting failed on ${reps} (${tasks}).** Run ids are deterministic, so those runs reused a salt `
       + 'from an earlier aborted invocation of the same benchmark and inherited its prompt cache; their input '
-      + 'tokens were partly billed at the much cheaper cache-hit rate, which understates their cost. It hit all '
-      + 'three groups in the affected repetitions, and recomputing the medians without them moves the headline '
-      + 'percentages by a few points without changing any direction. The salt now carries a per-invocation '
-      + 'nonce so a re-run cannot inherit its predecessor\'s cache.',
+      + 'tokens were partly billed at the much cheaper cache-hit rate, which understates their cost. The salt '
+      + 'now carries a per-invocation nonce so a re-run cannot inherit its predecessor\'s cache.',
+      '',
+      `  Recomputing the A-vs-B headline without the affected repetitions: ${recomputed.join('; ')}.`
+      + (unrecomputable
+        ? ''
+        : anyFlipped
+          ? ' At least one comparison reverses direction, so the headline for this run rests on contaminated rows.'
+          : ' No comparison reverses direction.'),
     )
   }
   if (variantCsv) {
@@ -627,10 +804,8 @@ function main(): void {
   push(
     '- **Two tasks, one provider, one day.** Nothing here extrapolates to other task shapes, other providers, '
     + 'longer inputs, or tool-using agents. Model behaviour drifts; the date is on every row.',
-    `- **Pricing is DeepSeek's published peak rate** at the time of the run. DeepSeek charges half that off-peak, `
-    + 'so absolute cost figures halve outside the peak window while the ratios between groups do not move.',
-    '- **The token budget never bound.** It was configured and enforced, but no run approached it, so these '
-    + 'numbers say nothing about behaviour under budget pressure.',
+    pricingLimit(provider),
+    budgetLimit(rows, config),
     '- **Retries are off on both sides.** The contract-review example configures step-level retry; the benchmark '
     + 'disables it so both groups face identical failure handling. Group A issues more calls per run than B or C '
     + 'and therefore carries proportionally more exposure to a transient provider error, which shows up in the '
@@ -641,7 +816,7 @@ function main(): void {
     '## Reproducing',
     '',
     '```bash',
-    'export DEEPSEEK_API_KEY=...',
+    `export ${PROVIDER_KEY_ENV[provider] ?? 'PROVIDER_API_KEY'}=...`,
     `npx tsx bench/src/run-bench.mts --repetitions ${repetitions}`,
     `npx tsx bench/src/report.mts --csv bench/results-${stamp}.csv`,
     '```',
@@ -666,4 +841,8 @@ function main(): void {
   console.log(`Wrote ${outPath}`)
 }
 
-main()
+// Only run as a script. The report's own arithmetic is unit-tested, and a test
+// importing it must not trigger a CSV read and a report write at module load.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}

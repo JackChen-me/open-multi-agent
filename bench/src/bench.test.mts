@@ -9,19 +9,24 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { priceCall, pricingIsComplete } from './config.mts'
 import { summarizeCalls, type CallRecord } from './proxy.mts'
 import {
+  CSV_COLUMNS,
   decodeOpponentScores,
   dispersion,
   encodeOpponentScores,
   foldPairScore,
+  fromCSV,
   percentDelta,
   toCSV,
   type RunRecord,
 } from './results.mts'
 import { assertLiteral, systemPromptOf } from './prompts.mts'
+import { aggregateOrders } from './judge.mts'
+import { budgetLimit, cacheNote, deltaShifts, pricingLimit, rangesOverlap, thinkingNote } from './report.mts'
 import { BENCH_TASKS, DAG_VARIANTS } from './tasks.mts'
 
 const PRICES = {
@@ -272,4 +277,195 @@ test('the fixed-merge variant gives each terminal task the source material', () 
   // Explicitly: the default is the unmodified example.
   assert.deepEqual(build('contract-review', 'as-published').at(-1)!.dependsOn, publishedNotify.dependsOn)
   assert.ok(Object.keys(DAG_VARIANTS).includes('fixed-merge'))
+})
+
+// ---------------------------------------------------------------------------
+// Limits prose that used to be asserted rather than computed
+// ---------------------------------------------------------------------------
+
+const budgetRow = (run_id: string, framework: number, exceeded = false) => ({
+  run_id,
+  budget_exceeded: String(exceeded),
+  framework_input_tokens: String(Math.round(framework * 0.9)),
+  framework_output_tokens: String(framework - Math.round(framework * 0.9)),
+})
+
+test('budgetLimit reports a run that hit the ceiling instead of denying it happened', () => {
+  // Regression: this line read "The token budget never bound" unconditionally
+  // while budget_exceeded sat unread in every row, so a run that was truncated
+  // at the ceiling got a report stating the opposite.
+  const line = budgetLimit(
+    [budgetRow('contract-review-A-r1', 10_000), budgetRow('contract-review-A-r2', 400_000, true)],
+    { maxTokenBudget: 400_000 },
+  )
+  assert.match(line, /budget bound on 1 run\(s\)/)
+  assert.match(line, /contract-review-A-r2/)
+  assert.doesNotMatch(line, /never bound/)
+  // A truncated run must not be read as a cheap one.
+  assert.match(line, /truncated, not as cheap/)
+})
+
+test('budgetLimit states real headroom when the budget did not bind', () => {
+  const line = budgetLimit(
+    [budgetRow('a', 10_000), budgetRow('b', 40_000), budgetRow('c', 25_000)],
+    { maxTokenBudget: 400_000 },
+  )
+  assert.match(line, /never bound/)
+  // The peak run, not the mean or the last: 40,000 of 400,000 is 10.0%.
+  assert.match(line, /40,000 tokens of the 400,000 configured \(10\.0%\)/)
+  // Headroom is measured on the accounting the budget is actually enforced against.
+  assert.match(line, /framework's own\s+accounting/)
+})
+
+test('budgetLimit does not claim a budget held when none was set', () => {
+  for (const config of [{}, { maxTokenBudget: 0 }, { maxTokenBudget: 'unset' }]) {
+    const line = budgetLimit([budgetRow('a', 10_000)], config)
+    assert.match(line, /No token budget was configured/)
+    assert.doesNotMatch(line, /never bound/)
+  }
+})
+
+const cmp = (tokens: number | null, wall: number | null, cost: number | null) =>
+  ({ tokens, wall, cost, quality: null, aQuality: null, bQuality: null })
+
+test('deltaShifts measures how far dropping rows moves the headline', () => {
+  const shifts = deltaShifts(cmp(66.8, 192.3, 21.3), cmp(64.1, 190.0, 19.9))
+  assert.deepEqual(shifts.map((s) => s.metric), ['tokens', 'wall', 'cost'])
+  assert.equal(shifts[0]!.movedPoints!.toFixed(1), '-2.7')
+  assert.equal(shifts.some((s) => s.flipped), false)
+})
+
+test('deltaShifts flags a comparison that reverses direction', () => {
+  // The case the old hard-coded prose promised could not happen: A looks worse
+  // than B on the full sample and better once the contaminated rows go.
+  const shifts = deltaShifts(cmp(12.0, 5.0, 3.0), cmp(-4.0, 5.0, 3.0))
+  assert.equal(shifts[0]!.flipped, true)
+  assert.equal(shifts[0]!.movedPoints, -16)
+  assert.equal(shifts[1]!.flipped, false)
+})
+
+test('deltaShifts treats an uncomputable or zero side as no flip', () => {
+  const missing = deltaShifts(cmp(null, 5.0, null), cmp(10.0, null, null))
+  assert.equal(missing[0]!.movedPoints, null)
+  assert.equal(missing[0]!.flipped, false)
+  assert.equal(missing[1]!.flipped, false)
+  // A delta landing exactly on zero has no direction to reverse.
+  assert.equal(deltaShifts(cmp(5, 0, 0), cmp(0, 0, 0))[0]!.flipped, false)
+})
+
+// ---------------------------------------------------------------------------
+// Judge aggregation, CSV round-tripping, and vendor-neutral prose
+// ---------------------------------------------------------------------------
+
+test('aggregateOrders cancels a judge that always prefers whatever it reads first', () => {
+  // The report claims position preference cannot move the result. This is that
+  // claim: a judge that scores slot 1 at 0.9 and slot 2 at 0.4 regardless of
+  // content must leave both groups on the same score and no winner.
+  const { scores, preferred } = aggregateOrders([
+    { firstGroup: 'A', secondGroup: 'B', firstScore: 0.9, secondScore: 0.4, preferred: '1' },
+    { firstGroup: 'B', secondGroup: 'A', firstScore: 0.9, secondScore: 0.4, preferred: '1' },
+  ])
+  assert.equal(scores['A'], 0.65)
+  assert.equal(scores['B'], 0.65)
+  assert.deepEqual(preferred, { A: 'tie', B: 'tie' })
+})
+
+test('aggregateOrders keeps a real preference that survives both orders', () => {
+  const { scores, preferred } = aggregateOrders([
+    { firstGroup: 'A', secondGroup: 'B', firstScore: 0.9, secondScore: 0.5, preferred: '1' },
+    { firstGroup: 'B', secondGroup: 'A', firstScore: 0.5, secondScore: 0.9, preferred: '2' },
+  ])
+  assert.equal(scores['A'], 0.9)
+  assert.equal(scores['B'], 0.5)
+  assert.deepEqual(preferred, { A: 'win', B: 'loss' })
+})
+
+test('aggregateOrders reports a split verdict as a tie, not as the last order seen', () => {
+  const { preferred } = aggregateOrders([
+    { firstGroup: 'A', secondGroup: 'B', firstScore: 0.8, secondScore: 0.7, preferred: '1' },
+    { firstGroup: 'B', secondGroup: 'A', firstScore: 0.8, secondScore: 0.7, preferred: '1' },
+  ])
+  assert.deepEqual(preferred, { A: 'tie', B: 'tie' })
+  // An explicit tie in both orders is also a tie.
+  assert.deepEqual(
+    aggregateOrders([
+      { firstGroup: 'A', secondGroup: 'B', firstScore: 0.5, secondScore: 0.5, preferred: 'tie' },
+      { firstGroup: 'B', secondGroup: 'A', firstScore: 0.5, secondScore: 0.5, preferred: 'tie' },
+    ]).preferred,
+    { A: 'tie', B: 'tie' },
+  )
+})
+
+test('fromCSV round-trips everything toCSV escapes', () => {
+  // There used to be four readers; the naive one would have split this row's
+  // notes into extra cells and shifted every column after it.
+  const record = {
+    run_id: 'r1', date: '2026-01-01', run_stamp: '2026-01-01-pilot', task: 't', task_kind: 'favourable',
+    group: 'A', variant: 'as-published', repetition: 1, group_order: 'A>B', role_models: 'a=x;b=y',
+    input_tokens: 1, output_tokens: 2, cached_tokens: 0, total_tokens: 3, est_cost_usd: null,
+    wall_seconds: 1.5, agent_count: 4, parallelism: 2, max_concurrent_calls: 2, llm_calls: 4,
+    success: true, quality_score: null, quality_by_opponent: 'B=0.700;C=0.900', judge_model: '',
+    temperature: 0.2, thinking: 'disabled', cache_busting: true, framework_input_tokens: 1,
+    framework_output_tokens: 2, budget_exceeded: false,
+    notes: 'a, b "quoted"\nand a newline',
+  } satisfies RunRecord
+  const [row] = fromCSV(toCSV([record]))
+  assert.ok(row)
+  assert.equal(row['notes'], 'a, b "quoted"\nand a newline')
+  assert.equal(row['quality_by_opponent'], 'B=0.700;C=0.900')
+  assert.equal(row['run_stamp'], '2026-01-01-pilot')
+  // Unknown stays unknown across the round trip: not zero, not "null".
+  assert.equal(row['est_cost_usd'], '')
+  assert.equal(row['quality_score'], '')
+  // The column after the embedded comma and newline is still itself.
+  assert.equal(row['group_order'], 'A>B')
+  assert.equal(row['wall_seconds'], '1.5')
+})
+
+test('fromCSV tolerates CRLF, a missing trailing newline, and an empty file', () => {
+  const rows = fromCSV('a,b\r\n1,2\r\n3,4')
+  assert.deepEqual(rows, [{ a: '1', b: '2' }, { a: '3', b: '4' }])
+  assert.deepEqual(fromCSV(''), [])
+  assert.deepEqual(fromCSV('a,b\n'), [])
+})
+
+test('the README CSV column list matches the columns actually written', () => {
+  // The list drifted once already: `variant` shipped in the CSV and never made
+  // it into the README.
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf-8')
+  const section = readme.slice(readme.indexOf('## CSV columns'))
+  const documented = [...section.slice(0, section.indexOf('\n\n', section.indexOf('`')) + 2).matchAll(/`([a-z_]+)`/g)]
+    .map((match) => match[1]!)
+  for (const column of CSV_COLUMNS) {
+    assert.ok(documented.includes(column), `README does not document the "${column}" column`)
+  }
+})
+
+test('report prose names the provider that actually ran, not DeepSeek by default', () => {
+  // A run against another vendor used to inherit DeepSeek's product facts:
+  // its default reasoning effort, its uncloseable prompt cache, its peak rates.
+  const other = { provider: 'openai', thinking: { enabled: true } }
+  assert.doesNotMatch(thinkingNote('openai', other), /DeepSeek/)
+  assert.match(thinkingNote('openai', other), /Thinking is enabled identically/)
+  assert.doesNotMatch(cacheNote('openai'), /DeepSeek/)
+  assert.match(cacheNote('openai'), /openai server-side behaviour/)
+  assert.doesNotMatch(pricingLimit('openai'), /DeepSeek|peak/)
+
+  // The vendor facts survive for the vendor they are true of.
+  assert.match(thinkingNote('deepseek', { thinking: { enabled: false } }), /DeepSeek V4 enables thinking/)
+  assert.match(cacheNote('deepseek'), /DeepSeek's context cache cannot be switched off/)
+  assert.match(pricingLimit('deepseek'), /01:00-04:00 and 06:00-10:00 UTC/)
+  // Either way the report says where the prices came from.
+  for (const provider of ['deepseek', 'openai']) {
+    assert.match(pricingLimit(provider), /operator-supplied/)
+  }
+})
+
+test('rangesOverlap refuses to separate two groups whose observed ranges touch', () => {
+  const span = (min: number, max: number) => ({ n: 2, median: (min + max) / 2, min, max, mean: (min + max) / 2 })
+  assert.equal(rangesOverlap(span(0.4, 0.6), span(0.5, 0.8)), true)
+  assert.equal(rangesOverlap(span(0.4, 0.5), span(0.5, 0.8)), true, 'touching at a single point still overlaps')
+  assert.equal(rangesOverlap(span(0.1, 0.4), span(0.5, 0.8)), false)
+  // Missing data is not evidence of separation.
+  assert.equal(rangesOverlap(null, span(0.5, 0.8)), true)
 })

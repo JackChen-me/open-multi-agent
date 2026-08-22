@@ -14,6 +14,7 @@ import path from 'node:path'
 import { BENCH_ROOT, loadConfig } from './config.mts'
 import { Judge } from './judge.mts'
 import { readFixture } from './prompts.mts'
+import { fromCSV } from './results.mts'
 import { taskById } from './tasks.mts'
 
 const argv = process.argv.slice(2)
@@ -31,12 +32,7 @@ const config = loadConfig()
 
 // Take the run inventory from the CSV rather than from config: config may have
 // been edited since, but the CSV is what actually ran.
-const [headerLine, ...bodyLines] = readFileSync(csvPath, 'utf-8').trim().split('\n')
-const header = headerLine!.split(',')
-const runs = bodyLines.map((line) => {
-  const cells = line.split(',')
-  return Object.fromEntries(header.map((name, i) => [name, cells[i] ?? ''])) as Record<string, string>
-})
+const runs = fromCSV(readFileSync(csvPath, 'utf-8'))
 
 const tasks = [...new Set(runs.map((run) => run['task']!))]
 const repetitions = [...new Set(runs.map((run) => Number(run['repetition'])))].sort((a, b) => a - b)

@@ -10,7 +10,7 @@
     "build": "npm run build --workspaces --if-present",
     "dev": "npm run dev -w @open-multi-agent/core",
     "pretest": "npm run test:example-catalog",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present && npm run bench:ab:test",
     "test:example-catalog": "node --test scripts/example-catalog.test.mjs && node scripts/validate-example-catalog.mjs",
     "test:watch": "npm run test:watch -w @open-multi-agent/core",
     "test:coverage": "npm run test:coverage -w @open-multi-agent/core",
@@ -24,7 +24,8 @@
     "test:observability-examples": "node scripts/observability-example-smoke.mjs",
     "test:observability-pack": "node scripts/observability-tarball-smoke.mjs",
     "test:scaffold": "npm run test:scaffold --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present && npm run lint:bench",
+    "lint:bench": "tsc --noEmit -p bench/tsconfig.json"
   },
   "license": "MIT",
   "repository": {
@@ -33,5 +34,9 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.0"
   }
 }

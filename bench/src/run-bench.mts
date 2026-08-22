@@ -19,30 +19,20 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { OpenMultiAgent } from '../../packages/core/src/index.js'
 import type { AgentRunResult, OrchestratorEvent, TeamRunResult } from '../../packages/core/src/index.js'
-import { BENCH_ROOT, loadConfig, priceCall, type BenchConfig } from './config.mts'
+import {
+  BENCH_ROOT,
+  loadConfig,
+  priceCall,
+  PROVIDER_KEY_ENV,
+  PROVIDER_ORIGINS,
+  type BenchConfig,
+} from './config.mts'
 import { Judge } from './judge.mts'
 import { startMockUpstream } from './mock-upstream.mts'
 import { RecordingProxy, summarizeCalls } from './proxy.mts'
 import { dispersion, foldPairScore, toCSV, type RunRecord } from './results.mts'
 import { readFixture } from './prompts.mts'
 import { DAG_VARIANTS, taskById, type BenchTaskDefinition, type DagVariant } from './tasks.mts'
-
-const PROVIDER_ORIGINS: Record<string, string> = {
-  deepseek: 'https://api.deepseek.com',
-}
-
-const PROVIDER_KEY_ENV: Record<string, string> = {
-  deepseek: 'DEEPSEEK_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  anthropic: 'ANTHROPIC_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  grok: 'XAI_API_KEY',
-  minimax: 'MINIMAX_API_KEY',
-  moonshot: 'MOONSHOT_API_KEY',
-  qiniu: 'QINIU_API_KEY',
-  doubao: 'ARK_API_KEY',
-  hunyuan: 'HUNYUAN_API_KEY',
-}
 
 interface CliOptions {
   readonly mock: boolean
@@ -55,6 +45,14 @@ interface CliOptions {
   readonly skipJudge: boolean
   readonly configPath?: string
   readonly variant: DagVariant
+}
+
+function positiveInteger(raw: string, flag: string): number {
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`bench: ${flag} must be a positive integer, got "${raw}".`)
+  }
+  return value
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -75,7 +73,12 @@ function parseArgs(argv: readonly string[]): CliOptions {
     mock: options['mock'] === true,
     verbose: options['verbose'] === true,
     skipJudge: options['skip-judge'] === true,
-    ...(typeof options['repetitions'] === 'string' ? { repetitions: Number(options['repetitions']) } : {}),
+    // Validated rather than coerced: `Number('abc')` is NaN and `--repetitions 0`
+    // is 0, both falsy, so both used to fall through to the config value and run
+    // a different number of repetitions than the operator asked for, silently.
+    ...(typeof options['repetitions'] === 'string'
+      ? { repetitions: positiveInteger(options['repetitions'], '--repetitions') }
+      : {}),
     ...(typeof options['tasks'] === 'string' ? { tasks: options['tasks'].split(',') } : {}),
     ...(typeof options['groups'] === 'string' ? { groups: options['groups'].split(',') } : {}),
     ...(typeof options['out'] === 'string' ? { out: options['out'] } : {}),

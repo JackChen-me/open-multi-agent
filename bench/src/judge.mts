@@ -100,6 +100,57 @@ function buildJudgePrompt(
   ].join('\n')
 }
 
+/** One verdict, tagged with which group was shown in which slot. */
+export interface OrderedVerdict {
+  readonly firstGroup: string
+  readonly secondGroup: string
+  readonly firstScore: number
+  readonly secondScore: number
+  readonly preferred: '1' | '2' | 'tie'
+}
+
+export interface AggregatedPair {
+  readonly scores: Readonly<Record<string, number>>
+  readonly preferred: Readonly<Record<string, 'win' | 'loss' | 'tie'>>
+}
+
+/**
+ * Collapse both presentation orders into one score per group.
+ *
+ * This is the whole basis for the report's claim that position preference
+ * cannot move the result, so it is a pure function the tests can drive directly
+ * rather than logic reachable only through a live provider call. A group's
+ * score is the mean over the orders it appeared in; the win/loss verdict is by
+ * majority, and an even split is a tie no matter which slot produced it.
+ */
+export function aggregateOrders(verdicts: readonly OrderedVerdict[]): AggregatedPair {
+  const totals = new Map<string, number[]>()
+  const wins = new Map<string, number>()
+  const record = (group: string, score: number) => {
+    totals.set(group, [...(totals.get(group) ?? []), score])
+    if (!wins.has(group)) wins.set(group, 0)
+  }
+  for (const verdict of verdicts) {
+    record(verdict.firstGroup, verdict.firstScore)
+    record(verdict.secondGroup, verdict.secondScore)
+    if (verdict.preferred === '1') wins.set(verdict.firstGroup, wins.get(verdict.firstGroup)! + 1)
+    else if (verdict.preferred === '2') wins.set(verdict.secondGroup, wins.get(verdict.secondGroup)! + 1)
+  }
+
+  const scores: Record<string, number> = {}
+  for (const [group, values] of totals) {
+    scores[group] = values.reduce((sum, value) => sum + value, 0) / values.length
+  }
+
+  const preferred: Record<string, 'win' | 'loss' | 'tie'> = {}
+  for (const group of totals.keys()) {
+    const best = Math.max(...[...totals.keys()].filter((g) => g !== group).map((g) => wins.get(g) ?? 0))
+    const mine = wins.get(group) ?? 0
+    preferred[group] = mine > best ? 'win' : mine < best ? 'loss' : 'tie'
+  }
+  return { scores, preferred }
+}
+
 export interface JudgeOverrides {
   /** Offline stand-in endpoint; used only by `--mock`. */
   readonly baseURL?: string
@@ -150,9 +201,7 @@ export class Judge {
       [right, left],
     ]
 
-    const totals: Record<string, number[]> = { [left.group]: [], [right.group]: [] }
-    const wins: Record<string, number> = { [left.group]: 0, [right.group]: 0 }
-    let ties = 0
+    const collected: OrderedVerdict[] = []
     const reasons: string[] = []
     let judgeInput = 0
     let judgeOutput = 0
@@ -185,18 +234,20 @@ export class Judge {
       if (verdict === undefined) {
         throw new Error(`bench judge: judge call failed twice or returned no structured verdict: ${lastFailure}`)
       }
-      totals[first.group]!.push(verdict.output_1.score)
-      totals[second.group]!.push(verdict.output_2.score)
-      if (verdict.preferred === '1') wins[first.group]! += 1
-      else if (verdict.preferred === '2') wins[second.group]! += 1
-      else ties += 1
+      collected.push({
+        firstGroup: first.group,
+        secondGroup: second.group,
+        firstScore: verdict.output_1.score,
+        secondScore: verdict.output_2.score,
+        preferred: verdict.preferred,
+      })
       reasons.push(`[${first.group} as Output 1] ${verdict.output_1.reason} || [${second.group} as Output 2] ${verdict.output_2.reason}`)
     }
 
+    const aggregated = aggregateOrders(collected)
     const scorer = makeScorer(this.config.judge.rubricVersion)
     const scores: Record<string, number> = {}
-    for (const [group, values] of Object.entries(totals)) {
-      const mean = values.reduce((sum, value) => sum + value, 0) / values.length
+    for (const [group, mean] of Object.entries(aggregated.scores)) {
       const validated = await scorer.score({
         evalCase: { id: `${task.id}:${group}`, input },
         output: '',
@@ -206,18 +257,9 @@ export class Judge {
       scores[group] = validated.score
     }
 
-    const preferred: Record<string, 'win' | 'loss' | 'tie'> = {}
-    for (const group of Object.keys(totals)) {
-      const other = Object.keys(totals).find((g) => g !== group)!
-      if (ties === orders.length) preferred[group] = 'tie'
-      else if (wins[group]! > wins[other]!) preferred[group] = 'win'
-      else if (wins[group]! < wins[other]!) preferred[group] = 'loss'
-      else preferred[group] = 'tie'
-    }
-
     return {
       scores,
-      preferred,
+      preferred: aggregated.preferred,
       reasons,
       judgeTokens: { input: judgeInput, output: judgeOutput },
       calls,

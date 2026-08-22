@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from '
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { BENCH_ROOT, loadConfig } from './config.mts'
-import { CSV_COLUMNS, foldPairScore, toCSV, type RunRecord } from './results.mts'
+import { foldPairScore, fromCSV, toCSV, type RunRecord } from './results.mts'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
@@ -27,30 +27,7 @@ const csvPath = path.join(BENCH_ROOT, `results-${date}.csv`)
 const runsDir = path.join(BENCH_ROOT, 'runs', date)
 if (!existsSync(csvPath)) throw new Error(`bench: no CSV at ${csvPath}.`)
 
-const [headerLine, ...bodyLines] = readFileSync(csvPath, 'utf-8').trim().split('\n')
-const header = headerLine!.split(',')
-
-function parseLine(line: string): string[] {
-  const cells: string[] = []
-  let field = ''
-  let quoted = false
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i]!
-    if (quoted) {
-      if (char === '"') { if (line[i + 1] === '"') { field += '"'; i += 1 } else quoted = false }
-      else field += char
-    } else if (char === '"') quoted = true
-    else if (char === ',') { cells.push(field); field = '' }
-    else field += char
-  }
-  cells.push(field)
-  return cells
-}
-
-const rows = bodyLines.map((line) => {
-  const cells = parseLine(line)
-  return Object.fromEntries(header.map((name, i) => [name, cells[i] ?? ''])) as Record<string, string>
-})
+const rows = fromCSV(readFileSync(csvPath, 'utf-8')).map((row) => ({ ...row }))
 
 interface Verdict {
   readonly scores: Record<string, number>
@@ -145,5 +122,3 @@ if (!existsSync(manifestPath)) {
   }, null, 2))
   console.log(`Wrote reconstructed ${manifestPath}`)
 }
-
-void CSV_COLUMNS
