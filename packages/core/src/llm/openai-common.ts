@@ -96,7 +96,10 @@ function hasToolResults(msg: LLMMessage): boolean {
   return msg.content.some((b) => b.type === 'tool_result')
 }
 
-type OpenAIUserContentPart = OpenAI.Chat.ChatCompletionContentPart
+type OpenAIUserContentPart = OpenAI.Chat.ChatCompletionContentPart | {
+  type: 'video_url'
+  video_url: { url: string }
+}
 
 function toOpenAIToolAttachmentPart(part: Exclude<ToolResultContentPart, { type: 'text' }>): OpenAIUserContentPart {
   if (part.type === 'image') {
@@ -208,7 +211,10 @@ export function toOpenAIMessages(
         const nonToolBlocks = msg.content.filter((b) => b.type !== 'tool_result')
         if (attachmentParts.length > 0) {
           attachmentParts.push(...toOpenAIUserContentParts({ role: 'user', content: nonToolBlocks }))
-          result.push({ role: 'user', content: attachmentParts })
+          result.push({
+            role: 'user',
+            content: attachmentParts as unknown as ChatCompletionUserMessageParam['content'],
+          })
         } else if (nonToolBlocks.length > 0) {
           result.push(toOpenAIUserMessage({ role: 'user', content: nonToolBlocks }))
         }
@@ -228,7 +234,10 @@ function toOpenAIUserMessage(msg: LLMMessage): ChatCompletionUserMessageParam {
     return { role: 'user', content: msg.content[0].text }
   }
 
-  return { role: 'user', content: toOpenAIUserContentParts(msg) }
+  return {
+    role: 'user',
+    content: toOpenAIUserContentParts(msg) as unknown as ChatCompletionUserMessageParam['content'],
+  }
 }
 
 function toOpenAIUserContentParts(msg: LLMMessage): OpenAIUserContentPart[] {
@@ -242,6 +251,15 @@ function toOpenAIUserContentParts(msg: LLMMessage): OpenAIUserContentPart[] {
         type: 'image_url',
         image_url: {
           url: `data:${block.source.media_type};base64,${block.source.data}`,
+        },
+      })
+    } else if (block.type === 'video') {
+      parts.push({
+        type: 'video_url',
+        video_url: {
+          url: block.source.type === 'base64'
+            ? `data:${block.source.media_type};base64,${block.source.data}`
+            : block.source.url,
         },
       })
     }

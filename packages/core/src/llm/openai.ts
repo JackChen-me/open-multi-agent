@@ -39,6 +39,7 @@ import type {
 
 import type {
   ContentBlock,
+  VideoBlock,
   LLMAdapter,
   LLMChatOptions,
   LLMMessage,
@@ -404,6 +405,7 @@ export class OpenAIAdapter implements LLMAdapter {
 // Re-export types that consumers of this module commonly need alongside the adapter.
 export type {
   ContentBlock,
+  VideoBlock,
   LLMAdapter,
   LLMChatOptions,
   LLMMessage,

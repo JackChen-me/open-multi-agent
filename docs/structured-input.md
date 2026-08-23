@@ -3,7 +3,7 @@
 `Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` accept either a
 string or a complete `LLMMessage[]`. The string form is unchanged shorthand for
 one user text message. Use the message form when the application owns prior
-conversation turns or needs content blocks such as images:
+conversation turns or needs content blocks such as images and videos:
 
 ```ts
 import {
@@ -35,6 +35,10 @@ const result = await new OpenMultiAgent().runAgent(
   messages,
 )
 ```
+
+OpenAI-compatible adapters (including MiniMax) also accept a `video` block;
+its source may be inline base64 bytes or an HTTP(S) URL and is sent as a
+`video_url` content part.
 
 The selected model/provider must support every supplied content block. OMA does
 not infer a vision-capability flag or silently remove unsupported blocks;

@@ -21,6 +21,9 @@ export function estimateTokens(messages: LLMMessage[]): number {
       } else if (block.type === 'image') {
         // Account for non-text payloads with a small fixed cost.
         chars += 64
+      } else if (block.type === 'video') {
+        // Video bytes are opaque to the lightweight estimator.
+        chars += 64
       }
     }
   }

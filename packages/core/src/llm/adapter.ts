@@ -29,6 +29,7 @@ export type {
   ToolUseBlock,
   ToolResultBlock,
   ImageBlock,
+  VideoBlock,
 } from '../types.js'
 
 import type { EgressPolicy, LLMAdapter } from '../types.js'

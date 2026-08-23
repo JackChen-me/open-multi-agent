@@ -221,6 +221,9 @@ function toGeminiContents(
           })
           break
 
+        case 'video':
+          throw new Error('This adapter does not support video content blocks')
+
         default: {
           const _exhaustive: never = block
           throw new Error(`Unhandled content block type: ${JSON.stringify(_exhaustive)}`)
