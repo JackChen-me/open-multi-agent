@@ -370,12 +370,7 @@ function convertZodType(schema: ZodSchema): Record<string, unknown> {
       for (const [key, value] of Object.entries(objectDef.shape())) {
         properties[key] = convertZodType(value as ZodSchema)
 
-        const innerDef = ((value as ZodSchema) as unknown as { _def: ZodTypeDef })._def
-        const isOptional =
-          innerDef.typeName === ZodTypeName.ZodOptional ||
-          innerDef.typeName === ZodTypeName.ZodDefault ||
-          innerDef.typeName === ZodTypeName.ZodNullable
-        if (!isOptional) {
+        if (!(value as ZodSchema).isOptional()) {
           required.push(key)
         }
       }
