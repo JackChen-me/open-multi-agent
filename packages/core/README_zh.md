@@ -223,7 +223,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 支持 `open-multi-agent` 的付费赞助商。赞助不影响技术决策与模型推荐。
 
-- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**：全模态 AI 推理平台，单一 API 打通视频、图像与 LLM，覆盖 300+ 精选模型。OMA 用户可申请限量 $5 credit 兑换码。见 [Atlas Cloud 接入指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud_zh.md)。
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**：全模态 AI 推理平台，单一 API 打通视频、图像与 LLM，覆盖 300+ 精选模型。$5 credit 兑换码面向 OMA 用户开放，先到先得。见 [Atlas Cloud 接入指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud_zh.md)。
 
 ## 生产配置
 

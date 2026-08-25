@@ -159,7 +159,7 @@ Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technic
 
 **Providers**
 
-- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](docs/providers-atlascloud.md).
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. $5 credit vouchers for OMA users, first come first served. See the [Atlas Cloud setup guide](docs/providers-atlascloud.md).
 
 ## When OMA fits
 

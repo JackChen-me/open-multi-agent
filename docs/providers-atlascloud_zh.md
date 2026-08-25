@@ -6,9 +6,19 @@ Atlas Cloud 是一个全模态 AI 推理平台，通过单一 API 为开发者�
 
 ## OMA 用户专属兑换码
 
-OMA 用户可申请 20 张 $5 兑换码（先到先得）。
+面向 OMA 用户的 $5 Atlas Cloud 兑换码，先到先得。每人取用一张，其余留给他人。
 
-**申请方式**：邮件 [jack@yuanasi.com](mailto:jack@yuanasi.com)，附 GitHub 用户名 + 一句话用途。我们会邮件回复 code（数量有限）。
+```
+37699C92-8CCC-4224-963E-126CC2475C3B
+E4D81992-9FB2-4823-A970-D90E58DB0377
+29A2888B-F8B3-4157-A6EA-705781815EA6
+BDA10EA7-1F2D-48EF-BF26-F37EEE325B1B
+DCD47541-22BE-4314-BF6B-9EE031E5F421
+```
+
+在 Atlas Cloud [领取模型奖励](https://www.atlascloud.ai/zh/event/claim-model-rewards)页面兑换。
+
+若上述兑换码均已被领取，可邮件 [jack@yuanasi.com](mailto:jack@yuanasi.com)，附 GitHub 用户名与一句话用途。数量有限，恕不保证仍有余量。
 
 声明：赞助来自 Atlas Cloud；兑换码数量有限，不构成对任何模型或功能的付费背书。
 
