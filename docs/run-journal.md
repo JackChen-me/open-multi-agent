@@ -174,6 +174,55 @@ One other gap is worth naming while it exists:
 
 - **Structured-output repair.** The corrective retry behind `outputSchema` is a second model-visible conversation, so it is journaled as one: its messages are re-seeded rather than deduplicated against the first attempt.
 
+## Verifying a journal
+
+`enforceLineage` is an in-process check, and it can only ever record what the runner knows: a block names the event it came from, or it names nothing. The runner has no way to record a *wrong* lineage. `verifyRun()` asks the harder question of a journal read back cold — does the event a block names actually reproduce that block, byte for byte?
+
+```typescript
+import { verifyRun, JsonlRunJournal } from '@open-multi-agent/core'
+
+const result = await verifyRun(new JsonlRunJournal('./.oma/run.jsonl'))
+if (!result.ok) {
+  for (const failure of result.failures) console.error(failure.code, failure.detail)
+}
+```
+
+It takes a `RunJournal` (read once with `readFrom(0)`) or events you already hold as `{ events }`, and is otherwise pure. It is meant for tests, CI gates, and post-mortems, not a hot path.
+
+Three verdicts, deliberately distinct:
+
+| Verdict | Meaning |
+|---|---|
+| `failures` | The journal contradicts itself. `ok` is `false` exactly when this is non-empty. |
+| `inconclusive` | The journal cannot answer, because the named event is not in the readable window. Not counted against the run. |
+| `stats` | `events`, `requests`, and `blocksChecked`, so an `ok` verdict says how much it was based on. |
+
+Checks run in a fixed order, so a journal that is not a coherent stream says so before it is interrogated about content:
+
+- **Sequence integrity.** A repeated or reversed sequence is `SEQ_NOT_MONOTONIC`. A *forward gap* is not a failure: a bounded journal evicts its head, and a best-effort append may drop a batch.
+- **Referential integrity.** A `sourceEventSeqs` entry at or above the sequence citing it can never resolve, so it is `BROKEN_LINK`. One that is merely absent is a window gap, below.
+- **Per-block reproducibility.** For every block of every `llm/request`: `sourceEventSeqs: null` fails as `MISSING_CONTEXT_REPLACE` with `reason: 'no-lineage'`. A named lineage passes when a message-bearing event contains a block whose [`canonicalContentHash`](#lineage-and-the-model-visible-boundary) equals the recorded `contentHash`, or a `context/replace` event carries a replacement that hashes to it. Anything else is `MISSING_CONTEXT_REPLACE` with `reason: 'not-reproducible'` — the same code, because both are the same hole, and the reason is what tells them apart.
+
+That last distinction is the point of the check. A rewrite that silently replaces a conversation still *names* prior events, so a predicate that only asked whether lineage was present would accept it. Requiring the named event to reproduce the bytes is what makes an unrecorded rewrite structurally detectable rather than something only a full replay would notice.
+
+### What lands in `inconclusive`
+
+A gap is recorded, with the events it names, when the window cannot decide:
+
+- An `InMemoryRunJournal` evicted the events a retained request still cites.
+- A best-effort append dropped a batch, leaving a hole a later event points into.
+- A restored attempt was handed a fresh journal rather than the one the earlier attempt wrote, so its checkpoint-restored lineage names sequences this file never held.
+
+A block that reproduces from one named event passes even when another is missing. When it reproduces from none of the events that *are* present but some named event is absent, the verdict is inconclusive rather than a failure, because the missing event could have been the one carrying it. Non-reproducibility is claimed only when every named event was available and none of them matched.
+
+### What it does not prove
+
+- **It is a lineage audit, not a schema validator.** Turns are not paired, `run/start` and `run/end` are not required, and the `sourceEventSeqs` conventions in the table above are not enforced. A journal from a crashed run — an open `turn/start`, no `run/end` — verifies normally.
+- **It verifies the window, not the run.** Everything eviction removed is unexamined, which is what `stats` and `inconclusive` are for.
+- **Redaction and byte-level reproducibility are in tension.** `contentHash` is computed in process, before a `JsonlRunJournal` redacts at write time. A pattern that rewrites a block the model actually saw leaves the persisted event no longer reproducing it, and `verifyRun` reports `not-reproducible` for content that was recorded correctly. Blocks no pattern touched are unaffected, so a redacted journal verifies partially at best.
+
+An `oma verify-run` CLI command is planned and deliberately not built yet; the exported function is the whole surface for now.
+
 ## Resuming with a journal
 
 Pass the same journal to `restore()` that the crashed attempt wrote to, and recovery gets finer than the last safe boundary:

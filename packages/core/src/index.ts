@@ -313,6 +313,7 @@ export { InMemoryRunJournal, resolveRunJournal } from './journal/journal.js'
 export { JsonlRunJournal } from './journal/jsonl-journal.js'
 export { canonicalContentHash, canonicalJsonHash } from './journal/hash.js'
 export { isMessageEvent, isRunEvent, RUN_EVENT_TYPES } from './journal/events.js'
+export { verifyRun } from './journal/verify.js'
 export type {
   InMemoryRunJournalOptions,
   ResolvedRunJournal,
@@ -347,6 +348,14 @@ export type {
   TurnStartEvent,
   UserMessageEvent,
 } from './journal/events.js'
+export type {
+  VerifyRunFailure,
+  VerifyRunFailureCode,
+  VerifyRunFailureReason,
+  VerifyRunGap,
+  VerifyRunResult,
+  VerifyRunStats,
+} from './journal/verify.js'
 
 // ---------------------------------------------------------------------------
 // Types — all public interfaces re-exported for consumer type-checking

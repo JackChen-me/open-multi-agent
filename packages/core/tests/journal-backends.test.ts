@@ -80,19 +80,32 @@ describe('JsonlRunJournal', () => {
 
   it('opens the batching window on the first pending event and does not reset it', async () => {
     const path = await tempFile('batched.jsonl')
-    const journal = new JsonlRunJournal(path, { flushIntervalMs: 60 })
+    // Whether the window reset is a question about *when* the batch flushed, so
+    // it can only be answered against the clock. What keeps that from being
+    // flaky is the size of the gap: with the sleep at exactly half the
+    // interval, correct behavior settles ~300ms after the second append and a
+    // reset one ~600ms, either side of a 450ms bound. Every margin here is
+    // ~150ms rather than the single-digit one this assertion used to ride on,
+    // which is what made it fail under parallel load. Do not tighten these.
+    const flushIntervalMs = 600
+    const journal = new JsonlRunJournal(path, { flushIntervalMs })
 
     const first = journal.append([event(1)])
     // A later append lands inside the window opened by the first one. If the
-    // window reset, this batch would flush 60ms after *this* call instead.
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    // window reset, this batch would flush a full interval after *this* call.
+    await new Promise((resolve) => setTimeout(resolve, flushIntervalMs / 2))
     const second = journal.append([event(2)])
+    // Still inside the original window, so nothing can have been written yet.
+    // This also fails loudly if the setup drifts the other way: had the first
+    // window already fired, these would be separate batches and the timing
+    // assertion below would be measuring nothing.
     expect(await readFile(path, 'utf8').catch(() => '')).toBe('')
 
     const startedWaiting = Date.now()
     await Promise.all([first, second])
-    // Both settled together, ~30ms after the second append rather than ~60ms.
-    expect(Date.now() - startedWaiting).toBeLessThan(55)
+    // Settled on the deadline the *first* append opened, about half an interval
+    // away, rather than on a full interval reopened by the second.
+    expect(Date.now() - startedWaiting).toBeLessThan(flushIntervalMs * 0.75)
 
     // One write, so both lines are in the file at the same instant.
     const raw = await readFile(path, 'utf8')

@@ -353,4 +353,4 @@ Two notes on the shared-memory optimization described above:
 - A *separate* durable checkpoint store (shared memory in store X, `checkpoint: { store: Y }`) still embeds the full memory snapshot on each save — necessary, since Y holds no other copy of the entries.
 - The reused-store path does not point-in-time roll back shared memory. A custom tool that writes to shared memory mid-task leaves that write in the reused store; use the same idempotency discipline as for any other external side effect.
 
-Append-only transition replay remains tracked separately in [#313](https://github.com/open-multi-agent/open-multi-agent/issues/313).
+Append-only transition replay shipped as the opt-in [run journal](run-journal.md) ([#527](https://github.com/open-multi-agent/open-multi-agent/issues/527)), which adds the tail replay described above and lets `verifyRun()` audit a finished run offline. The earlier proposal to replace snapshots with it outright ([#313](https://github.com/open-multi-agent/open-multi-agent/issues/313)) stays closed: the snapshot remains the recovery anchor.

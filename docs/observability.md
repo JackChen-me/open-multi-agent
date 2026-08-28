@@ -451,10 +451,30 @@ exported to OTel or another vendor.
 | Run Viewer | static post-run task DAG plus span Waterfall, timing, token/cost facts, and safe details | derived artifact; no live delivery or authoritative state |
 | TraceStore | append/query telemetry, retention, and trace deletion | best-effort; no CAS, lease, suspend, or resume |
 | CheckpointStore | safe-boundary execution snapshot consumed by `restore()` | execution recovery state; not a trace query system |
+| RunJournal | opt-in append-only record of what happened and what each model call saw | execution state; best-effort writes, never required to recover |
 | future RunStore | authoritative durable run state machine | not implemented by Observability v2 |
 
 Losing telemetry must not roll back a durable run. Deleting traces must not
 delete checkpoints, shared memory, or remotely exported OTel data.
+
+### Journal versus telemetry
+
+The optional [run journal](run-journal.md) describes the same run these records
+describe and is deliberately not part of this stack. Traces are **telemetry**:
+sampling, batching, export, and retention deletion may all discard them, and
+none of that may change a run. Journal events are **execution state**: they
+record what the run did and what each model call saw, and `restore()` can fold
+them back into a conversation.
+
+The separation is structural, not conventional — `journal/` does not import from
+`observability/` — and it runs to the failure signals as well: a trace delivery
+failure and a `journal_append_failed` progress event report on separate records,
+and neither implies the other. Journal events carry `traceId` and `spanId` when a
+trace runtime is active, which is enough to join the two streams after the fact.
+Reach for traces when the question is where the time and tokens went, and for the
+journal when it is why the model saw what it saw; the
+[run journal guide](run-journal.md) has the event vocabulary and the `verifyRun()`
+audit.
 
 ## Optional OpenTelemetry package
 
