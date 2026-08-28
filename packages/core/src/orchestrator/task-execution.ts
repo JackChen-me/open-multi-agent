@@ -193,6 +193,11 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
     attributes: { 'oma.checkpoint.mode': active.mode },
   })
 
+  // Version and watermark of the snapshot this call built, read back for the
+  // `checkpoint/saved` event so it describes the same fold the store received.
+  let savedVersion = 4
+  let savedWatermarkSeq = 0
+
   // Best-effort: a checkpoint write must never take down the run it protects.
   // Both snapshot construction and the store write are guarded, so a failing
   // store (e.g. a transient Redis/SQLite error) is surfaced via `onProgress`
@@ -225,8 +230,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       }
     }
 
-    const snapshot: CheckpointSnapshot = {
-      version: 4,
+    const common = {
       mode: active.mode,
       createdAt: new Date().toISOString(),
       ...(ctx.metadata !== undefined ? { metadata: ctx.metadata } : {}),
@@ -253,6 +257,22 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       approvalDecisions: [...active.approvalDecisions.values()],
     }
 
+    // Read after the state above is materialized and before the awaited write:
+    // every event the snapshot reflects is already numbered, while events that
+    // concurrent tasks append during the write stay in the replayable tail.
+    // An unjournaled run keeps writing v4, byte for byte as before.
+    const journalRef = ctx.journal?.journalRef
+    const snapshot: CheckpointSnapshot = ctx.journal === undefined
+      ? { version: 4, ...common }
+      : {
+          version: 5,
+          ...common,
+          journalWatermarkSeq: ctx.journal.lastSeq,
+          ...(journalRef !== undefined ? { journalRef } : {}),
+        }
+    savedVersion = snapshot.version
+    savedWatermarkSeq = snapshot.version === 5 ? snapshot.journalWatermarkSeq : 0
+
     await active.manager.save(snapshot)
   }
 
@@ -263,13 +283,11 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
   try {
     await nextSave
     checkpointSpan?.end({ status: statusOnly('ok') })
-    // The watermark is the recorder's high-water mark at save time: which
-    // journal events this snapshot already folds in.
     ctx.journal?.emit({
       type: 'checkpoint/saved',
       mode: active.mode,
-      version: 4,
-      watermarkSeq: ctx.journal.lastSeq,
+      version: savedVersion,
+      watermarkSeq: savedWatermarkSeq,
     })
     return true
   } catch (error) {

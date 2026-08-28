@@ -43,7 +43,11 @@ import type {
   ToolCallApprovalContent,
 } from '../types.js'
 import { JournalLineageError, LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
-import type { RequestBlockDescriptor, TurnOutcome } from '../journal/events.js'
+import type {
+  ContextStrategyKind,
+  RequestBlockDescriptor,
+  TurnOutcome,
+} from '../journal/events.js'
 import { canonicalJsonHash } from '../journal/hash.js'
 import type { JournalRecorder } from '../journal/journal.js'
 import { LoopDetector } from './loop-detector.js'
@@ -415,27 +419,94 @@ const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
 /** Default minimum content length before tool result compression kicks in. */
 const DEFAULT_MIN_COMPRESS_CHARS = 500
 
+/** Scoping fields stamped on every journal event a runner emits. */
+interface JournalScope {
+  readonly taskId?: string
+  readonly agentName?: string
+  readonly spanId?: string
+}
+
+/**
+ * What one context-strategy application derived, collected only when a journal
+ * is attached.
+ *
+ * Strategies record the block objects they built and the blocks those came
+ * from; the call site translates both into journal sequences, so no strategy
+ * needs to know a recorder exists.
+ */
+interface ContextRewriteDraft {
+  /** Blocks the rewrite removed without putting anything in their place. */
+  readonly droppedBlocks: ContentBlock[]
+  readonly replacements: Array<{
+    readonly block: ContentBlock
+    readonly sources: readonly ContentBlock[]
+  }>
+  detail?: Record<string, unknown>
+  /**
+   * Set when a memoized strategy rebuilt blocks an earlier `context/replace`
+   * already recorded: the fresh objects inherit that event's lineage and
+   * nothing new is emitted.
+   */
+  reuseEventSeq?: number
+}
+
+/** The block {@link prependSyntheticPrefixToFirstUser} derived, when asked. */
+interface SyntheticPrefixRecord {
+  block?: ContentBlock
+  /** The user message the prefix was merged into, absent in the preamble case. */
+  mergedInto?: LLMMessage
+}
+
+function newContextRewriteDraft(): ContextRewriteDraft {
+  return { droppedBlocks: [], replacements: [] }
+}
+
+/** True when a strategy actually rewrote something worth an event. */
+function hasContextRewrite(rewrite: ContextRewriteDraft): boolean {
+  return rewrite.replacements.length > 0 || rewrite.droppedBlocks.length > 0
+}
+
+/** Union of the journal events that produced `blocks`, ascending and unique. */
+function lineageOf(
+  recorder: JournalRecorder,
+  blocks: readonly ContentBlock[],
+): number[] {
+  const seqs = new Set<number>()
+  for (const block of blocks) {
+    for (const seq of recorder.lineageFor(block) ?? []) seqs.add(seq)
+  }
+  return [...seqs].sort((a, b) => a - b)
+}
+
 /**
  * Prepends synthetic framing text to the first user message so we never emit
  * consecutive `user` turns (Bedrock) and summaries do not concatenate onto
  * the original user prompt (direct API). If there is no user message yet,
  * inserts a single assistant text preamble.
+ *
+ * `derived` collects the one block this creates, which the journal records as
+ * the model-visible product of the rewrite that called in here.
  */
 function prependSyntheticPrefixToFirstUser(
   messages: LLMMessage[],
   prefix: string,
+  derived?: SyntheticPrefixRecord,
 ): LLMMessage[] {
   const userIdx = messages.findIndex(m => m.role === 'user')
   if (userIdx < 0) {
-    return [{
-      role: 'assistant',
-      content: [{ type: 'text', text: prefix.trimEnd() }],
-    }, ...messages]
+    const preamble: TextBlock = { type: 'text', text: prefix.trimEnd() }
+    if (derived) derived.block = preamble
+    return [{ role: 'assistant', content: [preamble] }, ...messages]
   }
   const target = messages[userIdx]!
+  const prefixBlock: TextBlock = { type: 'text', text: prefix }
+  if (derived) {
+    derived.block = prefixBlock
+    derived.mergedInto = target
+  }
   const merged: LLMMessage = {
     role: 'user',
-    content: [{ type: 'text', text: prefix }, ...target.content],
+    content: [prefixBlock, ...target.content],
   }
   return [...messages.slice(0, userIdx), merged, ...messages.slice(userIdx + 1)]
 }
@@ -487,6 +558,11 @@ export class AgentRunner implements AgentBackend {
   private summarizeCache: {
     oldSignature: string
     summaryPrefix: string
+    /**
+     * The `context/replace` that first recorded this summary, kept with the
+     * recorder that emitted it so a later run never inherits a foreign seq.
+     */
+    journalReplace?: { recorder: JournalRecorder; seq: number }
   } | null = null
 
   constructor(
@@ -502,7 +578,11 @@ export class AgentRunner implements AgentBackend {
     return JSON.stringify(message)
   }
 
-  private truncateToSlidingWindow(messages: LLMMessage[], maxTurns: number): LLMMessage[] {
+  private truncateToSlidingWindow(
+    messages: LLMMessage[],
+    maxTurns: number,
+    rewrite?: ContextRewriteDraft,
+  ): LLMMessage[] {
     if (maxTurns <= 0) {
       return messages
     }
@@ -546,7 +626,21 @@ export class AgentRunner implements AgentBackend {
     if (droppedTurns > 0) {
       const notice =
         `[Earlier conversation history truncated — ${droppedTurns} turn(s) removed]\n\n`
-      result.push(...prependSyntheticPrefixToFirstUser(kept, notice))
+      const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
+      result.push(...prependSyntheticPrefixToFirstUser(kept, notice, derived))
+      if (rewrite && derived?.block !== undefined) {
+        for (const message of afterFirst.slice(0, keepStartIdx)) {
+          rewrite.droppedBlocks.push(...message.content)
+        }
+        rewrite.replacements.push({
+          block: derived.block,
+          sources: [
+            ...(derived.mergedInto?.content ?? []),
+            ...rewrite.droppedBlocks,
+          ],
+        })
+        rewrite.detail = { droppedTurns }
+      }
       return result
     }
 
@@ -700,6 +794,7 @@ export class AgentRunner implements AgentBackend {
     baseChatOptions: LLMChatOptions,
     turns: number,
     options: RunOptions,
+    rewrite?: ContextRewriteDraft,
   ): Promise<{ messages: LLMMessage[]; usage: TokenUsage }> {
     const estimated = estimateTokens(messages)
     if (estimated <= maxTokens || messages.length < 4) {
@@ -732,10 +827,30 @@ export class AgentRunner implements AgentBackend {
     const oldPortionForSummary = stripImageBlocksForSummary(oldPortion)
     const oldSignature = oldPortionForSummary.map(m => this.serializeMessage(m)).join('\n')
     if (this.summarizeCache !== null && this.summarizeCache.oldSignature === oldSignature) {
+      const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
       const mergedRecent = prependSyntheticPrefixToFirstUser(
         recentPortion,
         `${this.summarizeCache.summaryPrefix}\n\n`,
+        derived,
       )
+      if (rewrite && derived?.block !== undefined) {
+        const recorded = this.summarizeCache.journalReplace
+        if (recorded !== undefined && recorded.recorder === options.journal) {
+          // Same summary, rebuilt as a fresh object: point it at the event that
+          // already carries those bytes instead of recording them twice.
+          rewrite.reuseEventSeq = recorded.seq
+          rewrite.replacements.push({ block: derived.block, sources: [] })
+        } else {
+          rewrite.replacements.push({
+            block: derived.block,
+            sources: oldPortion.flatMap((message) => message.content),
+          })
+          rewrite.detail = {
+            summaryModel: summaryModel ?? this.options.model,
+            cached: true,
+          }
+        }
+      }
       return { messages: [firstUser, ...mergedRecent], usage: ZERO_USAGE }
     }
 
@@ -773,10 +888,22 @@ export class AgentRunner implements AgentBackend {
       : '[Conversation summary unavailable]'
 
     this.summarizeCache = { oldSignature, summaryPrefix }
+    const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
     const mergedRecent = prependSyntheticPrefixToFirstUser(
       recentPortion,
       `${summaryPrefix}\n\n`,
+      derived,
     )
+    if (rewrite && derived?.block !== undefined) {
+      rewrite.replacements.push({
+        block: derived.block,
+        sources: oldPortion.flatMap((message) => message.content),
+      })
+      rewrite.detail = {
+        summaryModel: summaryOptions.model,
+        usage: { ...summaryResponse.usage },
+      }
+    }
     return {
       messages: [firstUser, ...mergedRecent],
       usage: summaryResponse.usage,
@@ -789,9 +916,13 @@ export class AgentRunner implements AgentBackend {
     baseChatOptions: LLMChatOptions,
     turns: number,
     options: RunOptions,
+    rewrite?: ContextRewriteDraft,
   ): Promise<{ messages: LLMMessage[]; usage: TokenUsage }> {
     if (strategy.type === 'sliding-window') {
-      return { messages: this.truncateToSlidingWindow(messages, strategy.maxTurns), usage: ZERO_USAGE }
+      return {
+        messages: this.truncateToSlidingWindow(messages, strategy.maxTurns, rewrite),
+        usage: ZERO_USAGE,
+      }
     }
 
     if (strategy.type === 'summarize') {
@@ -802,17 +933,33 @@ export class AgentRunner implements AgentBackend {
         baseChatOptions,
         turns,
         options,
+        rewrite,
       )
     }
 
     if (strategy.type === 'compact') {
-      return { messages: this.compactMessages(messages, strategy), usage: ZERO_USAGE }
+      return { messages: this.compactMessages(messages, strategy, rewrite), usage: ZERO_USAGE }
     }
 
     const estimated = estimateTokens(messages)
     const compressed = await strategy.compress(messages, estimated)
     if (!Array.isArray(compressed) || compressed.length === 0) {
       throw new Error('contextStrategy.custom.compress must return a non-empty LLMMessage[]')
+    }
+    if (rewrite) {
+      // A custom function is opaque, so a block it invented is recorded
+      // verbatim with the whole input as its lineage: storing the bytes is what
+      // makes it reproducible. Blocks it passed through keep their own lineage.
+      const inputBlocks = new Set<ContentBlock>()
+      for (const message of messages) {
+        for (const block of message.content) inputBlocks.add(block)
+      }
+      const sources = [...inputBlocks]
+      for (const message of compressed) {
+        for (const block of message.content) {
+          if (!inputBlocks.has(block)) rewrite.replacements.push({ block, sources })
+        }
+      }
     }
     return { messages: compressed, usage: ZERO_USAGE }
   }
@@ -964,6 +1111,21 @@ export class AgentRunner implements AgentBackend {
         assignee,
         phase,
         conversationMessages: [...conversationMessages],
+        // Block identity does not survive serialization, so the lineage the
+        // tracker holds is flattened positionally for a later restore.
+        //
+        // `journalSeq` is this task's own high-water mark, read here rather
+        // than after the save: every event this runner emits precedes the state
+        // mutation it describes, so the value at build time is exactly the
+        // boundary between the task's events this entry already reflects and
+        // the ones a tail replay still has to fold.
+        ...(journal
+          ? {
+              conversationLineage: conversationMessages.map((message) =>
+                message.content.map((block) => journal.lineageFor(block))),
+              journalSeq: journal.lastSeq,
+            }
+          : {}),
         messages: [...newMessages],
         tokenUsage: totalUsage,
         toolCalls: [...allToolCalls],
@@ -1133,6 +1295,9 @@ export class AgentRunner implements AgentBackend {
                   toolCallId: pending.call.id,
                   result: execution.commit.result,
                   record: execution.commit.record,
+                  ...(execution.commit.delegationUsage !== undefined
+                    ? { delegationUsage: execution.commit.delegationUsage }
+                    : {}),
                   ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
                 }))
               }
@@ -1264,20 +1429,35 @@ export class AgentRunner implements AgentBackend {
         // Compress consumed tool results before context strategy (lightweight,
         // no LLM calls) so the strategy operates on already-reduced messages.
         if (this.options.compressToolResults && nextTurn > 1) {
-          conversationMessages = this.compressConsumedToolResults(conversationMessages)
+          const rewrite = journal ? newContextRewriteDraft() : undefined
+          conversationMessages = this.compressConsumedToolResults(conversationMessages, rewrite)
+          if (journal && rewrite && hasContextRewrite(rewrite)) {
+            this.recordContextRewrite(journal, journalScope, 'compress-tool-results', rewrite)
+          }
         }
 
         // Optionally compact context before each LLM call.
         if (this.options.contextStrategy) {
+          const strategyKind = this.options.contextStrategy.type
+          const rewrite = journal ? newContextRewriteDraft() : undefined
           const compacted = await this.applyContextStrategy(
             conversationMessages,
             this.options.contextStrategy,
             baseChatOptions,
             nextTurn,
             options,
+            rewrite,
           )
           conversationMessages = compacted.messages
           totalUsage = addTokenUsage(totalUsage, compacted.usage)
+          if (journal && rewrite && hasContextRewrite(rewrite)) {
+            const seq = this.recordContextRewrite(journal, journalScope, strategyKind, rewrite)
+            // The memo is keyed on the old portion, so a later cache hit rebuilds
+            // equal blocks; remembering the event lets them reuse it.
+            if (strategyKind === 'summarize' && this.summarizeCache !== null) {
+              this.summarizeCache.journalReplace = { recorder: journal, seq }
+            }
+          }
         }
 
         // ------------------------------------------------------------------
@@ -1534,12 +1714,43 @@ export class AgentRunner implements AgentBackend {
   // Private helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * Emit one `context/replace` for a rewrite and give every block it derived a
+   * lineage naming that event.
+   *
+   * Source blocks are translated into sequences here rather than inside the
+   * strategies, which keeps every strategy free of journal knowledge.
+   */
+  private recordContextRewrite(
+    recorder: JournalRecorder,
+    scope: JournalScope | undefined,
+    strategy: ContextStrategyKind,
+    rewrite: ContextRewriteDraft,
+  ): number {
+    const derivedBlocks = rewrite.replacements.map((replacement) => replacement.block)
+    if (rewrite.reuseEventSeq !== undefined) {
+      recorder.registerBlocks(derivedBlocks, [rewrite.reuseEventSeq])
+      return rewrite.reuseEventSeq
+    }
+    const seq = recorder.emit({
+      type: 'context/replace',
+      ...scope,
+      strategy,
+      ...(rewrite.droppedBlocks.length > 0
+        ? { dropped: { sourceEventSeqs: lineageOf(recorder, rewrite.droppedBlocks) } }
+        : {}),
+      replacements: rewrite.replacements.map((replacement) => ({
+        sourceEventSeqs: lineageOf(recorder, replacement.sources),
+        block: replacement.block,
+      })),
+      ...(rewrite.detail !== undefined ? { detail: rewrite.detail } : {}),
+    })
+    recorder.registerBlocks(derivedBlocks, [seq])
+    return seq
+  }
+
   /** Scoping fields stamped on every journal event this runner emits. */
-  private journalScope(options: RunOptions): {
-    readonly taskId?: string
-    readonly agentName?: string
-    readonly spanId?: string
-  } {
+  private journalScope(options: RunOptions): JournalScope {
     const agentName = options.traceAgent ?? this.options.agentName
     return {
       ...(options.taskId !== undefined ? { taskId: options.taskId } : {}),
@@ -1797,6 +2008,7 @@ export class AgentRunner implements AgentBackend {
   private compactMessages(
     messages: LLMMessage[],
     strategy: Extract<ContextStrategy, { type: 'compact' }>,
+    rewrite?: ContextRewriteDraft,
   ): LLMMessage[] {
     const estimated = estimateTokens(messages)
     if (estimated <= strategy.maxTokens) {
@@ -1862,15 +2074,19 @@ export class AgentRunner implements AgentBackend {
           // Long text blocks: truncate with excerpt.
           if (block.type === 'text' && block.text.length >= minTextBlockChars) {
             msgChanged = true
-            return {
+            const excerpt: TextBlock = {
               type: 'text',
               text: `${block.text.slice(0, textBlockExcerptChars)}... [truncated — ${block.text.length} chars total]`,
-            } satisfies TextBlock
+            }
+            rewrite?.replacements.push({ block: excerpt, sources: [block] })
+            return excerpt
           }
           // Image blocks in old turns: replace with marker.
           if (block.type === 'image') {
             msgChanged = true
-            return { type: 'text', text: '[Image compacted]' } satisfies TextBlock
+            const marker: TextBlock = { type: 'text', text: '[Image compacted]' }
+            rewrite?.replacements.push({ block: marker, sources: [block] })
+            return marker
           }
           return block
         }
@@ -1898,11 +2114,13 @@ export class AgentRunner implements AgentBackend {
           const sizeDescription = typeof block.content === 'string'
             ? `${contentSize} chars`
             : `${contentSize} estimated chars`
-          return {
+          const compacted: ToolResultBlock = {
             type: 'tool_result',
             tool_use_id: block.tool_use_id,
             content: `[Tool result: ${toolName} — ${sizeDescription}, compacted]`,
-          } satisfies ToolResultBlock
+          }
+          rewrite?.replacements.push({ block: compacted, sources: [block] })
+          return compacted
         }
         return block
       })
@@ -1928,7 +2146,10 @@ export class AgentRunner implements AgentBackend {
    *
    * Error results and results shorter than `minChars` are never compressed.
    */
-  private compressConsumedToolResults(messages: LLMMessage[]): LLMMessage[] {
+  private compressConsumedToolResults(
+    messages: LLMMessage[],
+    rewrite?: ContextRewriteDraft,
+  ): LLMMessage[] {
     const config = this.options.compressToolResults
     if (!config) return messages
 
@@ -1993,11 +2214,13 @@ export class AgentRunner implements AgentBackend {
         const sizeDescription = typeof block.content === 'string'
           ? `${contentSize} chars`
           : `${contentSize} estimated chars`
-        return {
+        const compressed: ToolResultBlock = {
           type: 'tool_result',
           tool_use_id: block.tool_use_id,
           content: `[Tool output compressed — ${sizeDescription}, already processed]`,
-        } satisfies ToolResultBlock
+        }
+        rewrite?.replacements.push({ block: compressed, sources: [block] })
+        return compressed
       })
 
       if (msgChanged) {

@@ -110,7 +110,7 @@ await orchestrator.restore(team,        { checkpoint: { store } })  // resume-on
 
 At each safe in-flight runner boundary and after each successfully completed task, the orchestrator writes the latest `CheckpointSnapshot`:
 
-- **Execution identity (schema v4)** — `runId`, current `attempt`,
+- **Execution identity (schema v4 and later)** — `runId`, current `attempt`,
   `lastTraceId`, and `lastRootSpanId`. Restore preserves the logical `runId`,
   increments `attempt`, creates fresh trace/root IDs, and returns a
   `continued_from` link to the prior attempt.
@@ -139,17 +139,79 @@ At each safe in-flight runner boundary and after each successfully completed tas
 - **Task handoff/provenance config** — `dependencyPayload`, logical `role`, and
   validated task `metadata` remain on the queue snapshot, so resumed consumers
   use the same data-flow and trace references as the original run.
+- **Journal watermark (schema v5 only)** — `journalWatermarkSeq`, the highest
+  [run journal](run-journal.md) sequence this snapshot folds, plus an
+  informational `journalRef` naming the backend. Each in-flight entry also
+  carries its own `journalSeq`. Present only when the run had journaling
+  enabled; see [Tail replay](#tail-replay).
 
 Snapshots are stored as JSON under a reserved namespace: `__oma_checkpoint__/<runId>/latest` (or `__oma_checkpoint__/latest` when no `runId` is set). Keys under `__oma_checkpoint__/` and `__oma_approval__/` are reserved — shared-memory snapshot/restore deliberately skips them so one store can hold agent memory, checkpoints, and primary approval records.
 
-New writes use checkpoint schema v4. Schemas v1, v2, and v3 remain readable;
-v1 and v2 contain no in-flight runner state, so their active tasks resume from
-the task boundary. Schema v3 retains mid-task tool recovery but has no durable
-approval continuation. A v1 checkpoint's optional top-level `runId` is preserved, and
+A run with a journal writes checkpoint schema v5; a run without one keeps
+writing v4 exactly as before, so enabling the journal is the only thing that
+changes the schema. Schemas v1 through v4 remain readable; v1 and v2 contain no
+in-flight runner state, so their active tasks resume from the task boundary.
+Schema v3 retains mid-task tool recovery but has no durable approval
+continuation. A v1 checkpoint's optional top-level `runId` is preserved, and
 restore treats the saved execution as attempt 1. A v1 checkpoint without
 `runId` receives a new logical run ID. If a caller-supplied restore `runId`
 conflicts with the snapshot, restore throws a validation error instead of
 joining unrelated runs.
+
+### Tail replay
+
+A snapshot is written at safe boundaries, so a crash between two boundaries
+loses whatever happened in between — most expensively, a tool that ran and
+returned but whose result was never persisted. When a run journal is supplied
+to `restore()` **and** the snapshot is v5, restore replays the journal past what
+the snapshot already holds and folds those events into the in-flight state
+before resuming. In practice that turns "re-execute the tool call" into "replay
+its recorded result".
+
+**Each task is folded against its own watermark, not the snapshot's.** A
+snapshot refreshes an in-flight entry only at that task's own boundaries, so
+with `maxConcurrency` above 1 the snapshot can be written while another task is
+mid-turn: its entry is then many events staler than `journalWatermarkSeq`.
+Every entry therefore carries a `journalSeq` of its own — every one of that
+task's events at or below it is already in the entry, and every one above it is
+not — and the replay window starts at the stalest entry. Events another task
+has long since absorbed are recognised and skipped rather than re-applied. An
+entry with no `journalSeq` (written before the field existed) falls back to the
+snapshot-wide watermark, which is safe but folds less.
+
+The fold is deliberately narrow. It folds **only in-flight runner state**:
+assistant and user messages appended to a conversation, the turn counter from
+`turn/end`, pending calls from `tool/call`, and committed results from
+`tool/result`. It does **not** fold `task/status`, `memory/set`, or
+`approval/request` / `approval/decision` — the queue, the shared-memory store,
+and the durable approval ledger are each already the authority for those, and a
+second source of truth for them would be a way to disagree, not a way to
+recover.
+
+Folding is defensive. An event has to name a task the snapshot is resuming
+(matched on task **and** assignee, so a delegated child's events never land in
+its parent's state), extend the journal append-only, be anchored by the state it
+builds on — a tool call by the assistant turn that requested it, a tool-results
+message by an open round — and leave a state the runner can actually resume
+from. If any event fails those checks, the **entire** tail is discarded, an `onProgress`
+warning with code `JOURNAL_TAIL_DISCARDED` is emitted, and the run resumes from
+the snapshot alone — which is exactly today's behavior. The snapshot stays the
+recovery anchor; the tail is an upgrade to its granularity, never a replacement.
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  onProgress(event) {
+    if (event.type === 'warning' && event.data?.code === 'JOURNAL_TAIL_DISCARDED') {
+      console.warn('journal tail rejected, resuming from the snapshot:', event.data.reason)
+    }
+  },
+})
+await orchestrator.restore(team, { checkpoint: { store }, journal })
+```
+
+A v5 snapshot also carries per-block journal lineage for its conversation, so a
+resumed run can still explain where each block the model sees came from. Without
+it a restored conversation would be unexplainable — every block would be a gap.
 
 ### Saves are best-effort
 
@@ -158,6 +220,11 @@ An ordinary checkpoint write must never take down the run it protects. If the st
 Suspension is the exception: OMA cannot return a resumable approval request
 until the exact pending boundary has been saved. That save is strict and fails
 closed. See [durable approvals](durable-approvals.md#rejection-and-recovery-semantics).
+
+[Run journal](run-journal.md) appends follow the same contract, with no
+exception at all: a failed append is reported and dropped, never escalated. That
+is why the journal can only ever extend a snapshot on restore and never replace
+it — a record that is allowed to go missing cannot be the recovery anchor.
 
 ```typescript
 const orchestrator = new OpenMultiAgent({
@@ -270,7 +337,7 @@ await cp.delete()                      // drop the persisted checkpoint
 
 Per-run snapshot/restore over `MemoryStore`. What it does *not* yet do:
 
-- **Snapshot-based, not event-sourced.** Each checkpoint overwrites the previous one; there is no transition log to replay.
+- **Snapshot-based, not event-sourced.** Each checkpoint overwrites the previous one. Enabling a [run journal](run-journal.md) adds a replayable tail after the latest snapshot ([Tail replay](#tail-replay)), but the snapshot remains the anchor and the journal is never required to recover.
 - **External agent backends remain task-grained.** Process and ACP backends own
   their own loops, so OMA cannot persist their private mid-task conversation or
   tool state.

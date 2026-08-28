@@ -25,6 +25,7 @@ import { dirname, resolve } from 'node:path'
 import type { RedactingStoreOptions } from '../memory/redacting-store.js'
 import { redactSensitiveObject } from '../utils/redaction.js'
 import { isRunEvent, type RunEvent } from './events.js'
+import type { RunJournalRef } from '../types.js'
 import type { RunJournal } from './journal.js'
 
 /** Default batching deadline in milliseconds. */
@@ -163,6 +164,10 @@ export class JsonlRunJournal implements RunJournal {
     } finally {
       await handle?.close()
     }
+  }
+
+  describe(): RunJournalRef {
+    return { kind: 'JsonlRunJournal', path: this.filePath }
   }
 
   // -------------------------------------------------------------------------

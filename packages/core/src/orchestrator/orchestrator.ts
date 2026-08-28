@@ -104,6 +104,11 @@ import {
   resolveRunJournal,
   type RunJournalConfig,
 } from '../journal/journal.js'
+import {
+  foldJournalTail,
+  journalTailReadFrom,
+  restoreConversationLineage,
+} from '../journal/tail-replay.js'
 import { validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
@@ -890,6 +895,7 @@ export class OpenMultiAgent {
     mode: RunJournalMode,
     goal?: string,
     metadata?: RunMetadata,
+    startSeqFloor?: number,
   ): Promise<JournalRecorder | undefined> {
     const resolved = resolveRunJournal(this.config.journal, override)
     if (!resolved) return undefined
@@ -899,6 +905,7 @@ export class OpenMultiAgent {
       attempt: identity.attempt,
       traceId: identity.traceId,
       enforceLineage: resolved.enforceLineage,
+      ...(startSeqFloor !== undefined ? { startSeqFloor } : {}),
       // A journal write failure is reported and dropped, exactly like a
       // failed checkpoint save. Losing the audit trail cannot fail the run.
       onError: (error) => {
@@ -915,6 +922,43 @@ export class OpenMultiAgent {
       ...(metadata !== undefined ? { metadata } : {}),
     })
     return recorder
+  }
+
+  /**
+   * Rebuild what a journaled run knew when its snapshot was written.
+   *
+   * Two steps, in order: re-attach the snapshot's per-block lineage so the
+   * resumed conversation can still explain itself, then fold whatever the
+   * journal recorded after each in-flight entry's own watermark. The fold only
+   * extends the snapshot, and a tail that does not fit it is discarded whole —
+   * the snapshot remains the recovery anchor either way.
+   */
+  private async resumeFromJournal(
+    journal: JournalRecorder,
+    checkpoint: ActiveCheckpoint,
+  ): Promise<void> {
+    const watermarkSeq = checkpoint.journalWatermarkSeq
+    if (watermarkSeq !== undefined && checkpoint.inFlightTasks.size > 0) {
+      // The read window starts at the stalest entry rather than at the
+      // snapshot-wide mark: entries refresh at their own task's boundaries, so
+      // under concurrency one can be well behind the snapshot carrying it.
+      const states = [...checkpoint.inFlightTasks.values()]
+      const fold = foldJournalTail(
+        states,
+        await journal.readFrom(journalTailReadFrom(states, watermarkSeq)),
+        watermarkSeq,
+      )
+      if (fold.discardReason !== undefined) {
+        this.config.onProgress?.({
+          type: 'warning',
+          data: { code: 'JOURNAL_TAIL_DISCARDED', reason: fold.discardReason, watermarkSeq },
+        } satisfies OrchestratorEvent)
+      } else if (fold.foldedEvents > 0) {
+        checkpoint.inFlightTasks.clear()
+        for (const state of fold.tasks) checkpoint.inFlightTasks.set(state.taskId, state)
+      }
+    }
+    restoreConversationLineage(journal, [...checkpoint.inFlightTasks.values()])
   }
 
   // -------------------------------------------------------------------------
@@ -2395,7 +2439,7 @@ export class OpenMultiAgent {
       throw new Error(`Invalid checkpoint task dependencies: ${validation.errors.join(' ')}`)
     }
     let restoredInFlightTasks: InFlightTaskCheckpoint[] =
-      snapshot.version === 3 || snapshot.version === 4
+      snapshot.version === 3 || snapshot.version === 4 || snapshot.version === 5
         ? snapshot.inFlightTasks.map((state) => ({
             ...state,
             ...(state.pendingToolCalls
@@ -2425,10 +2469,13 @@ export class OpenMultiAgent {
           ...(snapshot.goal !== undefined ? { goal: snapshot.goal } : {}),
           runId: identity.runId,
           inFlightTasks: new Map(restoredInFlightTasks.map((state) => [state.taskId, state])),
+          ...(snapshot.version === 5
+            ? { journalWatermarkSeq: snapshot.journalWatermarkSeq }
+            : {}),
         }
       : undefined
 
-    if (snapshot.version === 4 && checkpointForResume) {
+    if ((snapshot.version === 4 || snapshot.version === 5) && checkpointForResume) {
       const hasTerminalRejection = snapshot.approvalDecisions.some(
         (decision) => decision.scope !== 'tool_call' && decision.decision === 'rejected',
       )
@@ -2990,6 +3037,7 @@ export class OpenMultiAgent {
     const traceRuntime = this.startTrace(runIdentity, metadata, restoreMetadata?.overridden)
     const journal = await this.startRunJournal(
       options?.journal, runIdentity, journalMode, goal, metadata,
+      activeCheckpoint?.journalWatermarkSeq,
     )
     emitInitialPlanSet(journal, queue)
     const routingDecision = routingDecisionInput
@@ -3015,6 +3063,7 @@ export class OpenMultiAgent {
       for (const decision of checkpoint.approvalDecisions.values()) {
         journal.emit({ type: 'approval/decision', decision })
       }
+      await this.resumeFromJournal(journal, checkpoint)
     }
     const restoredConfirmationState = checkpoint?.mode === 'runTeam'
       && this.config.requireConsequentialConfirmation
@@ -3282,7 +3331,9 @@ export class OpenMultiAgent {
       }
       case 'tool_call': {
         const content = request.content
-        const state = (snapshot.version === 3 || snapshot.version === 4)
+        const state = (
+          snapshot.version === 3 || snapshot.version === 4 || snapshot.version === 5
+        )
           ? snapshot.inFlightTasks.find((item) => item.taskId === content.taskId)
           : undefined
         const pending = state?.pendingToolCalls?.find(

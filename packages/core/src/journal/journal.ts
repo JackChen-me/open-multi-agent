@@ -14,7 +14,7 @@
  * `DurableApprovalLedger`'s job, not the journal's.
  */
 
-import type { ContentBlock, LLMMessage } from '../types.js'
+import type { ContentBlock, LLMMessage, RunJournalRef } from '../types.js'
 import { canonicalContentHash } from './hash.js'
 import type { RunEvent } from './events.js'
 
@@ -35,6 +35,11 @@ export interface RunJournal {
   readFrom(seq: number): Promise<RunEvent[]>
   /** Flush anything pending and release resources. */
   close(): Promise<void>
+  /**
+   * Human-facing pointer recorded in a v5 checkpoint as `journalRef`. Optional:
+   * a backend that omits it simply leaves the snapshot field absent.
+   */
+  describe?(): RunJournalRef
 }
 
 /** Journal configuration with the per-run switches spelled out. */
@@ -147,6 +152,10 @@ export class InMemoryRunJournal implements RunJournal {
   close(): Promise<void> {
     return Promise.resolve()
   }
+
+  describe(): RunJournalRef {
+    return { kind: 'InMemoryRunJournal' }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +177,13 @@ export interface JournalRecorderOptions {
   /** Stamped on every event when a trace runtime is active. */
   readonly traceId?: string
   readonly enforceLineage?: boolean
+  /**
+   * Lowest sequence this recorder may assign, minus one. A restore supplies the
+   * snapshot's `journalWatermarkSeq` so a logical run keeps one numbering even
+   * when the attempt is handed a journal whose tail is shorter than the
+   * snapshot (a rotated file, or one that did not survive the crash).
+   */
+  readonly startSeqFloor?: number
   /** Called once per append failure. Must not throw. */
   readonly onError?: (error: unknown) => void
 }
@@ -220,11 +236,12 @@ export class JournalRecorder {
    * Attach a recorder to a journal, continuing its sequence.
    *
    * A restored attempt shares the logical run's numbering, so the tail is read
-   * once at run start to find the high-water mark. One full read per run is
+   * once at run start to find the high-water mark, floored at
+   * {@link JournalRecorderOptions.startSeqFloor}. One full read per run is
    * acceptable at this size; a backend-supplied `lastSeq()` would remove it.
    */
   static async open(options: JournalRecorderOptions): Promise<JournalRecorder> {
-    let startSeq = 0
+    let startSeq = options.startSeqFloor ?? 0
     try {
       for (const event of await options.journal.readFrom(0)) {
         if (event.seq > startSeq) startSeq = event.seq
@@ -240,6 +257,11 @@ export class JournalRecorder {
   /** Highest sequence number assigned so far. */
   get lastSeq(): number {
     return this.seq
+  }
+
+  /** Backend pointer for `journalRef`, or `undefined` when it names none. */
+  get journalRef(): RunJournalRef | undefined {
+    return this.journal.describe?.()
   }
 
   /** Stamp and enqueue one event. Returns the sequence number assigned to it. */
@@ -261,6 +283,20 @@ export class JournalRecorder {
       this.chain = this.chain.then(() => this.drain())
     }
     return seq
+  }
+
+  /**
+   * Read the backend's retained tail from `seq`, reporting a read failure the
+   * same way an append failure is reported and returning nothing. A journal
+   * that cannot be read is a lost audit trail, never a failed run.
+   */
+  async readFrom(seq: number): Promise<RunEvent[]> {
+    try {
+      return await this.journal.readFrom(seq)
+    } catch (error) {
+      this.onError?.(error)
+      return []
+    }
   }
 
   /** Wait until every emitted event has been handed to the backend. */

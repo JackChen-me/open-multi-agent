@@ -195,6 +195,12 @@ export interface ActiveCheckpoint {
   readonly reusesSharedMemoryStore: boolean
   /** Latest safe runner state for every task currently between queue boundaries. */
   readonly inFlightTasks: Map<string, InFlightTaskCheckpoint>
+  /**
+   * Journal watermark of the v5 snapshot this run resumed from. Present only on
+   * a restore, and only when that snapshot carried one; it is what the tail
+   * replay reads from and where the recorder continues numbering.
+   */
+  readonly journalWatermarkSeq?: number
   /** Reviewed boundaries not yet durably consumed by execution. */
   readonly pendingApprovals: Map<string, ApprovalRequest>
   /** Primary decisions loaded from the approval ledger and copied into results/checkpoints. */

@@ -1,10 +1,10 @@
 # Run Event Journal
 
-The run journal is an append-only log of what happened inside one run: which messages entered a conversation, which blocks the model actually saw, which tools ran and what they returned, how the plan and task states moved, and where checkpoints landed. It answers a question the other three records cannot — **why did the model see this?**
+The run journal is an append-only log of what happened inside one run: which messages entered a conversation, which blocks the model actually saw, which tools ran and what they returned, what a context strategy replaced them with, how the plan and task states moved, and where checkpoints landed. It answers a question the other three records cannot — **why did the model see this?**
 
-It is **opt-in and off by default**, and costs nothing when it is off: no recorder is allocated and every emission site is guarded, so a run without a journal behaves exactly as it did before the feature existed.
+It is **opt-in and off by default**, and costs nothing when it is off: no recorder is allocated, no rewrite metadata is collected, and every emission site is guarded, so a run without a journal behaves exactly as it did before the feature existed — down to still writing checkpoint schema v4.
 
-The journal is not the recovery mechanism. [Checkpoint snapshots](checkpoint.md) remain the durable recovery anchor; the journal is additive audit state alongside them.
+The journal is not the recovery mechanism. [Checkpoint snapshots](checkpoint.md) remain the durable recovery anchor; the journal adds an audit trail alongside them and, on restore, a replayable tail after the last snapshot.
 
 ## Enable it
 
@@ -52,6 +52,8 @@ interface RunJournal {
   append(events: readonly RunEvent[]): Promise<void>
   readFrom(seq: number): Promise<RunEvent[]>
   close(): Promise<void>
+  /** Optional. Recorded in a v5 checkpoint as `journalRef`, informational only. */
+  describe?(): RunJournalRef  // { kind: string; path?: string }
 }
 ```
 
@@ -106,17 +108,34 @@ Every event carries `seq` (1-based, strictly increasing per `runId` across attem
 | `assistant/message` | `message`, `origin`, `usage?`, `model?`, `stopReason?` | An assistant message enters the conversation |
 | `llm/request` | `turn`, `model`, `blocks`, `systemPromptHash?`, `toolsHash?` | Immediately before an adapter call |
 | `tool/call` | `call` | The model requested a tool, before execution |
-| `tool/result` | `toolCallId`, `result`, `record?` | A tool result committed |
+| `tool/result` | `toolCallId`, `result`, `record?`, `delegationUsage?` | A tool result committed |
+| `context/replace` | `strategy`, `dropped?`, `replacements`, `detail?` | A context strategy rewrote the conversation |
 | `memory/set` | `agent`, `key`, `valueBytes?` | A task result was written to shared memory |
 | `approval/request` | `request` | A durable approval boundary was persisted |
 | `approval/decision` | `decision` | A durable decision was reconciled or made |
 | `checkpoint/saved` | `mode`, `version`, `watermarkSeq` | A snapshot was persisted |
 
-`sourceEventSeqs` conventions: an `assistant/message` names its `llm/request`; a `tool/call` names its `assistant/message`; a `tool/result` names its `tool/call`; a `user/message` with `origin: 'tool_results'` names the `tool/result` events assembled into it.
+`sourceEventSeqs` conventions: an `assistant/message` names its `llm/request`; a `tool/call` names its `assistant/message`; a `tool/result` names its `tool/call`; a `user/message` with `origin: 'tool_results'` names the `tool/result` events assembled into it; a block a context strategy derived names the single `context/replace` event that carries it.
 
 **`task/status` records four states, not six.** The `pending` and `blocked` starting states are already carried by `plan/set`, so the journal does not repeat them. Terminal transitions are recorded from the task queue rather than the dispatch loop, which is why cascaded failures and skips — transitions no dispatch site ever sees — appear too.
 
-**`checkpoint/saved.watermarkSeq`** names the last event the snapshot folds, which is the event before the save record itself. Snapshots stay at schema v4 in this release; the watermark becomes part of the snapshot in a later one.
+**`checkpoint/saved.watermarkSeq`** names the last event the snapshot folds, captured while the snapshot was built rather than after the store write, so concurrent tasks appending during the write cannot inflate it. A journaled run writes [checkpoint schema v5](checkpoint.md#tail-replay), which persists that same watermark; an unjournaled run still writes v4.
+
+### `context/replace`
+
+Context strategies rewrite the conversation destructively, and this is the event that keeps the rewrite auditable:
+
+```typescript
+{
+  type: 'context/replace',
+  strategy: 'summarize',
+  dropped: { sourceEventSeqs: [/* blocks removed with nothing in their place */] },
+  replacements: [{ sourceEventSeqs: [12, 14], block: { type: 'text', text: '[Conversation summary]…' } }],
+  detail: { summaryModel: 'claude-haiku-4-5', usage: { input_tokens: 900, output_tokens: 60 } },
+}
+```
+
+One event per strategy application. Each replacement stores the derived block **verbatim** rather than a description of how to rebuild it, which is what makes reproducibility a byte comparison instead of a re-execution: a request block naming this event passes when the event carries a block equal to it, matched on content, not position. Per-strategy behavior is tabulated in [context management](context-management.md#auditing-what-a-strategy-replaced).
 
 ### Scope
 
@@ -147,12 +166,28 @@ Lineage is keyed on **block identity**, not message identity: context strategies
 
 With `enforceLineage: false` (the default), a block whose origin was never recorded is written as the gap it is: `sourceEventSeqs: null`. With `enforceLineage: true`, it throws `JournalLineageError` (`code: 'MISSING_CONTEXT_REPLACE'`, carrying `messageIndex`, `blockIndex`, and `blockType`) before the adapter call, at the exact request that would otherwise have hidden it. The error is terminal for orchestrator retries — the same conversation would fail identically on every attempt.
 
-**In this release, `enforceLineage: true` correctly fails any run that configures a context strategy.** `sliding-window`, `summarize`, `compact`, `compressToolResults`, and custom strategies all rewrite the conversation into blocks no journal event produced, and there is no event yet that can name a rewrite. That is the invariant working, not a bug: the journal is telling you it cannot explain what the model saw. A later release adds a `context/replace` event that gives each derived block a lineage, after which enforcement passes with every built-in strategy.
+**`enforceLineage: true` passes with every built-in context strategy.** `sliding-window`, `summarize`, `compact`, `compressToolResults`, and custom strategies each emit a [`context/replace`](#contextreplace) naming the blocks they derived, so a rewritten conversation stays explainable rather than becoming a wall of gaps.
 
-Two other gaps are worth naming while they exist:
+**Restored runs keep their lineage too.** A run resumed from a v5 checkpoint does not re-emit the conversation the previous attempt journaled — that would duplicate the events the seqs point at. Instead the snapshot carries per-block lineage positionally and restore re-attaches it to the parsed blocks, and any events the journal recorded after the snapshot's watermark are folded in with lineage of their own. See [tail replay](checkpoint.md#tail-replay). Resuming from a v4 or older snapshot has no persisted lineage to re-attach, so those blocks are recorded as the gaps they are — and `enforceLineage: true` fails such a resume, correctly.
 
-- **Restored runs.** A run resumed from a checkpoint does not re-emit the conversation the previous attempt journaled — that would duplicate the events the seqs point at — so the restored blocks carry no lineage until checkpoint-persisted lineage lands.
+One other gap is worth naming while it exists:
+
 - **Structured-output repair.** The corrective retry behind `outputSchema` is a second model-visible conversation, so it is journaled as one: its messages are re-seeded rather than deduplicated against the first attempt.
+
+## Resuming with a journal
+
+Pass the same journal to `restore()` that the crashed attempt wrote to, and recovery gets finer than the last safe boundary:
+
+```typescript
+const journal = new JsonlRunJournal('./.oma/run.jsonl')
+await orchestrator.restore(team, { checkpoint: { store }, journal })
+```
+
+The snapshot is still what recovery is anchored on. On top of it, restore replays the journal past what the snapshot already holds and folds the in-flight runner events it finds — most usefully, a tool that ran and returned in the window the snapshot never captured, which is then replayed as data instead of executed again. Task status, memory writes, and approvals are deliberately not folded; each already has its own durable record. A tail that does not fit the snapshot is discarded whole with an `onProgress` warning, and the run resumes exactly as it would with no journal at all. [Checkpoint & Resume](checkpoint.md#tail-replay) has the precise fold scope and the defensive checks.
+
+"What the snapshot already holds" is decided per task, not per snapshot. A v5 snapshot refreshes each in-flight entry at that task's own boundaries, so with concurrency above 1 an entry can be many events staler than the snapshot's `journalWatermarkSeq`. Each entry records its own `journalSeq`, the replay window opens at the stalest one, and events another task has already absorbed are recognised and skipped rather than folded twice.
+
+Sequence numbers continue across attempts, so one logical run reads as one stream even when it was resumed several times. A restored attempt numbers from whichever is higher: the journal's own tail, or the snapshot's watermark — the latter matters when the journal handed to `restore()` is a fresh file rather than the one that crashed.
 
 ## Writes are best-effort
 

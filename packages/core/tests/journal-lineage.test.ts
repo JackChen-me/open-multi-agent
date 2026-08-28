@@ -14,6 +14,7 @@ import { ToolExecutor } from '../src/tool/executor.js'
 import type {
   AgentConfig,
   ContextStrategy,
+  InFlightTaskCheckpoint,
   LLMAdapter,
   LLMMessage,
   LLMResponse,
@@ -77,7 +78,10 @@ const rewritingStrategy: ContextStrategy = {
 
 function runnerWith(
   adapter: LLMAdapter,
-  options: { contextStrategy?: ContextStrategy } = {},
+  options: {
+    contextStrategy?: ContextStrategy
+    compressToolResults?: { minChars: number }
+  } = {},
 ): AgentRunner {
   const registry = new ToolRegistry()
   registry.register(echoTool)
@@ -147,7 +151,7 @@ describe('journal lineage', () => {
     expect(hashes).toContain(block!.contentHash)
   })
 
-  it('records the gap when a context strategy derives a block from nothing recorded', async () => {
+  it('points a strategy-derived block at the context/replace that produced it', async () => {
     const journal = new InMemoryRunJournal()
     const recorder = await JournalRecorder.open({ journal, runId: 'run-1', attempt: 1 })
     const runner = runnerWith(sequencedAdapter([textResponse('done')]), {
@@ -157,11 +161,12 @@ describe('journal lineage', () => {
     await runner.run(seedMessages, { journal: recorder })
     await recorder.flush()
 
-    const blocks = requestBlocks(await journal.readFrom(0))
-    // Until `context/replace` ships, a strategy-derived block names nothing.
+    const events = await journal.readFrom(0)
+    const blocks = requestBlocks(events)
     expect(blocks).toHaveLength(1)
-    expect(blocks[0]!.sourceEventSeqs).toBeNull()
-    expect(blocks[0]!.blockType).toBe('text')
+    expect(blocks[0]!.sourceEventSeqs).toHaveLength(1)
+    const named = events.find((event) => event.seq === blocks[0]!.sourceEventSeqs![0])
+    expect(named?.type).toBe('context/replace')
   })
 
   it('throws JournalLineageError under enforceLineage when a block names nothing', async () => {
@@ -171,19 +176,57 @@ describe('journal lineage', () => {
       attempt: 1,
       enforceLineage: true,
     })
-    const runner = runnerWith(sequencedAdapter([textResponse('done')]), {
-      contextStrategy: rewritingStrategy,
-    })
+    const runner = runnerWith(sequencedAdapter([textResponse('done')]))
+    // A conversation restored from a snapshot with no persisted lineage is the
+    // remaining gap: nothing in this attempt's journal produced those blocks.
+    const resumeState: InFlightTaskCheckpoint = {
+      taskId: 'task-1',
+      assignee: 'worker',
+      phase: 'awaiting_model',
+      conversationMessages: [{ role: 'user', content: [{ type: 'text', text: 'resumed' }] }],
+      messages: [],
+      tokenUsage: { input_tokens: 0, output_tokens: 0 },
+      toolCalls: [],
+      turns: 1,
+    }
 
-    await expect(runner.run(seedMessages, { journal: recorder }))
+    await expect(runner.run(seedMessages, { journal: recorder, resumeState }))
       .rejects.toThrow(JournalLineageError)
-    await expect(runner.run(seedMessages, { journal: recorder }))
+    await expect(runner.run(seedMessages, { journal: recorder, resumeState }))
       .rejects.toMatchObject({
         code: 'MISSING_CONTEXT_REPLACE',
         messageIndex: 0,
         blockIndex: 0,
         blockType: 'text',
       })
+  })
+
+  it('passes enforceLineage with every built-in context strategy', async () => {
+    const strategies: ContextStrategy[] = [
+      { type: 'sliding-window', maxTurns: 1 },
+      { type: 'compact', maxTokens: 1, preserveRecentTurns: 1, minTextBlockChars: 1 },
+      rewritingStrategy,
+    ]
+    for (const contextStrategy of strategies) {
+      const journal = new InMemoryRunJournal()
+      const recorder = await JournalRecorder.open({
+        journal,
+        runId: 'run-1',
+        attempt: 1,
+        enforceLineage: true,
+      })
+      const runner = runnerWith(
+        sequencedAdapter([toolResponse('tu-1'), toolResponse('tu-2'), textResponse('done')]),
+        { contextStrategy, compressToolResults: { minChars: 1 } },
+      )
+
+      const result = await runner.run(seedMessages, { journal: recorder })
+      expect(result.output).toBe('done')
+      await recorder.flush()
+      expect(requestBlocks(await journal.readFrom(0)).every(
+        (block) => block.sourceEventSeqs !== null,
+      )).toBe(true)
+    }
   })
 
   it('passes enforceLineage when no strategy is configured', async () => {

@@ -178,6 +178,43 @@ export interface ToolResultEvent extends RunEventBase {
   readonly toolCallId: string
   readonly result: ToolResultBlock
   readonly record?: ToolCallRecord
+  /**
+   * Nested-agent usage returned by tools such as `delegate_to_agent`. Carried
+   * because a restore folds this event back into a durable commit, and a commit
+   * that loses its delegation usage under-reports the run's token budget.
+   */
+  readonly delegationUsage?: TokenUsage
+}
+
+/** Context strategy that produced a {@link ContextReplaceEvent}. */
+export type ContextStrategyKind =
+  | 'sliding-window'
+  | 'summarize'
+  | 'compact'
+  | 'compress-tool-results'
+  | 'custom'
+
+/** One block a rewrite derived, with the events it was derived from. */
+export interface ContextReplacement {
+  readonly sourceEventSeqs: readonly number[]
+  readonly block: ContentBlock
+}
+
+/**
+ * One application of a context strategy to the conversation.
+ *
+ * A derived block's lineage is `[seq]` of the event that carries it, and the
+ * block is stored verbatim, so an offline reader can reproduce exactly what the
+ * model saw instead of inferring it from the strategy's parameters.
+ */
+export interface ContextReplaceEvent extends RunEventBase {
+  readonly type: 'context/replace'
+  readonly strategy: ContextStrategyKind
+  /** Blocks removed with no replacement. Absent when the rewrite dropped none. */
+  readonly dropped?: { readonly sourceEventSeqs: readonly number[] }
+  readonly replacements: readonly ContextReplacement[]
+  /** Per-strategy metadata. Must stay JSON-safe. */
+  readonly detail?: Readonly<Record<string, unknown>>
 }
 
 /** A shared-memory write attributable to a task. The store owns the value. */
@@ -212,7 +249,8 @@ export interface CheckpointSavedEvent extends RunEventBase {
  * `sourceEventSeqs` conventions: `assistant/message` names its `llm/request`;
  * `tool/call` names its `assistant/message`; `tool/result` names its
  * `tool/call`; a `user/message` with `origin: 'tool_results'` names the
- * `tool/result` events assembled into it.
+ * `tool/result` events assembled into it. A block derived by a context strategy
+ * names the single `context/replace` event that carries it.
  */
 export type RunEvent =
   | RunStartEvent
@@ -226,6 +264,7 @@ export type RunEvent =
   | LLMRequestEvent
   | ToolCallEvent
   | ToolResultEvent
+  | ContextReplaceEvent
   | MemorySetEvent
   | ApprovalRequestEvent
   | ApprovalDecisionEvent
@@ -244,6 +283,7 @@ export const RUN_EVENT_TYPES = [
   'llm/request',
   'tool/call',
   'tool/result',
+  'context/replace',
   'memory/set',
   'approval/request',
   'approval/decision',

@@ -201,8 +201,8 @@ describe('run journal emission', () => {
     const saves = only(events, 'checkpoint/saved')
     expect(saves.length).toBeGreaterThan(0)
     for (const save of saves) {
-      // v5 arrives with the derivation phase; PR 1 keeps writing v4.
-      expect(save).toMatchObject({ mode: 'runTasks', version: 4 })
+      // A journaled run writes v5, which is the schema carrying the watermark.
+      expect(save).toMatchObject({ mode: 'runTasks', version: 5 })
       // The watermark names the last event the snapshot folds, which is the
       // event before this one — the save record itself is not folded into it.
       expect(save.watermarkSeq).toBe(save.seq - 1)
