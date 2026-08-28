@@ -3,9 +3,11 @@ name: OMA Release Bot
 on:
   workflow_dispatch:
   schedule:
-    # Friday 18:00 Asia/Taipei. The offset is intentionally documented because
-    # GitHub schedules are UTC and can be delayed during high load.
-    - cron: '0 10 * * 5'
+    # Friday 18:23 Asia/Taipei. The offset is intentionally documented because
+    # GitHub schedules are UTC and can be delayed during high load. The :23
+    # keeps the trigger off the top of the hour, the most contended slot: the
+    # 2026-08-28 trigger was never delivered at all, not merely delayed.
+    - cron: '23 10 * * 5'
 
 permissions:
   contents: read

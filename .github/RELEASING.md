@@ -176,8 +176,8 @@ the full set of template traps.
 
 ## Order
 
-1. **Prepare a release PR.** `release-bot.yml` runs each Friday at 10:00 UTC
-   (18:00 Asia/Taipei) and is also manually dispatchable. It exits successfully
+1. **Prepare a release PR.** `release-bot.yml` runs each Friday at 10:23 UTC
+   (18:23 Asia/Taipei) and is also manually dispatchable. It exits successfully
    without calling a model when a release PR is already open, no commits exist
    after the latest core tag, or `packages/core` did not change. Otherwise it
    plans the release,
