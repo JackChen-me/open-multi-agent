@@ -32,11 +32,15 @@
 
 ### Compatibility
 
-- Run journaling and checkpoint v5 are opt-in and additive; no public exports
-  were removed and no signatures were narrowed in the reviewed bundle.
-- JSON Schema output from the #549 alignment was outside the review bundle and
-  is unverified; consumers validating against generated schemas should treat
-  required fields as potentially stricter.
+- Run journaling and checkpoint v5 are opt-in and additive: no public export
+  was removed or narrowed, and a run that leaves journaling off still writes
+  byte-identical v4 snapshots.
+- Generated JSON Schema for tool parameters now derives `required` from Zod's
+  own optionality check rather than the declared wrapper type. Three property
+  shapes change as a result: `.nullable()` becomes required, while `z.any()`
+  and `z.unknown()` stop being required. Built-in tools are unaffected, and
+  MCP tools forward the server's own schema, so this reaches custom tools that
+  use those shapes in a parameter position.
 
 ## 1.16.1 - 2026-08-21
 
