@@ -263,6 +263,14 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
   try {
     await nextSave
     checkpointSpan?.end({ status: statusOnly('ok') })
+    // The watermark is the recorder's high-water mark at save time: which
+    // journal events this snapshot already folds in.
+    ctx.journal?.emit({
+      type: 'checkpoint/saved',
+      mode: active.mode,
+      version: 4,
+      watermarkSeq: ctx.journal.lastSeq,
+    })
     return true
   } catch (error) {
     const classified = classifyRunFailure(error, { kind: 'store' })
@@ -366,6 +374,9 @@ export async function persistPendingApproval(
     )
   }
   await active.approvalLedger.ensureRequest(request)
+  // Journaled after the ledger accepted it. Durability here is the ledger's
+  // job; the journal only records that the boundary existed.
+  ctx.journal?.emit({ type: 'approval/request', request })
   ctx.config.onProgress?.({
     type: 'approval_pending',
     data: request,
@@ -631,6 +642,22 @@ async function applyRecoveryAtOutcome(
     status: statusOnly('ok'),
     attributes: { 'oma.plan.revision': applied.revision.version },
   })
+  // Journaled only after the patch committed and its checkpoint survived the
+  // rollback check above, so the journal never names a revision the run
+  // discarded.
+  ctx.journal?.emit({
+    type: 'plan/set',
+    taskId: task.id,
+    revision: applied.revision.version,
+    source: 'recovery',
+    tasks: tasks.map((candidate) => ({
+      taskId: candidate.id,
+      ...(candidate.description !== undefined ? { description: candidate.description } : {}),
+      ...(candidate.assignee !== undefined ? { assignee: candidate.assignee } : {}),
+      ...(candidate.dependsOn !== undefined ? { dependsOn: candidate.dependsOn } : {}),
+    })),
+    detail: applied.revision,
+  })
   ctx.config.onProgress?.({
     type: 'plan_revision',
     task: task.id,
@@ -733,6 +760,27 @@ export async function executeQueue(
           data: task,
         } satisfies OrchestratorEvent)
       })
+    : undefined
+
+  // Terminal task transitions are journaled from the queue rather than the
+  // dispatch loop, so cascaded failures and skips — which no dispatch site
+  // ever sees — are recorded too.
+  const unsubJournal = ctx.journal
+    ? (['task:complete', 'task:failed', 'task:skipped'] as const).map((event) =>
+        queue.on(event, (task) => {
+          ctx.journal!.emit({
+            type: 'task/status',
+            taskId: task.id,
+            ...(task.assignee !== undefined ? { agentName: task.assignee } : {}),
+            status: task.status,
+            // `result` is the failure or skip explanation on those paths; on
+            // completion it is the task output, which `memory/set` and the
+            // run result already carry.
+            ...(task.status !== 'completed' && task.result !== undefined
+              ? { reason: task.result }
+              : {}),
+          })
+        }))
     : undefined
 
   const unsubReady = !legacyRoundMode
@@ -1015,8 +1063,15 @@ export async function executeQueue(
         throw new InvalidTaskRequirementsError(requirementIssues)
       }
 
-      // Mark in-progress
+      // Mark in-progress. The queue has no event for this transition, so it is
+      // the one status the journal records from the dispatch site.
       queue.update(task.id, { status: 'in_progress' as TaskStatus })
+      ctx.journal?.emit({
+        type: 'task/status',
+        taskId: task.id,
+        ...(task.assignee !== undefined ? { agentName: task.assignee } : {}),
+        status: 'in_progress',
+      })
 
       const dependencyLinks = (task.dependsOn ?? []).flatMap((dependencyId) => {
         const dependencySpan = ctx.taskSpans.get(dependencyId)
@@ -1186,6 +1241,12 @@ export async function executeQueue(
           ? async (request: ApprovalRequest) => {
               ctx.checkpoint!.pendingApprovals.set(request.id, request)
               await ctx.checkpoint!.approvalLedger.ensureRequest(request)
+              ctx.journal?.emit({
+                type: 'approval/request',
+                taskId: task.id,
+                agentName: assignee,
+                request,
+              })
               config.onProgress?.({
                 type: 'approval_pending',
                 task: task.id,
@@ -1221,7 +1282,11 @@ export async function executeQueue(
               }
             : {}),
           ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+          ...(ctx.journal ? { journal: ctx.journal } : {}),
         }
+        // On `traceBase` rather than `runOptions`, so delegated child runs
+        // inherit the same recorder through `buildTaskAgentTeamInfo` and
+        // journal under their own agent name in the one ordered stream.
         const runOptions: Partial<RunOptions> = {
           ...traceBase,
           team: buildTaskAgentTeamInfo(ctx, task.id, traceBase, 0, [assignee]),
@@ -1457,6 +1522,16 @@ export async function executeQueue(
           // Persist result into shared memory so other agents can read it
           if (sharedMem) {
             await sharedMem.write(assignee, `task:${task.id}:result`, effective.output)
+            // The store stays authoritative for the value; the journal records
+            // only that the write happened and how large it was.
+            ctx.journal?.emit({
+              type: 'memory/set',
+              taskId: task.id,
+              agentName: assignee,
+              agent: assignee,
+              key: `task:${task.id}:result`,
+              valueBytes: Buffer.byteLength(effective.output, 'utf8'),
+            })
             // Advance the turn counter so any TTL-tagged entries written during
             // this task can be expired by subsequent reads.
             sharedMem.advanceTurn()
@@ -1625,6 +1700,7 @@ export async function executeQueue(
     unsubAllComplete?.()
     unsubReady?.()
     unsubSkipped?.()
+    for (const unsubscribe of unsubJournal ?? []) unsubscribe()
   }
 }
 

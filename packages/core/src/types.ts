@@ -6,6 +6,7 @@
  */
 
 import type { ZodSchema } from 'zod'
+import type { RunJournalConfig } from './journal/journal.js'
 import type { SupportedProvider } from './llm/adapter.js'
 import type {
   SchedulingStrategy,
@@ -306,6 +307,12 @@ export interface RunIdentityOptions {
 /** Per-call options for {@link OpenMultiAgent.runAgent}. */
 export interface RunAgentOptions extends RunIdentityOptions {
   readonly abortSignal?: AbortSignal
+  /**
+   * Opt-in run event journal for this call. Overrides
+   * {@link OrchestratorConfig.journal}; `false` disables journaling for this
+   * run only. See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig | false
 }
 
 export type RunStatusCode =
@@ -1600,6 +1607,12 @@ export interface RunTasksOptions extends RunIdentityOptions {
    * a frozen plan remains an exact replay contract.
    */
   readonly recovery?: RecoveryOptions
+  /**
+   * Opt-in run event journal for this call. Overrides
+   * {@link OrchestratorConfig.journal}; `false` disables journaling for this
+   * run only. Inherited by {@link RestoreOptions}. See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig | false
 }
 
 /**
@@ -2323,6 +2336,13 @@ export interface OrchestratorConfig {
   readonly evaluation?: import('./eval/online.js').OnlineEvaluationConfig
   /** Observability v2 sinks. User code owns forceFlush/shutdown lifecycle. */
   readonly observability?: import('./observability/sink.js').ObservabilityConfig
+  /**
+   * Default opt-in run event journal. Off unless set; per-call `journal`
+   * options override it, and `false` disables it for a single run. The caller
+   * supplies and owns the backend instance — the framework never closes it.
+   * See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig
   readonly onTrace?: (event: TraceEvent) => void | Promise<void>
   /**
    * Optional per-call tool gate inherited by agents that do not define their own

@@ -98,6 +98,12 @@ import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { Checkpoint } from '../memory/checkpoint.js'
 import { InMemoryStore } from '../memory/store.js'
+import type { RunJournalMode } from '../journal/events.js'
+import {
+  JournalRecorder,
+  resolveRunJournal,
+  type RunJournalConfig,
+} from '../journal/journal.js'
 import { validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
@@ -273,6 +279,7 @@ type EffectiveOrchestratorConfig = Required<
     | 'defaultToolPreset'
     | 'checkpoint'
     | 'recovery'
+    | 'journal'
   >
 > & Pick<
   OrchestratorConfig,
@@ -295,6 +302,7 @@ type EffectiveOrchestratorConfig = Required<
   | 'defaultToolPreset'
   | 'checkpoint'
   | 'recovery'
+  | 'journal'
 >
 
 interface SemanticProfileRun {
@@ -358,15 +366,57 @@ function validateExecutionRoutingConfig(config?: ExecutionRoutingConfig): void {
   }
 }
 
-function closeTraceForFailure(
+async function closeTraceForFailure(
   traceRuntime: TraceRuntime | undefined,
   error: unknown,
-): void {
+  journal?: JournalRecorder,
+): Promise<void> {
   const classified = classifyRunFailure(error)
+  journal?.emit({
+    type: 'run/end',
+    status: classified.status,
+    error: classified.errorInfo,
+  })
   traceRuntime?.close({
     status: classified.status,
     error: classified.errorInfo,
   })
+  await journal?.flush()
+}
+
+/**
+ * Record the plan a run is about to execute, whatever produced it: a
+ * coordinator decomposition, an explicit task list, a frozen plan artifact, or
+ * a restored queue. `plan/set` also carries the `pending` / `blocked` starting
+ * states, which `task/status` never emits.
+ */
+function emitInitialPlanSet(
+  journal: JournalRecorder | undefined,
+  queue: TaskQueue,
+): void {
+  if (!journal) return
+  journal.emit({
+    type: 'plan/set',
+    revision: queue.getPlanRevision(),
+    source: 'initial',
+    tasks: queue.list().map((task) => ({
+      taskId: task.id,
+      ...(task.description !== undefined ? { description: task.description } : {}),
+      ...(task.assignee !== undefined ? { assignee: task.assignee } : {}),
+      ...(task.dependsOn !== undefined ? { dependsOn: task.dependsOn } : {}),
+    })),
+  })
+}
+
+/** Emit `run/end` and drain the journal wherever a run's trace closes. */
+async function endRunJournal(
+  journal: JournalRecorder | undefined,
+  status: RunStatus,
+  error?: StructuredTraceError,
+): Promise<void> {
+  if (!journal) return
+  journal.emit({ type: 'run/end', status, ...(error ? { error } : {}) })
+  await journal.flush()
 }
 
 function resolveRunBudgets(
@@ -483,6 +533,7 @@ export class OpenMultiAgent {
       defaultToolPreset: config.defaultToolPreset,
       checkpoint: config.checkpoint,
       recovery: config.recovery,
+      journal: config.journal,
       onApproval: config.onApproval,
       onTaskDispatch: config.onTaskDispatch,
       onPlanReady: config.onPlanReady,
@@ -825,6 +876,47 @@ export class OpenMultiAgent {
     )
   }
 
+  /**
+   * Resolve the journal for one run and open a recorder on it, emitting
+   * `run/start`.
+   *
+   * Returns `undefined` when no journal is configured, which is the default:
+   * every emission site guards on the recorder, so an unjournaled run
+   * allocates nothing and behaves exactly as it did before.
+   */
+  private async startRunJournal(
+    override: RunJournalConfig | false | undefined,
+    identity: RunIdentity,
+    mode: RunJournalMode,
+    goal?: string,
+    metadata?: RunMetadata,
+  ): Promise<JournalRecorder | undefined> {
+    const resolved = resolveRunJournal(this.config.journal, override)
+    if (!resolved) return undefined
+    const recorder = await JournalRecorder.open({
+      journal: resolved.journal,
+      runId: identity.runId,
+      attempt: identity.attempt,
+      traceId: identity.traceId,
+      enforceLineage: resolved.enforceLineage,
+      // A journal write failure is reported and dropped, exactly like a
+      // failed checkpoint save. Losing the audit trail cannot fail the run.
+      onError: (error) => {
+        this.config.onProgress?.({
+          type: 'error',
+          data: { kind: 'journal_append_failed', error },
+        } satisfies OrchestratorEvent)
+      },
+    })
+    recorder.emit({
+      type: 'run/start',
+      mode,
+      ...(goal !== undefined ? { goal } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+    })
+    return recorder
+  }
+
   // -------------------------------------------------------------------------
   // Team management
   // -------------------------------------------------------------------------
@@ -877,6 +969,9 @@ export class OpenMultiAgent {
     )
     const { identity, metadata } = createRunFacts(options)
     const traceRuntime = this.startTrace(identity, metadata)
+    const journal = await this.startRunJournal(
+      options?.journal, identity, 'runAgent', undefined, metadata,
+    )
     const effectiveBudget = resolveBudgetCeiling(config.maxTokenBudget, this.config.maxTokenBudget)
     const effective: AgentConfig = applyDefaultToolPreset({
       ...applyAgentDefaults(config, runConfig),
@@ -905,6 +1000,7 @@ export class OpenMultiAgent {
         }
       : null
     const abortFields = options?.abortSignal ? { abortSignal: options.abortSignal } : null
+    const journalFields = journal ? { journal } : null
     const runOptions: Partial<RunOptions> | undefined =
       traceFields || abortFields
         ? {
@@ -914,12 +1010,14 @@ export class OpenMultiAgent {
             tracePhase: 'agent',
             ...(traceFields ?? {}),
             ...(abortFields ?? {}),
+            ...(journalFields ?? {}),
           }
         : {
             identity,
             runId: identity.runId,
             ...(traceRuntime ? { traceRuntime, traceSpan: traceRuntime.root } : {}),
             tracePhase: 'agent',
+            ...(journalFields ?? {}),
           }
 
     const result = await agent.run(
@@ -982,8 +1080,11 @@ export class OpenMultiAgent {
     if (completedResult.success) {
       this.completedTaskCount++
     }
+    const agentStatus = completedResult.status
+      ?? statusOnly(completedResult.success ? 'ok' : 'error')
+    await endRunJournal(journal, agentStatus, completedResult.errorInfo)
     traceRuntime?.close({
-      status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
+      status: agentStatus,
       ...(completedResult.errorInfo ? { error: completedResult.errorInfo } : {}),
     })
     this.completeOnlineEvaluation(pendingEvaluation, completedResult)
@@ -1052,6 +1153,10 @@ export class OpenMultiAgent {
       if (options?.planOnly) {
         const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
         const traceRuntime = this.startTrace(identity, metadata)
+        const journal = await this.startRunJournal(
+          options.journal, identity, 'runTeam', goal, metadata,
+        )
+        emitInitialPlanSet(journal, queue)
         const routingDecision = recordRoutingDecision(identity, traceRuntime, {
           source: 'declared',
           mode: 'team',
@@ -1062,7 +1167,9 @@ export class OpenMultiAgent {
           routingDecision,
           ...(metadata !== undefined ? { metadata } : {}),
         }
-        traceRuntime?.close({ status: result.status ?? statusOnly('ok') })
+        const planOnlyStatus = result.status ?? statusOnly('ok')
+        await endRunJournal(journal, planOnlyStatus)
+        traceRuntime?.close({ status: planOnlyStatus })
         this.completeOnlineEvaluation(pendingEvaluation, result)
         return result
       }
@@ -1083,6 +1190,7 @@ export class OpenMultiAgent {
           mode: 'team',
           reasons: ['Structured governance roles declared the execution topology.'],
         },
+        'runTeam',
       )
     }
 
@@ -1092,6 +1200,9 @@ export class OpenMultiAgent {
     )
     const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
     const traceRuntime = this.startTrace(identity, metadata)
+    const journal = await this.startRunJournal(
+      options?.journal, identity, 'runTeam', goal, metadata,
+    )
     const routingContext = buildRoutingContext(
       goal,
       agentConfigs,
@@ -1115,7 +1226,7 @@ export class OpenMultiAgent {
           )
         : undefined
     } catch (error) {
-      closeTraceForFailure(traceRuntime, error)
+      await closeTraceForFailure(traceRuntime, error, journal)
       throw error
     }
     let semanticProfileRun: SemanticProfileRun | undefined
@@ -1151,7 +1262,7 @@ export class OpenMultiAgent {
           },
         )
       } catch (error) {
-        closeTraceForFailure(traceRuntime, error)
+        await closeTraceForFailure(traceRuntime, error, journal)
         throw error
       }
       if (semanticProfileRun.assessment.recommendation === 'team') {
@@ -1268,9 +1379,11 @@ export class OpenMultiAgent {
         semanticProfileRun.reasons,
         semanticProfileRun.assessment,
       )
+      const declarationErrorInfo = classifyRunFailure(error).errorInfo
+      await endRunJournal(journal, statusOnly('error'), declarationErrorInfo)
       traceRuntime?.close({
         status: statusOnly('error'),
-        error: classifyRunFailure(error).errorInfo,
+        error: declarationErrorInfo,
       })
       throw error
     }
@@ -1284,7 +1397,7 @@ export class OpenMultiAgent {
       return hasGrantedConsequentialTool(effective, { includeDelegateTool: true })
     })
 
-    const finish = (result: TeamRunResult): TeamRunResult => {
+    const finish = async (result: TeamRunResult): Promise<TeamRunResult> => {
       const resultWithRouting = {
         ...result,
         routingDecision,
@@ -1318,8 +1431,11 @@ export class OpenMultiAgent {
         consequentialUndeclared,
         confirmationState,
       )
+      const teamStatus = completedResult.status
+        ?? statusOnly(completedResult.success ? 'ok' : 'error')
+      await endRunJournal(journal, teamStatus, completedResult.errorInfo)
       traceRuntime?.close({
-        status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
+        status: teamStatus,
         ...(completedResult.errorInfo ? { error: completedResult.errorInfo } : {}),
       })
       this.completeOnlineEvaluation(pendingEvaluation, completedResult)
@@ -1389,6 +1505,7 @@ export class OpenMultiAgent {
         ? { onTrace: this.config.onTrace, traceAgent: bestAgent.name }
         : null
       const abortFields = options?.abortSignal ? { abortSignal: options.abortSignal } : null
+      const journalFields = journal ? { journal } : null
       const runOptions: Partial<RunOptions> | undefined =
         traceFields || abortFields
           ? {
@@ -1398,12 +1515,14 @@ export class OpenMultiAgent {
               tracePhase: 'short-circuit',
               ...(traceFields ?? {}),
               ...(abortFields ?? {}),
+              ...(journalFields ?? {}),
             }
           : {
               identity,
               runId: identity.runId,
               ...(traceRuntime ? { traceRuntime, traceSpan: traceRuntime.root } : {}),
               tracePhase: 'short-circuit',
+              ...(journalFields ?? {}),
             }
 
       const scStartMs = Date.now()
@@ -1532,6 +1651,7 @@ export class OpenMultiAgent {
           traceAgent: 'coordinator',
           ...(coordinatorDecomposeSpanId ? { traceSpanId: coordinatorDecomposeSpanId } : {}),
           ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
+          ...(journal ? { journal } : {}),
         }
       : {
           identity,
@@ -1539,6 +1659,7 @@ export class OpenMultiAgent {
           ...(traceRuntime ? { traceRuntime, traceSpan: traceRuntime.root } : {}),
           tracePhase: 'decomposition',
           ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
+          ...(journal ? { journal } : {}),
         }
     const decompositionResult = await coordinatorAgent.run(decompositionPrompt, decompTraceOptions)
     const agentResults = new Map<string, AgentRunResult>()
@@ -1707,6 +1828,8 @@ export class OpenMultiAgent {
       ))
     }
 
+    emitInitialPlanSet(journal, queue)
+
     const requirementIssues = validateTaskRequirements(
       queue.list(),
       agentConfigs,
@@ -1763,6 +1886,7 @@ export class OpenMultiAgent {
       agentResults,
       config: runConfig,
       ...(activeCheckpoint ? { checkpoint: activeCheckpoint } : {}),
+      ...(journal ? { journal } : {}),
       runId,
       identity,
       ...(metadata !== undefined ? { metadata } : {}),
@@ -1961,6 +2085,7 @@ export class OpenMultiAgent {
       maxCostBudget,
       estimateCost: this.config.estimateCost,
       ...(traceRuntime ? { traceRuntime, consumedTaskSpans: [...ctx.taskSpans.values()] } : {}),
+      ...(journal ? { journal } : {}),
     })
     if (synthesis === null) {
       // Aborted or already over budget — return raw task outputs, no synthesis.
@@ -2093,6 +2218,9 @@ export class OpenMultiAgent {
       undefined,
       undefined,
       pendingEvaluation,
+      undefined,
+      undefined,
+      'runFromPlan',
     )
   }
 
@@ -2181,6 +2309,9 @@ export class OpenMultiAgent {
             input: tasksOrOptions,
             startedAtMs: evaluationStartedAtMs,
           },
+          undefined,
+          undefined,
+          'restore',
         )
       }
       if (this.isPlanArtifact(tasksOrOptions)) {
@@ -2208,6 +2339,9 @@ export class OpenMultiAgent {
             input: tasksOrOptions,
             startedAtMs: evaluationStartedAtMs,
           },
+          undefined,
+          undefined,
+          'restore',
         )
       }
 
@@ -2226,6 +2360,9 @@ export class OpenMultiAgent {
           input: { kind: 'restore', goal: options?.goal },
           startedAtMs: evaluationStartedAtMs,
         },
+        undefined,
+        undefined,
+        'restore',
       )
     }
 
@@ -2479,6 +2616,9 @@ export class OpenMultiAgent {
         input: { kind: 'restore', goal: snapshot.goal ?? options?.goal },
         startedAtMs: evaluationStartedAtMs,
       },
+      undefined,
+      undefined,
+      'restore',
     )
   }
 
@@ -2820,6 +2960,7 @@ export class OpenMultiAgent {
     pendingEvaluation?: PendingOnlineEvaluation,
     governanceDeclaration?: GovernanceDeclaration,
     routingDecisionInput?: RoutingDecisionRecordInput,
+    journalMode: RunJournalMode = 'runTasks',
   ): Promise<TeamRunResult> {
     const runConfig = this.configForRun(options?.egressPolicy)
     const agentConfigs = team.getAgents()
@@ -2847,6 +2988,10 @@ export class OpenMultiAgent {
     const runIdentity = identity ?? newRunFacts!.identity
     const metadata = restoreMetadata?.metadata ?? newRunFacts?.metadata
     const traceRuntime = this.startTrace(runIdentity, metadata, restoreMetadata?.overridden)
+    const journal = await this.startRunJournal(
+      options?.journal, runIdentity, journalMode, goal, metadata,
+    )
+    emitInitialPlanSet(journal, queue)
     const routingDecision = routingDecisionInput
       ? recordRoutingDecision(runIdentity, traceRuntime, routingDecisionInput)
       : undefined
@@ -2863,6 +3008,14 @@ export class OpenMultiAgent {
       'runTasks',
       goal,
     )
+    // Restore reconciles approval decisions against the primary ledger before
+    // this point, when no recorder exists yet. Recording them here is what
+    // makes an attempt's journal say which boundaries it resumed under.
+    if (journal && checkpoint) {
+      for (const decision of checkpoint.approvalDecisions.values()) {
+        journal.emit({ type: 'approval/decision', decision })
+      }
+    }
     const restoredConfirmationState = checkpoint?.mode === 'runTeam'
       && this.config.requireConsequentialConfirmation
       && [...checkpoint.approvalDecisions.values()].some(
@@ -2879,6 +3032,7 @@ export class OpenMultiAgent {
       agentResults,
       config: runConfig,
       ...(checkpoint ? { checkpoint } : {}),
+      ...(journal ? { journal } : {}),
       identity: runIdentity,
       ...(metadata !== undefined ? { metadata } : {}),
       runId: runIdentity.runId,
@@ -2928,6 +3082,7 @@ export class OpenMultiAgent {
           maxCostBudget: ctx.maxCostBudget,
           estimateCost: ctx.estimateCost,
           ...(traceRuntime ? { traceRuntime, consumedTaskSpans: [...ctx.taskSpans.values()] } : {}),
+          ...(journal ? { journal } : {}),
         })
         if (synthesis !== null && synthesis.result.success) {
           agentResults.set('coordinator', synthesis.result)
@@ -3006,8 +3161,11 @@ export class OpenMultiAgent {
       governanceDeclaration,
       buildExecutionReceipt(resultWithRouting),
     )
+    const queueStatus = completedResult.status
+      ?? statusOnly(completedResult.success ? 'ok' : 'error')
+    await endRunJournal(journal, queueStatus, completedResult.errorInfo)
     traceRuntime?.close({
-      status: completedResult.status ?? statusOnly(completedResult.success ? 'ok' : 'error'),
+      status: queueStatus,
       ...(completedResult.errorInfo ? { error: completedResult.errorInfo } : {}),
     })
     this.completeOnlineEvaluation(pendingEvaluation, completedResult)

@@ -195,6 +195,7 @@ export {
   TokenBudgetExceededError,
   CostBudgetExceededError,
   InvalidMessageError,
+  JournalLineageError,
   StructuredOutputValidationError,
   InvalidTaskRequirementsError,
   LLMCallTimeoutError,
@@ -303,6 +304,46 @@ export {
   checkpointKey,
   isCheckpointKey,
 } from './memory/checkpoint.js'
+
+// ---------------------------------------------------------------------------
+// Run journal
+// ---------------------------------------------------------------------------
+
+export { InMemoryRunJournal, resolveRunJournal } from './journal/journal.js'
+export { JsonlRunJournal } from './journal/jsonl-journal.js'
+export { canonicalContentHash, canonicalJsonHash } from './journal/hash.js'
+export { isMessageEvent, isRunEvent, RUN_EVENT_TYPES } from './journal/events.js'
+export type {
+  InMemoryRunJournalOptions,
+  ResolvedRunJournal,
+  RunJournal,
+  RunJournalConfig,
+  RunJournalOptions,
+} from './journal/journal.js'
+export type { JsonlRunJournalOptions } from './journal/jsonl-journal.js'
+export type {
+  ApprovalDecisionEvent,
+  ApprovalRequestEvent,
+  AssistantMessageEvent,
+  CheckpointSavedEvent,
+  LLMRequestEvent,
+  MemorySetEvent,
+  PlanSetEvent,
+  PlanSetTask,
+  RequestBlockDescriptor,
+  RunEndEvent,
+  RunEvent,
+  RunEventBase,
+  RunJournalMode,
+  RunStartEvent,
+  TaskStatusEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  TurnEndEvent,
+  TurnOutcome,
+  TurnStartEvent,
+  UserMessageEvent,
+} from './journal/events.js'
 
 // ---------------------------------------------------------------------------
 // Types — all public interfaces re-exported for consumer type-checking

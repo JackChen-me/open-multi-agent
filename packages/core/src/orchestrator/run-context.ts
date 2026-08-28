@@ -30,6 +30,7 @@ import type { AgentPool } from '../agent/pool.js'
 import type { Team } from '../team/team.js'
 import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
+import type { JournalRecorder } from '../journal/journal.js'
 import type { DurableApprovalLedger } from '../approval/durable.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import type { ResolvedRecoveryOptions } from './recovery.js'
@@ -145,6 +146,8 @@ export interface RunContext {
   readonly agentResults: Map<string, AgentRunResult>
   readonly config: OrchestratorConfig
   readonly checkpoint?: ActiveCheckpoint
+  /** Present only when the run resolved a journal. Every emission guards on it. */
+  readonly journal?: JournalRecorder
   /** Stable top-level execution identity, independent of trace callbacks. */
   readonly identity: RunIdentity
   /** Validated facts echoed on the result and persisted with checkpoints. */

@@ -42,7 +42,10 @@ import type {
   ApprovalRequest,
   ToolCallApprovalContent,
 } from '../types.js'
-import { LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
+import { JournalLineageError, LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
+import type { RequestBlockDescriptor, TurnOutcome } from '../journal/events.js'
+import { canonicalJsonHash } from '../journal/hash.js'
+import type { JournalRecorder } from '../journal/journal.js'
 import { LoopDetector } from './loop-detector.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
 import { mergeAbortSignals } from '../utils/abort.js'
@@ -205,6 +208,12 @@ export interface RunOptions {
   readonly onToolResult?: (name: string, result: ToolResult<any>) => void
   /** Fired after each complete {@link LLMMessage} is appended. */
   readonly onMessage?: (message: LLMMessage) => void
+  /**
+   * Internal per-run journal emitter. Present only when the caller configured a
+   * journal; every emission site guards on it, so an unjournaled run allocates
+   * nothing and behaves exactly as before. Custom backends may ignore it.
+   */
+  readonly journal?: JournalRecorder
   /**
    * Internal checkpoint state supplied by the orchestrator when resuming an
    * interrupted task. Custom backends may ignore it.
@@ -905,6 +914,35 @@ export class AgentRunner implements AgentBackend {
     let pendingToolResultText = restored?.pendingToolResultText
     let loopWarned = restored?.loopWarned ?? false
 
+    // --- Run journal (absent unless the caller configured one) -------------
+    const journal = options.journal
+    const journalScope = journal ? this.journalScope(options) : undefined
+    /** Turn awaiting a `turn/end`, so every exit path closes exactly one. */
+    let journalOpenTurn: number | undefined
+    let journalAssistantSeq: number | undefined
+    const journalToolResultSeqs = new Map<string, number>()
+    const emitTurnEnd = (outcome: TurnOutcome): void => {
+      if (!journal || journalOpenTurn === undefined) return
+      journal.emit({ type: 'turn/end', ...journalScope, turn: journalOpenTurn, outcome })
+      journalOpenTurn = undefined
+    }
+    if (journal && restored === undefined) {
+      // A restored run's conversation was already journaled by the attempt that
+      // built it; re-emitting it here would duplicate the events its seqs point
+      // at. Its blocks therefore carry no lineage until checkpoint-restored
+      // lineage lands.
+      for (const message of conversationMessages) {
+        const seq = message.role === 'user'
+          ? journal.emit({
+              type: 'user/message', ...journalScope, message, origin: 'input',
+            })
+          : journal.emit({
+              type: 'assistant/message', ...journalScope, message, origin: 'seed',
+            })
+        journal.registerMessage(message, [seq])
+      }
+    }
+
     // Build the stable LLM options once; model / tokens / temp don't change.
     // resolveTools() returns LLMToolDef[] with default-deny + filtering applied.
     const toolDefs = this.resolveTools()
@@ -968,6 +1006,18 @@ export class AgentRunner implements AgentBackend {
       abortSignal: effectiveAbortSignal,
     }
 
+    // The system prompt and tool definitions are caller-supplied config, not
+    // conversation state, so `llm/request` records digests of them once rather
+    // than their bytes on every turn.
+    const journalRequestConfig = journal
+      ? {
+          ...(this.options.systemPrompt !== undefined
+            ? { systemPromptHash: canonicalJsonHash(this.options.systemPrompt) }
+            : {}),
+          ...(toolDefs.length > 0 ? { toolsHash: canonicalJsonHash(toolDefs) } : {}),
+        }
+      : undefined
+
     // Loop detection state — only allocated when configured.
     const detector = this.options.loopDetection
       ? new LoopDetector(this.options.loopDetection)
@@ -1003,6 +1053,23 @@ export class AgentRunner implements AgentBackend {
             options,
             runShellExecutor,
           )
+          if (journal) {
+            for (const pending of pendingToolCalls) {
+              // Restored commits already happened, and a re-entered round
+              // (an uncommitted sibling) must not announce a call twice.
+              if (pending.commit) continue
+              if (journal.toolCallSeq(pending.call.id) !== undefined) continue
+              const callSeq = journal.emit({
+                type: 'tool/call',
+                ...journalScope,
+                call: pending.call,
+                ...(journalAssistantSeq !== undefined
+                  ? { sourceEventSeqs: [journalAssistantSeq] }
+                  : {}),
+              })
+              journal.recordToolCallSeq(pending.call.id, callSeq)
+            }
+          }
           const executions = await Promise.all(pendingToolCalls.map(async (pending, index) => {
             if (pending.commit) {
               return { commit: pending.commit, shouldCommit: true } satisfies ToolExecution
@@ -1058,6 +1125,17 @@ export class AgentRunner implements AgentBackend {
                 await options.onApprovalConsumed?.(pending.approvalRequest.id)
               }
               pendingToolCalls[index] = { call: pending.call, commit: execution.commit }
+              if (journal) {
+                const callSeq = journal.toolCallSeq(pending.call.id)
+                journalToolResultSeqs.set(pending.call.id, journal.emit({
+                  type: 'tool/result',
+                  ...journalScope,
+                  toolCallId: pending.call.id,
+                  result: execution.commit.result,
+                  record: execution.commit.record,
+                  ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
+                }))
+              }
               // Await the checkpoint before any fallible result callback so a
               // callback failure cannot turn a returned side effect into a
               // missing commit that restore would execute again.
@@ -1075,6 +1153,7 @@ export class AgentRunner implements AgentBackend {
           )
           if (suspendedExecutions.length > 0) {
             suspended = true
+            emitTurnEnd('suspended')
             await persistCheckpoint(true)
             break
           }
@@ -1108,6 +1187,21 @@ export class AgentRunner implements AgentBackend {
             role: 'user',
             content: toolResultBlocks,
           }
+          if (journal) {
+            // One event on the assembled message, so the injected
+            // `pendingToolResultText` warning block is recorded verbatim too.
+            const sourceEventSeqs = executions
+              .map((execution) => journalToolResultSeqs.get(execution.commit.result.tool_use_id))
+              .filter((seq): seq is number => seq !== undefined)
+            const messageSeq = journal.emit({
+              type: 'user/message',
+              ...journalScope,
+              message: toolResultMessage,
+              origin: 'tool_results',
+              ...(sourceEventSeqs.length > 0 ? { sourceEventSeqs } : {}),
+            })
+            journal.registerMessage(toolResultMessage, [messageSeq])
+          }
           conversationMessages.push(toolResultMessage)
           newMessages.push(toolResultMessage)
           options.onMessage?.(toolResultMessage)
@@ -1119,6 +1213,7 @@ export class AgentRunner implements AgentBackend {
             // later restore re-executes only the call that never committed.
             if (effectiveAbortSignal?.aborted) {
               aborted = true
+              emitTurnEnd('aborted')
               break
             }
             continue
@@ -1143,6 +1238,7 @@ export class AgentRunner implements AgentBackend {
           }
 
           phase = budgetExceeded ? 'completed' : 'awaiting_model'
+          emitTurnEnd(budgetExceeded ? 'budget_exceeded' : 'tool_use')
           await persistCheckpoint()
           if (phase === 'completed') break
           continue
@@ -1160,6 +1256,10 @@ export class AgentRunner implements AgentBackend {
         }
 
         const nextTurn = turns + 1
+        if (journal) {
+          journalOpenTurn = nextTurn
+          journal.emit({ type: 'turn/start', ...journalScope, turn: nextTurn })
+        }
 
         // Compress consumed tool results before context strategy (lightweight,
         // no LLM calls) so the strategy operates on already-reduced messages.
@@ -1183,6 +1283,20 @@ export class AgentRunner implements AgentBackend {
         // ------------------------------------------------------------------
         // Step 1: Call the LLM and collect the full response for this turn.
         // ------------------------------------------------------------------
+        // The journal's model-visible boundary is this conversation, recorded
+        // per block. Only the `'turn'` call is journaled: the summarize
+        // strategy's own `'summary'` call is an implementation detail of the
+        // rewrite it produces, not a turn of this conversation.
+        const llmRequestSeq = journal
+          ? journal.emit({
+              type: 'llm/request',
+              ...journalScope,
+              turn: nextTurn,
+              model: baseChatOptions.model,
+              blocks: this.describeRequestBlocks(journal, conversationMessages),
+              ...journalRequestConfig,
+            })
+          : undefined
         const response = await this.tracedChat(
           conversationMessages, baseChatOptions, options, 'turn', nextTurn,
         )
@@ -1196,6 +1310,21 @@ export class AgentRunner implements AgentBackend {
         const assistantMessage: LLMMessage = {
           role: 'assistant',
           content: response.content,
+        }
+        if (journal) {
+          journalAssistantSeq = journal.emit({
+            type: 'assistant/message',
+            ...journalScope,
+            message: assistantMessage,
+            origin: 'response',
+            usage: response.usage,
+            model: response.model,
+            stopReason: response.stop_reason,
+            ...(llmRequestSeq !== undefined ? { sourceEventSeqs: [llmRequestSeq] } : {}),
+          })
+          // `response.content` is pushed by reference, so registering these
+          // block objects is what later requests match against.
+          journal.registerBlocks(response.content, [journalAssistantSeq])
         }
 
         conversationMessages.push(assistantMessage)
@@ -1254,6 +1383,7 @@ export class AgentRunner implements AgentBackend {
               loopDetected = true
               finalOutput = turnText
               phase = 'completed'
+              emitTurnEnd('loop_detected')
               await persistCheckpoint()
               break
             } else if (action === 'warn' || action === 'inject') {
@@ -1262,6 +1392,7 @@ export class AgentRunner implements AgentBackend {
                 loopDetected = true
                 finalOutput = turnText
                 phase = 'completed'
+                emitTurnEnd('loop_detected')
                 await persistCheckpoint()
                 break
               }
@@ -1284,6 +1415,7 @@ export class AgentRunner implements AgentBackend {
         if (toolUseBlocks.length === 0) {
           if (budgetExceeded) {
             phase = 'completed'
+            emitTurnEnd('budget_exceeded')
             await persistCheckpoint()
             break
           }
@@ -1292,10 +1424,22 @@ export class AgentRunner implements AgentBackend {
               role: 'user',
               content: [{ type: 'text', text: loopWarningText(injectWarningKind) }],
             }
+            if (journal) {
+              journal.registerMessage(warningMessage, [journal.emit({
+                type: 'user/message',
+                ...journalScope,
+                message: warningMessage,
+                origin: 'input',
+                ...(journalAssistantSeq !== undefined
+                  ? { sourceEventSeqs: [journalAssistantSeq] }
+                  : {}),
+              })])
+            }
             conversationMessages.push(warningMessage)
             newMessages.push(warningMessage)
             options.onMessage?.(warningMessage)
             phase = 'awaiting_model'
+            emitTurnEnd('loop_detected')
             await persistCheckpoint()
             continue
           }
@@ -1311,6 +1455,7 @@ export class AgentRunner implements AgentBackend {
           // No tools requested — this is the terminal assistant turn.
           finalOutput = turnText
           phase = 'completed'
+          emitTurnEnd('completed')
           await persistCheckpoint()
           break
         }
@@ -1331,6 +1476,7 @@ export class AgentRunner implements AgentBackend {
       }
     } catch (err) {
       streamError = err instanceof Error ? err : new Error(String(err))
+      emitTurnEnd('error')
     } finally {
       try {
         await runShellExecutor?.release()
@@ -1387,6 +1533,54 @@ export class AgentRunner implements AgentBackend {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /** Scoping fields stamped on every journal event this runner emits. */
+  private journalScope(options: RunOptions): {
+    readonly taskId?: string
+    readonly agentName?: string
+    readonly spanId?: string
+  } {
+    const agentName = options.traceAgent ?? this.options.agentName
+    return {
+      ...(options.taskId !== undefined ? { taskId: options.taskId } : {}),
+      ...(agentName !== undefined ? { agentName } : {}),
+      ...(options.traceSpan ? { spanId: options.traceSpan.spanId } : {}),
+    }
+  }
+
+  /**
+   * Describe every block the model is about to see, with the journal event it
+   * came from.
+   *
+   * A block with no recorded lineage is normally recorded as the gap it is
+   * (`sourceEventSeqs: null`); under `enforceLineage` it throws instead, at the
+   * exact request that would otherwise have hidden it.
+   */
+  private describeRequestBlocks(
+    recorder: JournalRecorder,
+    messages: readonly LLMMessage[],
+  ): RequestBlockDescriptor[] {
+    const descriptors: RequestBlockDescriptor[] = []
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const message = messages[messageIndex]!
+      for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+        const block = message.content[blockIndex]!
+        const sourceEventSeqs = recorder.lineageFor(block)
+        if (sourceEventSeqs === null && recorder.enforceLineage) {
+          throw new JournalLineageError(messageIndex, blockIndex, block.type)
+        }
+        descriptors.push({
+          messageIndex,
+          blockIndex,
+          role: message.role,
+          blockType: block.type,
+          sourceEventSeqs,
+          contentHash: recorder.hashFor(block),
+        })
+      }
+    }
+    return descriptors
+  }
 
   private async executeToolCall(
     block: ToolUseBlock,
