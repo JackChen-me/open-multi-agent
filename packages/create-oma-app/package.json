@@ -1,6 +1,6 @@
 {
   "name": "create-oma-app",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Scaffold PR review, security analysis, and multi-agent DAG starters on @open-multi-agent/core.",
   "type": "module",
   "bin": {

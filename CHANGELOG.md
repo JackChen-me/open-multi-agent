@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 1.17.0 - 2026-08-28
+
+### Added
+
+- Added an opt-in append-only run event journal (RunEvent vocabulary,
+  InMemoryRunJournal, JsonlRunJournal) that records every adapter call and the
+  per-block lineage of what the model saw.
+- Added verifyRun() to cold-verify a finished run journal, proving model-visible
+  blocks are reproducible from the events they name.
+- Added journal-watermarked checkpoint schema v5 for journaled runs; v1–v4
+  snapshots keep loading and unjournaled runs keep writing byte-identical v4
+  snapshots.
+- Added JournalLineageError and the enforceLineage switch; built-in context
+  strategies now emit context/replace events for every persistent rewrite.
+- Added per-call journal options to runAgent/runTasks options and
+  OrchestratorConfig, off by default with best-effort appends that never fail
+  the run.
+
+### Changed
+
+- Journaled restores now replay the journal tail after the stalest per-task
+  watermark, re-anchoring in-flight state and replaying committed tool results
+  that reached the journal but not the checkpoint.
+
+### Fixed
+
+- Aligned JSON Schema required fields with Zod validation.
+
+### Compatibility
+
+- Run journaling and checkpoint v5 are opt-in and additive; no public exports
+  were removed and no signatures were narrowed in the reviewed bundle.
+- JSON Schema output from the #549 alignment was outside the review bundle and
+  is unverified; consumers validating against generated schemas should treat
+  required fields as potentially stricter.
+
 ## 1.16.1 - 2026-08-21
 
 ### Added
