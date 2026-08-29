@@ -232,7 +232,10 @@ the changelog does not carry. `## Packages` names every workspace version and
 says which ones were not republished. `## Thanks` credits contributors from
 outside the project, resolved from the commits between the previous release tag
 and the release commit, with the maintainer's own commits and bot commits
-excluded. `## Install` is copy-pasteable. All three are derived from the release
+excluded. Each contributor is credited by GitHub login: a noreply address
+carries it, and any other address is resolved by asking GitHub which account
+claims the commit, falling back to the commit's display name when no account
+does. `## Install` is copy-pasteable. All three are derived from the release
 commit and its own manifests, so no model output reaches them.
 
 ## What CI proves

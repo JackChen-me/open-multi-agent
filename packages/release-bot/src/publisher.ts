@@ -204,16 +204,17 @@ export async function collectReleaseContributors(
 
   const log = await options.runner.run(
     'git',
-    ['log', '--format=%an%x1f%ae%x1f%s%x1e', `${previousTag}..${options.expectedSha}`],
+    ['log', '--format=%H%x1f%an%x1f%ae%x1f%s%x1e', `${previousTag}..${options.expectedSha}`],
     { cwd: options.repoRoot },
   )
   const excluded = new Set(options.excludedContributors ?? DEFAULT_EXCLUDED_CONTRIBUTORS)
   const byName = new Map<string, string[]>()
+  const loginByEmail = new Map<string, string | null>()
   for (const record of log.stdout.split('\u001e')) {
     const line = record.trim()
     if (line === '') continue
-    const [author = '', email = '', subject = ''] = line.split('\u001f')
-    const name = resolveContributorName(author, email)
+    const [sha = '', author = '', email = '', subject = ''] = line.split('\u001f')
+    const name = await resolveContributorName(sha, author, email, options.github, loginByEmail)
     if (name === '' || name.endsWith('[bot]') || excluded.has(name)) continue
     const contribution = describeContribution(subject)
     if (contribution === '') continue
@@ -224,10 +225,38 @@ export async function collectReleaseContributors(
   return [...byName].map(([name, contributions]) => ({ name, contributions }))
 }
 
-/** A GitHub noreply address carries the login; anything else only has a display name. */
-function resolveContributorName(author: string, email: string): string {
-  const noreply = /^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/.exec(email.trim())
-  return (noreply?.[1] ?? author).trim()
+/**
+ * The handle to credit, preferring what GitHub itself says over the display
+ * name recorded in the commit.
+ *
+ * A GitHub noreply address already carries the login and needs no lookup. Any
+ * other address leaves only a display name, which is not a handle and can
+ * collide with an unrelated account: v1.17.0 credited `s4kura` for #549 when
+ * the author was `Iams4kura`, an account someone else holds. Asking GitHub
+ * which account claims the commit resolves that.
+ *
+ * The lookup is best-effort. An unlinked address, a missing client, or a
+ * failed request degrades to the display name, which is the behavior this
+ * function had before, rather than failing a publish over a name. The result
+ * is cached per address, so a contributor with several commits costs one
+ * request and a transient failure degrades that contributor consistently.
+ */
+async function resolveContributorName(
+  sha: string,
+  author: string,
+  email: string,
+  github: GitHubClient | undefined,
+  loginByEmail: Map<string, string | null>,
+): Promise<string> {
+  const address = email.trim()
+  const noreply = /^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/.exec(address)
+  if (noreply?.[1]) return noreply[1].trim()
+  if (!github || sha === '') return author.trim()
+
+  if (!loginByEmail.has(address)) {
+    loginByEmail.set(address, await github.getCommitAuthorLogin(sha).catch(() => null))
+  }
+  return (loginByEmail.get(address) ?? author).trim()
 }
 
 /** `feat(examples): add a thing (#12)` becomes `add a thing (#12)`. */

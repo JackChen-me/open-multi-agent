@@ -161,9 +161,9 @@ class PublishRunner implements CommandRunner {
     if (args[0] === 'log' && args[2] === `v1.14.0..${this.sha}`) {
       // One outside contributor, the maintainer, and the release bot itself.
       return success([
-        'green3sf\u001f222944370+green3sf@users.noreply.github.com\u001ffeat(examples): add a verify loop (#541)\u001e',
-        'Jack Chen\u001fchenkaijie01@gmail.com\u001ffix(core): export public config types (#533)\u001e',
-        'oma-release-bot[bot]\u001f1+oma-release-bot[bot]@users.noreply.github.com\u001fchore: release core v1.15.0 (#543)\u001e',
+        `${'1'.repeat(40)}\u001fgreen3sf\u001f222944370+green3sf@users.noreply.github.com\u001ffeat(examples): add a verify loop (#541)\u001e`,
+        `${'2'.repeat(40)}\u001fJack Chen\u001fchenkaijie01@gmail.com\u001ffix(core): export public config types (#533)\u001e`,
+        `${'3'.repeat(40)}\u001foma-release-bot[bot]\u001f1+oma-release-bot[bot]@users.noreply.github.com\u001fchore: release core v1.15.0 (#543)\u001e`,
       ].join(''))
     }
     if (args[0] === 'rev-parse' && args[1] === 'refs/tags/v1.15.0^{commit}') {
@@ -191,6 +191,8 @@ class PublishGitHub implements GitHubClient {
     this.release = { id: 1, htmlUrl: 'https://github.test/releases/v1.15.0', tagName: input.tagName }
     return this.release
   }
+
+  async getCommitAuthorLogin(): Promise<string | null> { return null }
 }
 
 function success(stdout = ''): CommandResult {
@@ -247,8 +249,16 @@ describe('release contributor collection', () => {
     },
   })
 
-  const record = (author: string, email: string, subject: string) =>
-    `${author}\u001f${email}\u001f${subject}\u001e`
+  const record = (author: string, email: string, subject: string, sha = 'a'.repeat(40)) =>
+    `${sha}\u001f${author}\u001f${email}\u001f${subject}\u001e`
+
+  const lookup = (result: string | null | Error, calls: string[] = []): GitHubClient => ({
+    getCommitAuthorLogin: async (sha: string): Promise<string | null> => {
+      calls.push(sha)
+      if (result instanceof Error) throw result
+      return result
+    },
+  } as unknown as GitHubClient)
 
   it('groups a contributor and strips the conventional-commit prefix', async () => {
     const contributors = await collectReleaseContributors({
@@ -264,7 +274,58 @@ describe('release contributor collection', () => {
     ])
   })
 
-  it('falls back to the author name when the address is not a GitHub noreply', async () => {
+  it('resolves the login from GitHub when the address is not a noreply', async () => {
+    // v1.17.0 credited `s4kura`, the commit's display name, for #549. The
+    // author was `Iams4kura`, and `s4kura` is an unrelated real account.
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup('Iams4kura'),
+      runner: runner(record('s4kura', 'someone@qq.com', 'fix(core): align required fields (#549)')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(contributors).toEqual([
+      { name: 'Iams4kura', contributions: ['align required fields (#549)'] },
+    ])
+  })
+
+  it('does not look up a noreply address, which already carries the login', async () => {
+    const calls: string[] = []
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup('wrong-login', calls),
+      runner: runner(record('green3sf', '9+green3sf@users.noreply.github.com', 'fix(core): a fix (#1)')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(calls).toEqual([])
+    expect(contributors).toEqual([{ name: 'green3sf', contributions: ['a fix (#1)'] }])
+  })
+
+  it('falls back to the author name when no account claims the commit', async () => {
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup(null),
+      runner: runner(record('Ada Lovelace', 'ada@example.com', 'fix(core): tighten a guard (#12)')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(contributors).toEqual([
+      { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
+    ])
+  })
+
+  it('falls back to the author name when the lookup fails', async () => {
+    // A name lookup must not fail a publish that is otherwise complete.
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup(new Error('502 from GitHub')),
+      runner: runner(record('Ada Lovelace', 'ada@example.com', 'fix(core): tighten a guard (#12)')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(contributors).toEqual([
+      { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
+    ])
+  })
+
+  it('falls back to the author name when there is no client to ask', async () => {
     const contributors = await collectReleaseContributors({
       repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
       runner: runner(record('Ada Lovelace', 'ada@example.com', 'fix(core): tighten a guard (#12)')),
@@ -273,6 +334,35 @@ describe('release contributor collection', () => {
     expect(contributors).toEqual([
       { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
     ])
+  })
+
+  it('resolves one address once across several commits', async () => {
+    const calls: string[] = []
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup('Iams4kura', calls),
+      runner: runner([
+        record('s4kura', 'someone@qq.com', 'fix(core): first (#1)', 'a'.repeat(40)),
+        record('s4kura', 'someone@qq.com', 'fix(core): second (#2)', 'b'.repeat(40)),
+      ].join('')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(calls).toEqual(['a'.repeat(40)])
+    expect(contributors).toEqual([
+      { name: 'Iams4kura', contributions: ['first (#1)', 'second (#2)'] },
+    ])
+  })
+
+  it('excludes the maintainer by the login a lookup resolves', async () => {
+    // The default exclusion list carries both the display name and the login
+    // precisely because either can be what this resolves to.
+    const contributors = await collectReleaseContributors({
+      repoRoot: '/tmp/unused', expectedSha: 'c'.repeat(40),
+      github: lookup('JackChen-me'),
+      runner: runner(record('Jack Chen', 'jack@yuanasi.com', 'fix(core): tighten a guard (#12)')),
+    } as Parameters<typeof collectReleaseContributors>[0])
+
+    expect(contributors).toEqual([])
   })
 
   it('honours an explicit exclusion list', async () => {
