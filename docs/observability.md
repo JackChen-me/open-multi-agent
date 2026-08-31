@@ -560,9 +560,12 @@ a Resource.
 The first release intentionally provides no OTLP convenience subpath. The
 application selects its own OTel SDK and OTLP/exporter implementation, avoiding
 eager OTLP imports, implicit global-provider configuration, and a second
-SDK/exporter compatibility matrix. See
-[`packages/otel/README.md`](../packages/otel/README.md) for the full API and
-mapping table.
+SDK/exporter compatibility matrix.
+[`observability-v2/otlp-backend.ts`](../packages/core/examples/integrations/observability-v2/otlp-backend.ts)
+wires that path end to end against a loopback listener it starts itself, so the
+exporter, Resource, headers, and shutdown order are all visible without an
+account anywhere. See [`packages/otel/README.md`](../packages/otel/README.md)
+for the full API and mapping table.
 
 ## Flush and shutdown
 
