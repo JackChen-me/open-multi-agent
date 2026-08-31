@@ -538,8 +538,24 @@ so no high-cardinality run/task/tenant/request fields become metric labels.
 The adapter exports no prompt, completion, tool arguments/results, raw payload,
 credential, chain-of-thought, or reasoning content. Numeric token counts remain
 eligible. It forwards only an explicit low-sensitivity `oma.*` allowlist rather
-than arbitrary record attributes. `contentCapture` is a reserved disabled-only extension point; there
-is no content-capture switch in this release.
+than arbitrary record attributes.
+
+`contentCapture` opens one bounded exception. Under
+`contentCapture: { mode: 'upstream-policy' }` the adapter also forwards
+`oma.tool.input` and `oma.tool.output`, which core produces only when
+`observability.capture` opts in and `SensitiveDataProcessor` has already
+redacted and truncated. Both opt-ins are required: the adapter setting alone
+exports nothing extra, because without the core policy those attributes are
+never recorded. No other content attribute is eligible under any mode, and
+reasoning content has no opt-in at all. The default remains
+`mode: 'disabled'`.
+
+`service.name` comes from the Resource on the application's own
+`TracerProvider`. The adapter never sets it, so a provider built without a
+Resource reports OMA spans under the OTel default (`unknown_service:node`).
+`metadata.release` and `metadata.environment` map to `service.version` and
+`deployment.environment.name` as span attributes; they are not a substitute for
+a Resource.
 
 The first release intentionally provides no OTLP convenience subpath. The
 application selects its own OTel SDK and OTLP/exporter implementation, avoiding
@@ -785,6 +801,24 @@ only core-controlled content opt-in. Structured credential fields are removed
 even when content capture is enabled. Chain-of-thought/reasoning content,
 signed reasoning blocks, and `<thinking>` text are never captured by OMA
 instrumentation; numeric reasoning-token counts may be recorded.
+
+Setting `toolInput` or `toolOutput` to `'redacted'` makes tool spans carry
+`oma.tool.input` and `oma.tool.output`:
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  observability: {
+    sinks: [sink],
+    capture: { toolInput: 'redacted', toolOutput: 'redacted' },
+  },
+})
+```
+
+The remaining fields are filters, not producers. `prompt` and `completion`
+currently gate content that no v2 instrumentation site emits, so setting them
+records nothing; they exist so a custom sink's own attributes are filtered
+consistently. Legacy `onTrace` is unaffected by this policy and keeps its
+own redacted fields.
 
 Legacy `onTrace` keeps its existing redacted tool input/output fields for
 compatibility, so its privacy surface is intentionally broader than the v2

@@ -320,6 +320,20 @@ function extractText(content: readonly ContentBlock[]): string {
     .join('')
 }
 
+/**
+ * Render tool arguments as a single span attribute. Trace attributes are
+ * scalars, so an object argument has to become text; a value that cannot be
+ * serialized is reported rather than failing the tool call.
+ */
+function stringifyToolContent(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return '[unserializable tool input]'
+  }
+}
+
 /** Extract every ToolUseBlock from a content array. */
 function extractToolUseBlocks(content: readonly ContentBlock[]): ToolUseBlock[] {
   return content.filter((b): b is ToolUseBlock => b.type === 'tool_use')
@@ -1927,10 +1941,19 @@ export class AgentRunner implements AgentBackend {
       const classified = isError
         ? classifyRunFailure(new Error(recordedOutput), { kind: 'tool' })
         : undefined
+      // Tool input/output reach v2 spans only under an explicit capture
+      // policy. `SensitiveDataProcessor` still redacts and truncates these
+      // values; serializing here is skipped entirely when the policy is off.
+      const contentAttributes = options.traceRuntime?.capturesToolIO
+        ? {
+            'oma.tool.input': stringifyToolContent(redactSensitiveObject(block.input)),
+            'oma.tool.output': redactSensitiveText(summarizeToolResultContent(modelOutput)),
+          }
+        : undefined
       toolSpan.end({
         status: classified?.status ?? { code: 'ok' },
         ...(classified ? { error: classified.errorInfo } : {}),
-        attributes: { 'oma.tool.is_error': isError },
+        attributes: { 'oma.tool.is_error': isError, ...contentAttributes },
         ...(legacyEvent ? { legacyEvent } : {}),
       })
       toolSpan.ensureEnded()

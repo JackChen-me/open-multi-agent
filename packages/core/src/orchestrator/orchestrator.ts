@@ -457,6 +457,7 @@ export class OpenMultiAgent {
   private completedTaskCount = 0
   private readonly traceRecordObserver?: TraceRecordObserver
   private readonly traceSink?: TraceSink
+  private readonly traceCapturesToolIO: boolean
   private readonly onlineEvaluator?: OnlineEvaluator
   /** Online evaluation lifecycle. A shared no-op facade is returned when disabled. */
   readonly evaluation: OnlineEvaluationLifecycle
@@ -498,6 +499,11 @@ export class OpenMultiAgent {
           sinkName: 'OpenMultiAgent',
         })
       : undefined
+    // Instrumentation only pays to serialize tool content when the policy
+    // admits it. Both fields default to 'none', so the default run is
+    // byte-for-byte what it was before this opt-in existed.
+    this.traceCapturesToolIO = config.observability?.capture?.toolInput === 'redacted'
+      || config.observability?.capture?.toolOutput === 'redacted'
     this.config = {
       maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
       maxDelegationDepth: config.maxDelegationDepth ?? DEFAULT_MAX_DELEGATION_DEPTH,
@@ -878,6 +884,7 @@ export class OpenMultiAgent {
       this.traceRecordObserver,
       this.traceSink,
       metadataAttributes(metadata, metadataOverridden),
+      this.traceCapturesToolIO,
     )
   }
 

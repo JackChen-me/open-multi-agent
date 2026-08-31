@@ -78,4 +78,77 @@ describe('Observability v2 default privacy boundary', () => {
     })
     await sink.shutdown({ timeoutMs: 500 })
   })
+
+  it('admits tool input/output under an explicit capture policy without widening other content', async () => {
+    let call = 0
+    const adapter: LLMAdapter = {
+      name: 'privacy-test',
+      async chat() { return call++ === 0 ? toolCall() : completion() },
+      async *stream() {},
+    }
+    const tool = defineTool({
+      name: 'private_lookup',
+      description: 'Privacy test tool.',
+      inputSchema: z.object({ query: z.string() }),
+      execute: async () => ({ data: TOOL_RESULT }),
+    })
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
+    const result = await new OpenMultiAgent({
+      observability: {
+        sinks: [sink],
+        capture: { toolInput: 'redacted', toolOutput: 'redacted' },
+      },
+    }).runAgent({
+      name: 'worker',
+      model: 'privacy-test',
+      adapter,
+      customTools: [tool],
+    }, PROMPT)
+
+    expect(result.success).toBe(true)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({ status: 'ok' })
+    const stored = await store.getRun(result.identity!.runId, { includeRecords: true })
+    const toolEnd = stored?.records?.find((record) =>
+      record.recordType === 'span_end' && record.attributes?.['oma.tool.name'] === 'private_lookup')
+
+    // The opted-in fields arrive.
+    expect(toolEnd?.attributes?.['oma.tool.input']).toContain(TOOL_ARGUMENT)
+    expect(toolEnd?.attributes?.['oma.tool.output']).toContain(TOOL_RESULT)
+
+    // Everything the policy did not name stays out, including reasoning, which
+    // has no opt-in at all.
+    const serialized = JSON.stringify(stored?.records)
+    for (const secret of [PROMPT, COMPLETION, REASONING]) {
+      expect(serialized).not.toContain(secret)
+    }
+    expect(serialized).not.toContain('<thinking>')
+    await sink.shutdown({ timeoutMs: 500 })
+  })
+
+  it('leaves tool spans untouched when the capture policy names neither tool field', async () => {
+    const adapter: LLMAdapter = {
+      name: 'privacy-test',
+      async chat() { return completion() },
+      async *stream() {},
+    }
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
+    // A policy that opts into unrelated fields must not switch tool capture on.
+    const result = await new OpenMultiAgent({
+      observability: { sinks: [sink], capture: { errorMessage: 'redacted' } },
+    }).runAgent({ name: 'worker', model: 'privacy-test', adapter }, PROMPT)
+
+    expect(result.success).toBe(true)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({ status: 'ok' })
+    const stored = await store.getRun(result.identity!.runId, { includeRecords: true })
+    expect(JSON.stringify(stored?.records)).not.toContain('oma.tool.input')
+    await sink.shutdown({ timeoutMs: 500 })
+  })
 })
