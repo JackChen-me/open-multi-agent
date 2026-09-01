@@ -779,6 +779,44 @@ Judge scores are averaged. When the verdict schema returns a boolean `pass`, the
 
 `result.details.judges`, `result.details.models`, and `result.details.scores` are parallel arrays: values at the same index describe one judge. This flat representation remains compatible with trace attribute values while preserving model-drift evidence. Bump the scorer `version` whenever judge models, configuration, or prompts change.
 
+### Judging non-text output
+
+`judgePrompt` runs once per judge and may return a plain string (wrapped into the
+standard text prompt, as above) or a complete `readonly LLMMessage[]` — see
+[structured input](structured-input.md) for the message/content-block shape. The
+per-judge form lets a mixed roster (a cheap text-only judge alongside an
+expensive vision-capable one) each receive input suited to what they can
+actually score. `AgentConfig.capabilities` is the caller-declared signal for
+this — OMA does not infer it, so an unset judge falls back to whatever content
+its own `judgePrompt` branch decides to send:
+
+```ts
+const artifactQuality = createJudgeScorer({
+  name: 'artifact-quality',
+  judges: [
+    { name: 'vision-judge', model: 'claude-sonnet-4-6', capabilities: ['vision'] },
+    { name: 'text-judge', model: 'gpt-5' },
+  ],
+  quorum: 2,
+  judgePrompt(context, judge) {
+    const supportsVision = judge.capabilities?.includes('vision') ?? false
+    return supportsVision
+      ? [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Rate how well this chart matches the request.' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: chartPng } },
+          ],
+        }]
+      : [{ role: 'user', content: [{ type: 'text', text: `Rate this description: ${chartDescription}` }] }]
+  },
+})
+```
+
+A judge that fails on content it cannot handle fails the whole `score()` call —
+`createJudgeScorer` has no per-judge failure isolation. Give every non-vision
+judge a working fallback branch rather than relying on the framework to skip it.
+
 ## FAQ
 
 ### Should a scorer error count as zero?
