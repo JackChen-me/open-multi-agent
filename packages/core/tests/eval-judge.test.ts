@@ -255,4 +255,132 @@ describe('createJudgeScorer', () => {
       timeoutMs: 0,
     })).toThrow(/timeout/i)
   })
+
+  it('passes the current judge to a function judgePrompt', async () => {
+    const seenJudges: string[] = []
+    const scorer = createJudgeScorer({
+      name: 'per-judge',
+      judges: [
+        judge('alpha', '{"score":0.5,"reason":"ok"}'),
+        judge('beta', '{"score":0.5,"reason":"ok"}'),
+      ],
+      quorum: 1,
+      judgePrompt(_context, judgeConfig) {
+        seenJudges.push(judgeConfig.name)
+        return `Instruction for ${judgeConfig.name}.`
+      },
+    })
+
+    await scorer.score(context())
+
+    expect(seenJudges).toEqual(['alpha', 'beta'])
+  })
+
+  it('passes a structured judgePrompt result straight through, bypassing the text prompt template', async () => {
+    const capturedMessages: LLMMessage[][] = []
+    const adapter: LLMAdapter = {
+      name: 'mock',
+      async chat(messages): Promise<LLMResponse> {
+        // Snapshot at call time — `messages` is the runner's live working
+        // array and keeps growing (e.g. the assistant reply gets appended)
+        // after this call returns, so a bare reference would show stale data.
+        capturedMessages.push(structuredClone(messages))
+        return {
+          id: 'response-1',
+          content: [{ type: 'text', text: '{"score":1,"reason":"matches"}' }],
+          model: 'mock-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }
+      },
+      async *stream() {
+        yield { type: 'done' as const, data: {} }
+      },
+    }
+    const visionJudge: AgentConfig = {
+      name: 'vision',
+      model: 'vision-model',
+      adapter,
+      capabilities: ['vision'],
+    }
+    const structuredInput: LLMMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What does this chart show?' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' } },
+        ],
+      },
+    ]
+
+    const scorer = createJudgeScorer({
+      name: 'structured',
+      judges: [visionJudge],
+      quorum: 1,
+      judgePrompt: () => structuredInput,
+    })
+
+    await scorer.score(context())
+
+    // Passed through unchanged — no "## Case input" / "## Candidate output"
+    // template wrapping from buildPrompt, and the image block survives intact.
+    expect(capturedMessages).toEqual([structuredInput])
+  })
+
+  it('lets judgePrompt branch per judge for a mixed vision/text quorum', async () => {
+    const receivedByJudge: Record<string, 'image' | 'text'> = {}
+    function makeAdapter(name: string): LLMAdapter {
+      return {
+        name: 'mock',
+        async chat(messages): Promise<LLMResponse> {
+          const hasImage = messages.some((message) => message.content.some((block) => block.type === 'image'))
+          receivedByJudge[name] = hasImage ? 'image' : 'text'
+          return {
+            id: `response-${name}`,
+            content: [{ type: 'text', text: '{"score":1,"reason":"ok"}' }],
+            model: 'mock-model',
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }
+        },
+        async *stream() {
+          yield { type: 'done' as const, data: {} }
+        },
+      }
+    }
+    const visionJudge: AgentConfig = {
+      name: 'vision-judge',
+      model: 'vision-model',
+      adapter: makeAdapter('vision-judge'),
+      capabilities: ['vision'],
+    }
+    const textJudge: AgentConfig = {
+      name: 'text-judge',
+      model: 'text-model',
+      adapter: makeAdapter('text-judge'),
+    }
+
+    const scorer = createJudgeScorer({
+      name: 'mixed-quorum',
+      judges: [visionJudge, textJudge],
+      quorum: 2,
+      judgePrompt(_context, judgeConfig) {
+        const supportsVision = judgeConfig.capabilities?.includes('vision') ?? false
+        return supportsVision
+          ? [{
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Rate this image.' },
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' } },
+              ],
+            }]
+          : [{ role: 'user', content: [{ type: 'text', text: 'Rate this: chart shows upward trend.' }] }]
+      },
+    })
+
+    const result = await scorer.score(context())
+
+    expect(receivedByJudge).toEqual({ 'vision-judge': 'image', 'text-judge': 'text' })
+    expect(result.score).toBe(1)
+  })
 })
