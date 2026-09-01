@@ -1,5 +1,5 @@
 import { z, type ZodSchema } from 'zod'
-import type { AgentConfig, CostEstimateContext, TokenUsage } from '../types.js'
+import type { AgentConfig, AgentRunInput, CostEstimateContext, TokenUsage } from '../types.js'
 import {
   buildStructuredOutputInstruction,
   extractJSON,
@@ -20,7 +20,7 @@ export interface JudgeScorerOptions {
   readonly judges: readonly AgentConfig[]
   readonly quorum?: number
   readonly verdictSchema?: ZodSchema
-  readonly judgePrompt?: string | ((context: ScorerContext) => string)
+  readonly judgePrompt?: string | ((context: ScorerContext, judge: AgentConfig) => AgentRunInput)
   readonly timeoutMs?: number
 }
 
@@ -133,6 +133,26 @@ function createDeadline(
   }
 }
 
+/**
+ * Resolve one judge's input. A string `judgePrompt` result (the default
+ * shorthand) is wrapped into the standard text prompt via `buildPrompt`, same
+ * as before this judge ever existed as an argument. A structured
+ * `readonly LLMMessage[]` result is passed through as-is, letting a caller
+ * build per-judge content — e.g. an image block only for judges whose
+ * `AgentConfig.capabilities` declare vision support.
+ */
+function resolveJudgeInput(
+  context: ScorerContext,
+  judge: AgentConfig,
+  judgePrompt: JudgeScorerOptions['judgePrompt'],
+  schema: ZodSchema,
+): AgentRunInput {
+  const resolved = typeof judgePrompt === 'function'
+    ? judgePrompt(context, judge)
+    : judgePrompt ?? DEFAULT_JUDGE_INSTRUCTION
+  return typeof resolved === 'string' ? buildPrompt(context, resolved, schema) : resolved
+}
+
 async function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) throw abortError(signal)
 
@@ -151,7 +171,7 @@ async function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promi
 
 async function runJudge(
   judge: AgentConfig,
-  prompt: string,
+  promptInput: AgentRunInput,
   schema: ZodSchema,
   signal: AbortSignal,
 ): Promise<{
@@ -162,7 +182,7 @@ async function runJudge(
   // Keep the eval barrel browser-safe to import. The Node-capable Agent path is
   // loaded only when a judge scorer actually executes.
   const { buildAgent } = await import('../orchestrator/agent-config.js')
-  const result = await buildAgent(judge).run(prompt, { abortSignal: signal })
+  const result = await buildAgent(judge).run(promptInput, { abortSignal: signal })
   const model = judge.model ?? (judge.backend ? `${judge.backend.kind}-backend` : 'unknown')
   const costInput: ScoreCostInput = {
     usage: result.tokenUsage,
@@ -218,10 +238,6 @@ export function createJudgeScorer(options: JudgeScorerOptions): Scorer {
     ...(options.version !== undefined ? { version: options.version } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     async score(context) {
-      const instruction = typeof judgePrompt === 'function'
-        ? judgePrompt(context)
-        : judgePrompt ?? DEFAULT_JUDGE_INSTRUCTION
-      const prompt = buildPrompt(context, instruction, schema)
       const deadline = createDeadline(context.signal, timeoutMs)
 
       try {
@@ -229,8 +245,9 @@ export function createJudgeScorer(options: JudgeScorerOptions): Scorer {
         const costInputs: ScoreCostInput[] = []
         try {
           for (const judge of judges) {
+            const promptInput = resolveJudgeInput(context, judge, judgePrompt, schema)
             const judged = await raceWithAbort(
-              runJudge(judge, prompt, schema, deadline.signal),
+              runJudge(judge, promptInput, schema, deadline.signal),
               deadline.signal,
             )
             verdicts.push(judged.verdict)
