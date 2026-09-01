@@ -505,6 +505,58 @@ describe('@open-multi-agent/otel', () => {
     expect(JSON.stringify(span.attributes)).not.toMatch(/private|credential|chain of thought|raw request|unclassified/)
   })
 
+  it('forwards upstream-policy tool content only when the caller opts in, and never widens other content', async () => {
+    const toolAttributes = {
+      'oma.tool.name': 'echo_tool',
+      'oma.tool.input': '{"payload":"tool input body"}',
+      'oma.tool.output': 'tool output body',
+      // Still refused under the opt-in: these are not upstream-policy fields.
+      'oma.prompt': 'private prompt',
+      'oma.completion': 'private completion',
+      'oma.tool.arguments': '{"credential":"do-not-export"}',
+      'oma.reasoning.content': 'chain of thought',
+    }
+
+    const off = inMemory()
+    await exportRecords(createOtelTraceExporter({ tracerProvider: off.provider }), [
+      start('3'.repeat(15) + 'a', 'execute_tool', 'tool', { attributes: toolAttributes }),
+      end('3'.repeat(15) + 'a', 'execute_tool', 'tool', { attributes: toolAttributes }),
+    ])
+    const defaultSpan = off.exporter.getFinishedSpans()[0]!
+    expect(defaultSpan.attributes['oma.tool.name']).toBe('echo_tool')
+    expect(defaultSpan.attributes['oma.tool.input']).toBeUndefined()
+    expect(defaultSpan.attributes['oma.tool.output']).toBeUndefined()
+
+    const on = inMemory()
+    await exportRecords(
+      createOtelTraceExporter({
+        tracerProvider: on.provider,
+        contentCapture: { mode: 'upstream-policy' },
+      }),
+      [
+        start('4'.repeat(15) + 'a', 'execute_tool', 'tool', { attributes: toolAttributes }),
+        end('4'.repeat(15) + 'a', 'execute_tool', 'tool', { attributes: toolAttributes }),
+      ],
+    )
+    const optedInSpan = on.exporter.getFinishedSpans()[0]!
+    expect(optedInSpan.attributes['oma.tool.input']).toBe('{"payload":"tool input body"}')
+    expect(optedInSpan.attributes['oma.tool.output']).toBe('tool output body')
+    expect(JSON.stringify(optedInSpan.attributes))
+      .not.toMatch(/private prompt|private completion|credential|chain of thought/)
+  })
+
+  it('rejects an unsupported contentCapture mode', () => {
+    const { provider } = inMemory()
+    expect(() => createOtelTraceExporter({
+      tracerProvider: provider,
+      contentCapture: { mode: 'everything' as 'disabled' },
+    })).toThrow(TypeError)
+    expect(() => createOtelTraceExporter({
+      tracerProvider: provider,
+      contentCapture: { mode: 'disabled' },
+    })).not.toThrow()
+  })
+
   it('reports duplicate, out-of-order, and incomplete records without throwing or exporting content', async () => {
     const { exporter, provider } = inMemory()
     const diagnostics: string[] = []

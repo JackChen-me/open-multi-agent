@@ -145,6 +145,10 @@ class FakeGitHubClient implements GitHubClient {
   async createRelease(_input: CreateReleaseInput): Promise<GitHubRelease> {
     throw new Error('not used')
   }
+
+  async getCommitAuthorLogin(): Promise<string | null> {
+    throw new Error('not used')
+  }
 }
 
 function scriptedRun(evidence: ReleaseEvidence): ReleaseBotRun {

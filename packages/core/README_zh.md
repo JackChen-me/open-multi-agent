@@ -248,6 +248,10 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 
 详见[可观测性指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[迁移指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md)与[性能指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md)。
 
+### 运行事件日志
+
+长时间运行出问题时，最缺的记录往往是每个 Agent 在被调用那一刻究竟看到了什么。可选的运行事件日志会把这部分保留下来：每条消息和工具结果都作为追加事件写入，上下文策略替换掉若干轮次后放进去的那个块也原样保存，运行结束后可以直接读回，而不必靠推测还原。`verifyRun()` 随后离线校验模型看到的每个块都能从日志中复现，而不是采信日志对自身的陈述；`restore()` 也可以从最后一条追加事件恢复，而不再局限于最后一次快照。该能力默认关闭，关闭时没有额外开销，详见[运行事件日志指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md)。
+
 ## 文档
 
 | 主题 | 指南 |

@@ -42,7 +42,14 @@ import type {
   ApprovalRequest,
   ToolCallApprovalContent,
 } from '../types.js'
-import { LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
+import { JournalLineageError, LLMCallTimeoutError, TokenBudgetExceededError } from '../errors.js'
+import type {
+  ContextStrategyKind,
+  RequestBlockDescriptor,
+  TurnOutcome,
+} from '../journal/events.js'
+import { canonicalJsonHash } from '../journal/hash.js'
+import type { JournalRecorder } from '../journal/journal.js'
 import { LoopDetector } from './loop-detector.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
 import { mergeAbortSignals } from '../utils/abort.js'
@@ -206,6 +213,12 @@ export interface RunOptions {
   /** Fired after each complete {@link LLMMessage} is appended. */
   readonly onMessage?: (message: LLMMessage) => void
   /**
+   * Internal per-run journal emitter. Present only when the caller configured a
+   * journal; every emission site guards on it, so an unjournaled run allocates
+   * nothing and behaves exactly as before. Custom backends may ignore it.
+   */
+  readonly journal?: JournalRecorder
+  /**
    * Internal checkpoint state supplied by the orchestrator when resuming an
    * interrupted task. Custom backends may ignore it.
    */
@@ -307,6 +320,20 @@ function extractText(content: readonly ContentBlock[]): string {
     .join('')
 }
 
+/**
+ * Render tool arguments as a single span attribute. Trace attributes are
+ * scalars, so an object argument has to become text; a value that cannot be
+ * serialized is reported rather than failing the tool call.
+ */
+function stringifyToolContent(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return '[unserializable tool input]'
+  }
+}
+
 /** Extract every ToolUseBlock from a content array. */
 function extractToolUseBlocks(content: readonly ContentBlock[]): ToolUseBlock[] {
   return content.filter((b): b is ToolUseBlock => b.type === 'tool_use')
@@ -406,27 +433,94 @@ const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
 /** Default minimum content length before tool result compression kicks in. */
 const DEFAULT_MIN_COMPRESS_CHARS = 500
 
+/** Scoping fields stamped on every journal event a runner emits. */
+interface JournalScope {
+  readonly taskId?: string
+  readonly agentName?: string
+  readonly spanId?: string
+}
+
+/**
+ * What one context-strategy application derived, collected only when a journal
+ * is attached.
+ *
+ * Strategies record the block objects they built and the blocks those came
+ * from; the call site translates both into journal sequences, so no strategy
+ * needs to know a recorder exists.
+ */
+interface ContextRewriteDraft {
+  /** Blocks the rewrite removed without putting anything in their place. */
+  readonly droppedBlocks: ContentBlock[]
+  readonly replacements: Array<{
+    readonly block: ContentBlock
+    readonly sources: readonly ContentBlock[]
+  }>
+  detail?: Record<string, unknown>
+  /**
+   * Set when a memoized strategy rebuilt blocks an earlier `context/replace`
+   * already recorded: the fresh objects inherit that event's lineage and
+   * nothing new is emitted.
+   */
+  reuseEventSeq?: number
+}
+
+/** The block {@link prependSyntheticPrefixToFirstUser} derived, when asked. */
+interface SyntheticPrefixRecord {
+  block?: ContentBlock
+  /** The user message the prefix was merged into, absent in the preamble case. */
+  mergedInto?: LLMMessage
+}
+
+function newContextRewriteDraft(): ContextRewriteDraft {
+  return { droppedBlocks: [], replacements: [] }
+}
+
+/** True when a strategy actually rewrote something worth an event. */
+function hasContextRewrite(rewrite: ContextRewriteDraft): boolean {
+  return rewrite.replacements.length > 0 || rewrite.droppedBlocks.length > 0
+}
+
+/** Union of the journal events that produced `blocks`, ascending and unique. */
+function lineageOf(
+  recorder: JournalRecorder,
+  blocks: readonly ContentBlock[],
+): number[] {
+  const seqs = new Set<number>()
+  for (const block of blocks) {
+    for (const seq of recorder.lineageFor(block) ?? []) seqs.add(seq)
+  }
+  return [...seqs].sort((a, b) => a - b)
+}
+
 /**
  * Prepends synthetic framing text to the first user message so we never emit
  * consecutive `user` turns (Bedrock) and summaries do not concatenate onto
  * the original user prompt (direct API). If there is no user message yet,
  * inserts a single assistant text preamble.
+ *
+ * `derived` collects the one block this creates, which the journal records as
+ * the model-visible product of the rewrite that called in here.
  */
 function prependSyntheticPrefixToFirstUser(
   messages: LLMMessage[],
   prefix: string,
+  derived?: SyntheticPrefixRecord,
 ): LLMMessage[] {
   const userIdx = messages.findIndex(m => m.role === 'user')
   if (userIdx < 0) {
-    return [{
-      role: 'assistant',
-      content: [{ type: 'text', text: prefix.trimEnd() }],
-    }, ...messages]
+    const preamble: TextBlock = { type: 'text', text: prefix.trimEnd() }
+    if (derived) derived.block = preamble
+    return [{ role: 'assistant', content: [preamble] }, ...messages]
   }
   const target = messages[userIdx]!
+  const prefixBlock: TextBlock = { type: 'text', text: prefix }
+  if (derived) {
+    derived.block = prefixBlock
+    derived.mergedInto = target
+  }
   const merged: LLMMessage = {
     role: 'user',
-    content: [{ type: 'text', text: prefix }, ...target.content],
+    content: [prefixBlock, ...target.content],
   }
   return [...messages.slice(0, userIdx), merged, ...messages.slice(userIdx + 1)]
 }
@@ -478,6 +572,11 @@ export class AgentRunner implements AgentBackend {
   private summarizeCache: {
     oldSignature: string
     summaryPrefix: string
+    /**
+     * The `context/replace` that first recorded this summary, kept with the
+     * recorder that emitted it so a later run never inherits a foreign seq.
+     */
+    journalReplace?: { recorder: JournalRecorder; seq: number }
   } | null = null
 
   constructor(
@@ -493,7 +592,11 @@ export class AgentRunner implements AgentBackend {
     return JSON.stringify(message)
   }
 
-  private truncateToSlidingWindow(messages: LLMMessage[], maxTurns: number): LLMMessage[] {
+  private truncateToSlidingWindow(
+    messages: LLMMessage[],
+    maxTurns: number,
+    rewrite?: ContextRewriteDraft,
+  ): LLMMessage[] {
     if (maxTurns <= 0) {
       return messages
     }
@@ -537,7 +640,21 @@ export class AgentRunner implements AgentBackend {
     if (droppedTurns > 0) {
       const notice =
         `[Earlier conversation history truncated — ${droppedTurns} turn(s) removed]\n\n`
-      result.push(...prependSyntheticPrefixToFirstUser(kept, notice))
+      const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
+      result.push(...prependSyntheticPrefixToFirstUser(kept, notice, derived))
+      if (rewrite && derived?.block !== undefined) {
+        for (const message of afterFirst.slice(0, keepStartIdx)) {
+          rewrite.droppedBlocks.push(...message.content)
+        }
+        rewrite.replacements.push({
+          block: derived.block,
+          sources: [
+            ...(derived.mergedInto?.content ?? []),
+            ...rewrite.droppedBlocks,
+          ],
+        })
+        rewrite.detail = { droppedTurns }
+      }
       return result
     }
 
@@ -691,6 +808,7 @@ export class AgentRunner implements AgentBackend {
     baseChatOptions: LLMChatOptions,
     turns: number,
     options: RunOptions,
+    rewrite?: ContextRewriteDraft,
   ): Promise<{ messages: LLMMessage[]; usage: TokenUsage }> {
     const estimated = estimateTokens(messages)
     if (estimated <= maxTokens || messages.length < 4) {
@@ -723,10 +841,30 @@ export class AgentRunner implements AgentBackend {
     const oldPortionForSummary = stripImageBlocksForSummary(oldPortion)
     const oldSignature = oldPortionForSummary.map(m => this.serializeMessage(m)).join('\n')
     if (this.summarizeCache !== null && this.summarizeCache.oldSignature === oldSignature) {
+      const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
       const mergedRecent = prependSyntheticPrefixToFirstUser(
         recentPortion,
         `${this.summarizeCache.summaryPrefix}\n\n`,
+        derived,
       )
+      if (rewrite && derived?.block !== undefined) {
+        const recorded = this.summarizeCache.journalReplace
+        if (recorded !== undefined && recorded.recorder === options.journal) {
+          // Same summary, rebuilt as a fresh object: point it at the event that
+          // already carries those bytes instead of recording them twice.
+          rewrite.reuseEventSeq = recorded.seq
+          rewrite.replacements.push({ block: derived.block, sources: [] })
+        } else {
+          rewrite.replacements.push({
+            block: derived.block,
+            sources: oldPortion.flatMap((message) => message.content),
+          })
+          rewrite.detail = {
+            summaryModel: summaryModel ?? this.options.model,
+            cached: true,
+          }
+        }
+      }
       return { messages: [firstUser, ...mergedRecent], usage: ZERO_USAGE }
     }
 
@@ -764,10 +902,22 @@ export class AgentRunner implements AgentBackend {
       : '[Conversation summary unavailable]'
 
     this.summarizeCache = { oldSignature, summaryPrefix }
+    const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined
     const mergedRecent = prependSyntheticPrefixToFirstUser(
       recentPortion,
       `${summaryPrefix}\n\n`,
+      derived,
     )
+    if (rewrite && derived?.block !== undefined) {
+      rewrite.replacements.push({
+        block: derived.block,
+        sources: oldPortion.flatMap((message) => message.content),
+      })
+      rewrite.detail = {
+        summaryModel: summaryOptions.model,
+        usage: { ...summaryResponse.usage },
+      }
+    }
     return {
       messages: [firstUser, ...mergedRecent],
       usage: summaryResponse.usage,
@@ -780,9 +930,13 @@ export class AgentRunner implements AgentBackend {
     baseChatOptions: LLMChatOptions,
     turns: number,
     options: RunOptions,
+    rewrite?: ContextRewriteDraft,
   ): Promise<{ messages: LLMMessage[]; usage: TokenUsage }> {
     if (strategy.type === 'sliding-window') {
-      return { messages: this.truncateToSlidingWindow(messages, strategy.maxTurns), usage: ZERO_USAGE }
+      return {
+        messages: this.truncateToSlidingWindow(messages, strategy.maxTurns, rewrite),
+        usage: ZERO_USAGE,
+      }
     }
 
     if (strategy.type === 'summarize') {
@@ -793,17 +947,33 @@ export class AgentRunner implements AgentBackend {
         baseChatOptions,
         turns,
         options,
+        rewrite,
       )
     }
 
     if (strategy.type === 'compact') {
-      return { messages: this.compactMessages(messages, strategy), usage: ZERO_USAGE }
+      return { messages: this.compactMessages(messages, strategy, rewrite), usage: ZERO_USAGE }
     }
 
     const estimated = estimateTokens(messages)
     const compressed = await strategy.compress(messages, estimated)
     if (!Array.isArray(compressed) || compressed.length === 0) {
       throw new Error('contextStrategy.custom.compress must return a non-empty LLMMessage[]')
+    }
+    if (rewrite) {
+      // A custom function is opaque, so a block it invented is recorded
+      // verbatim with the whole input as its lineage: storing the bytes is what
+      // makes it reproducible. Blocks it passed through keep their own lineage.
+      const inputBlocks = new Set<ContentBlock>()
+      for (const message of messages) {
+        for (const block of message.content) inputBlocks.add(block)
+      }
+      const sources = [...inputBlocks]
+      for (const message of compressed) {
+        for (const block of message.content) {
+          if (!inputBlocks.has(block)) rewrite.replacements.push({ block, sources })
+        }
+      }
     }
     return { messages: compressed, usage: ZERO_USAGE }
   }
@@ -905,6 +1075,35 @@ export class AgentRunner implements AgentBackend {
     let pendingToolResultText = restored?.pendingToolResultText
     let loopWarned = restored?.loopWarned ?? false
 
+    // --- Run journal (absent unless the caller configured one) -------------
+    const journal = options.journal
+    const journalScope = journal ? this.journalScope(options) : undefined
+    /** Turn awaiting a `turn/end`, so every exit path closes exactly one. */
+    let journalOpenTurn: number | undefined
+    let journalAssistantSeq: number | undefined
+    const journalToolResultSeqs = new Map<string, number>()
+    const emitTurnEnd = (outcome: TurnOutcome): void => {
+      if (!journal || journalOpenTurn === undefined) return
+      journal.emit({ type: 'turn/end', ...journalScope, turn: journalOpenTurn, outcome })
+      journalOpenTurn = undefined
+    }
+    if (journal && restored === undefined) {
+      // A restored run's conversation was already journaled by the attempt that
+      // built it; re-emitting it here would duplicate the events its seqs point
+      // at. Its blocks therefore carry no lineage until checkpoint-restored
+      // lineage lands.
+      for (const message of conversationMessages) {
+        const seq = message.role === 'user'
+          ? journal.emit({
+              type: 'user/message', ...journalScope, message, origin: 'input',
+            })
+          : journal.emit({
+              type: 'assistant/message', ...journalScope, message, origin: 'seed',
+            })
+        journal.registerMessage(message, [seq])
+      }
+    }
+
     // Build the stable LLM options once; model / tokens / temp don't change.
     // resolveTools() returns LLMToolDef[] with default-deny + filtering applied.
     const toolDefs = this.resolveTools()
@@ -926,6 +1125,21 @@ export class AgentRunner implements AgentBackend {
         assignee,
         phase,
         conversationMessages: [...conversationMessages],
+        // Block identity does not survive serialization, so the lineage the
+        // tracker holds is flattened positionally for a later restore.
+        //
+        // `journalSeq` is this task's own high-water mark, read here rather
+        // than after the save: every event this runner emits precedes the state
+        // mutation it describes, so the value at build time is exactly the
+        // boundary between the task's events this entry already reflects and
+        // the ones a tail replay still has to fold.
+        ...(journal
+          ? {
+              conversationLineage: conversationMessages.map((message) =>
+                message.content.map((block) => journal.lineageFor(block))),
+              journalSeq: journal.lastSeq,
+            }
+          : {}),
         messages: [...newMessages],
         tokenUsage: totalUsage,
         toolCalls: [...allToolCalls],
@@ -968,6 +1182,18 @@ export class AgentRunner implements AgentBackend {
       abortSignal: effectiveAbortSignal,
     }
 
+    // The system prompt and tool definitions are caller-supplied config, not
+    // conversation state, so `llm/request` records digests of them once rather
+    // than their bytes on every turn.
+    const journalRequestConfig = journal
+      ? {
+          ...(this.options.systemPrompt !== undefined
+            ? { systemPromptHash: canonicalJsonHash(this.options.systemPrompt) }
+            : {}),
+          ...(toolDefs.length > 0 ? { toolsHash: canonicalJsonHash(toolDefs) } : {}),
+        }
+      : undefined
+
     // Loop detection state — only allocated when configured.
     const detector = this.options.loopDetection
       ? new LoopDetector(this.options.loopDetection)
@@ -1003,6 +1229,23 @@ export class AgentRunner implements AgentBackend {
             options,
             runShellExecutor,
           )
+          if (journal) {
+            for (const pending of pendingToolCalls) {
+              // Restored commits already happened, and a re-entered round
+              // (an uncommitted sibling) must not announce a call twice.
+              if (pending.commit) continue
+              if (journal.toolCallSeq(pending.call.id) !== undefined) continue
+              const callSeq = journal.emit({
+                type: 'tool/call',
+                ...journalScope,
+                call: pending.call,
+                ...(journalAssistantSeq !== undefined
+                  ? { sourceEventSeqs: [journalAssistantSeq] }
+                  : {}),
+              })
+              journal.recordToolCallSeq(pending.call.id, callSeq)
+            }
+          }
           const executions = await Promise.all(pendingToolCalls.map(async (pending, index) => {
             if (pending.commit) {
               return { commit: pending.commit, shouldCommit: true } satisfies ToolExecution
@@ -1058,6 +1301,20 @@ export class AgentRunner implements AgentBackend {
                 await options.onApprovalConsumed?.(pending.approvalRequest.id)
               }
               pendingToolCalls[index] = { call: pending.call, commit: execution.commit }
+              if (journal) {
+                const callSeq = journal.toolCallSeq(pending.call.id)
+                journalToolResultSeqs.set(pending.call.id, journal.emit({
+                  type: 'tool/result',
+                  ...journalScope,
+                  toolCallId: pending.call.id,
+                  result: execution.commit.result,
+                  record: execution.commit.record,
+                  ...(execution.commit.delegationUsage !== undefined
+                    ? { delegationUsage: execution.commit.delegationUsage }
+                    : {}),
+                  ...(callSeq !== undefined ? { sourceEventSeqs: [callSeq] } : {}),
+                }))
+              }
               // Await the checkpoint before any fallible result callback so a
               // callback failure cannot turn a returned side effect into a
               // missing commit that restore would execute again.
@@ -1075,6 +1332,7 @@ export class AgentRunner implements AgentBackend {
           )
           if (suspendedExecutions.length > 0) {
             suspended = true
+            emitTurnEnd('suspended')
             await persistCheckpoint(true)
             break
           }
@@ -1108,6 +1366,21 @@ export class AgentRunner implements AgentBackend {
             role: 'user',
             content: toolResultBlocks,
           }
+          if (journal) {
+            // One event on the assembled message, so the injected
+            // `pendingToolResultText` warning block is recorded verbatim too.
+            const sourceEventSeqs = executions
+              .map((execution) => journalToolResultSeqs.get(execution.commit.result.tool_use_id))
+              .filter((seq): seq is number => seq !== undefined)
+            const messageSeq = journal.emit({
+              type: 'user/message',
+              ...journalScope,
+              message: toolResultMessage,
+              origin: 'tool_results',
+              ...(sourceEventSeqs.length > 0 ? { sourceEventSeqs } : {}),
+            })
+            journal.registerMessage(toolResultMessage, [messageSeq])
+          }
           conversationMessages.push(toolResultMessage)
           newMessages.push(toolResultMessage)
           options.onMessage?.(toolResultMessage)
@@ -1119,6 +1392,7 @@ export class AgentRunner implements AgentBackend {
             // later restore re-executes only the call that never committed.
             if (effectiveAbortSignal?.aborted) {
               aborted = true
+              emitTurnEnd('aborted')
               break
             }
             continue
@@ -1143,6 +1417,7 @@ export class AgentRunner implements AgentBackend {
           }
 
           phase = budgetExceeded ? 'completed' : 'awaiting_model'
+          emitTurnEnd(budgetExceeded ? 'budget_exceeded' : 'tool_use')
           await persistCheckpoint()
           if (phase === 'completed') break
           continue
@@ -1160,29 +1435,62 @@ export class AgentRunner implements AgentBackend {
         }
 
         const nextTurn = turns + 1
+        if (journal) {
+          journalOpenTurn = nextTurn
+          journal.emit({ type: 'turn/start', ...journalScope, turn: nextTurn })
+        }
 
         // Compress consumed tool results before context strategy (lightweight,
         // no LLM calls) so the strategy operates on already-reduced messages.
         if (this.options.compressToolResults && nextTurn > 1) {
-          conversationMessages = this.compressConsumedToolResults(conversationMessages)
+          const rewrite = journal ? newContextRewriteDraft() : undefined
+          conversationMessages = this.compressConsumedToolResults(conversationMessages, rewrite)
+          if (journal && rewrite && hasContextRewrite(rewrite)) {
+            this.recordContextRewrite(journal, journalScope, 'compress-tool-results', rewrite)
+          }
         }
 
         // Optionally compact context before each LLM call.
         if (this.options.contextStrategy) {
+          const strategyKind = this.options.contextStrategy.type
+          const rewrite = journal ? newContextRewriteDraft() : undefined
           const compacted = await this.applyContextStrategy(
             conversationMessages,
             this.options.contextStrategy,
             baseChatOptions,
             nextTurn,
             options,
+            rewrite,
           )
           conversationMessages = compacted.messages
           totalUsage = addTokenUsage(totalUsage, compacted.usage)
+          if (journal && rewrite && hasContextRewrite(rewrite)) {
+            const seq = this.recordContextRewrite(journal, journalScope, strategyKind, rewrite)
+            // The memo is keyed on the old portion, so a later cache hit rebuilds
+            // equal blocks; remembering the event lets them reuse it.
+            if (strategyKind === 'summarize' && this.summarizeCache !== null) {
+              this.summarizeCache.journalReplace = { recorder: journal, seq }
+            }
+          }
         }
 
         // ------------------------------------------------------------------
         // Step 1: Call the LLM and collect the full response for this turn.
         // ------------------------------------------------------------------
+        // The journal's model-visible boundary is this conversation, recorded
+        // per block. Only the `'turn'` call is journaled: the summarize
+        // strategy's own `'summary'` call is an implementation detail of the
+        // rewrite it produces, not a turn of this conversation.
+        const llmRequestSeq = journal
+          ? journal.emit({
+              type: 'llm/request',
+              ...journalScope,
+              turn: nextTurn,
+              model: baseChatOptions.model,
+              blocks: this.describeRequestBlocks(journal, conversationMessages),
+              ...journalRequestConfig,
+            })
+          : undefined
         const response = await this.tracedChat(
           conversationMessages, baseChatOptions, options, 'turn', nextTurn,
         )
@@ -1196,6 +1504,21 @@ export class AgentRunner implements AgentBackend {
         const assistantMessage: LLMMessage = {
           role: 'assistant',
           content: response.content,
+        }
+        if (journal) {
+          journalAssistantSeq = journal.emit({
+            type: 'assistant/message',
+            ...journalScope,
+            message: assistantMessage,
+            origin: 'response',
+            usage: response.usage,
+            model: response.model,
+            stopReason: response.stop_reason,
+            ...(llmRequestSeq !== undefined ? { sourceEventSeqs: [llmRequestSeq] } : {}),
+          })
+          // `response.content` is pushed by reference, so registering these
+          // block objects is what later requests match against.
+          journal.registerBlocks(response.content, [journalAssistantSeq])
         }
 
         conversationMessages.push(assistantMessage)
@@ -1254,6 +1577,7 @@ export class AgentRunner implements AgentBackend {
               loopDetected = true
               finalOutput = turnText
               phase = 'completed'
+              emitTurnEnd('loop_detected')
               await persistCheckpoint()
               break
             } else if (action === 'warn' || action === 'inject') {
@@ -1262,6 +1586,7 @@ export class AgentRunner implements AgentBackend {
                 loopDetected = true
                 finalOutput = turnText
                 phase = 'completed'
+                emitTurnEnd('loop_detected')
                 await persistCheckpoint()
                 break
               }
@@ -1284,6 +1609,7 @@ export class AgentRunner implements AgentBackend {
         if (toolUseBlocks.length === 0) {
           if (budgetExceeded) {
             phase = 'completed'
+            emitTurnEnd('budget_exceeded')
             await persistCheckpoint()
             break
           }
@@ -1292,10 +1618,22 @@ export class AgentRunner implements AgentBackend {
               role: 'user',
               content: [{ type: 'text', text: loopWarningText(injectWarningKind) }],
             }
+            if (journal) {
+              journal.registerMessage(warningMessage, [journal.emit({
+                type: 'user/message',
+                ...journalScope,
+                message: warningMessage,
+                origin: 'input',
+                ...(journalAssistantSeq !== undefined
+                  ? { sourceEventSeqs: [journalAssistantSeq] }
+                  : {}),
+              })])
+            }
             conversationMessages.push(warningMessage)
             newMessages.push(warningMessage)
             options.onMessage?.(warningMessage)
             phase = 'awaiting_model'
+            emitTurnEnd('loop_detected')
             await persistCheckpoint()
             continue
           }
@@ -1311,6 +1649,7 @@ export class AgentRunner implements AgentBackend {
           // No tools requested — this is the terminal assistant turn.
           finalOutput = turnText
           phase = 'completed'
+          emitTurnEnd('completed')
           await persistCheckpoint()
           break
         }
@@ -1331,6 +1670,7 @@ export class AgentRunner implements AgentBackend {
       }
     } catch (err) {
       streamError = err instanceof Error ? err : new Error(String(err))
+      emitTurnEnd('error')
     } finally {
       try {
         await runShellExecutor?.release()
@@ -1387,6 +1727,85 @@ export class AgentRunner implements AgentBackend {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Emit one `context/replace` for a rewrite and give every block it derived a
+   * lineage naming that event.
+   *
+   * Source blocks are translated into sequences here rather than inside the
+   * strategies, which keeps every strategy free of journal knowledge.
+   */
+  private recordContextRewrite(
+    recorder: JournalRecorder,
+    scope: JournalScope | undefined,
+    strategy: ContextStrategyKind,
+    rewrite: ContextRewriteDraft,
+  ): number {
+    const derivedBlocks = rewrite.replacements.map((replacement) => replacement.block)
+    if (rewrite.reuseEventSeq !== undefined) {
+      recorder.registerBlocks(derivedBlocks, [rewrite.reuseEventSeq])
+      return rewrite.reuseEventSeq
+    }
+    const seq = recorder.emit({
+      type: 'context/replace',
+      ...scope,
+      strategy,
+      ...(rewrite.droppedBlocks.length > 0
+        ? { dropped: { sourceEventSeqs: lineageOf(recorder, rewrite.droppedBlocks) } }
+        : {}),
+      replacements: rewrite.replacements.map((replacement) => ({
+        sourceEventSeqs: lineageOf(recorder, replacement.sources),
+        block: replacement.block,
+      })),
+      ...(rewrite.detail !== undefined ? { detail: rewrite.detail } : {}),
+    })
+    recorder.registerBlocks(derivedBlocks, [seq])
+    return seq
+  }
+
+  /** Scoping fields stamped on every journal event this runner emits. */
+  private journalScope(options: RunOptions): JournalScope {
+    const agentName = options.traceAgent ?? this.options.agentName
+    return {
+      ...(options.taskId !== undefined ? { taskId: options.taskId } : {}),
+      ...(agentName !== undefined ? { agentName } : {}),
+      ...(options.traceSpan ? { spanId: options.traceSpan.spanId } : {}),
+    }
+  }
+
+  /**
+   * Describe every block the model is about to see, with the journal event it
+   * came from.
+   *
+   * A block with no recorded lineage is normally recorded as the gap it is
+   * (`sourceEventSeqs: null`); under `enforceLineage` it throws instead, at the
+   * exact request that would otherwise have hidden it.
+   */
+  private describeRequestBlocks(
+    recorder: JournalRecorder,
+    messages: readonly LLMMessage[],
+  ): RequestBlockDescriptor[] {
+    const descriptors: RequestBlockDescriptor[] = []
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const message = messages[messageIndex]!
+      for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+        const block = message.content[blockIndex]!
+        const sourceEventSeqs = recorder.lineageFor(block)
+        if (sourceEventSeqs === null && recorder.enforceLineage) {
+          throw new JournalLineageError(messageIndex, blockIndex, block.type)
+        }
+        descriptors.push({
+          messageIndex,
+          blockIndex,
+          role: message.role,
+          blockType: block.type,
+          sourceEventSeqs,
+          contentHash: recorder.hashFor(block),
+        })
+      }
+    }
+    return descriptors
+  }
 
   private async executeToolCall(
     block: ToolUseBlock,
@@ -1522,10 +1941,19 @@ export class AgentRunner implements AgentBackend {
       const classified = isError
         ? classifyRunFailure(new Error(recordedOutput), { kind: 'tool' })
         : undefined
+      // Tool input/output reach v2 spans only under an explicit capture
+      // policy. `SensitiveDataProcessor` still redacts and truncates these
+      // values; serializing here is skipped entirely when the policy is off.
+      const contentAttributes = options.traceRuntime?.capturesToolIO
+        ? {
+            'oma.tool.input': stringifyToolContent(redactSensitiveObject(block.input)),
+            'oma.tool.output': redactSensitiveText(summarizeToolResultContent(modelOutput)),
+          }
+        : undefined
       toolSpan.end({
         status: classified?.status ?? { code: 'ok' },
         ...(classified ? { error: classified.errorInfo } : {}),
-        attributes: { 'oma.tool.is_error': isError },
+        attributes: { 'oma.tool.is_error': isError, ...contentAttributes },
         ...(legacyEvent ? { legacyEvent } : {}),
       })
       toolSpan.ensureEnded()
@@ -1603,6 +2031,7 @@ export class AgentRunner implements AgentBackend {
   private compactMessages(
     messages: LLMMessage[],
     strategy: Extract<ContextStrategy, { type: 'compact' }>,
+    rewrite?: ContextRewriteDraft,
   ): LLMMessage[] {
     const estimated = estimateTokens(messages)
     if (estimated <= strategy.maxTokens) {
@@ -1668,15 +2097,19 @@ export class AgentRunner implements AgentBackend {
           // Long text blocks: truncate with excerpt.
           if (block.type === 'text' && block.text.length >= minTextBlockChars) {
             msgChanged = true
-            return {
+            const excerpt: TextBlock = {
               type: 'text',
               text: `${block.text.slice(0, textBlockExcerptChars)}... [truncated — ${block.text.length} chars total]`,
-            } satisfies TextBlock
+            }
+            rewrite?.replacements.push({ block: excerpt, sources: [block] })
+            return excerpt
           }
           // Image blocks in old turns: replace with marker.
           if (block.type === 'image') {
             msgChanged = true
-            return { type: 'text', text: '[Image compacted]' } satisfies TextBlock
+            const marker: TextBlock = { type: 'text', text: '[Image compacted]' }
+            rewrite?.replacements.push({ block: marker, sources: [block] })
+            return marker
           }
           return block
         }
@@ -1704,11 +2137,13 @@ export class AgentRunner implements AgentBackend {
           const sizeDescription = typeof block.content === 'string'
             ? `${contentSize} chars`
             : `${contentSize} estimated chars`
-          return {
+          const compacted: ToolResultBlock = {
             type: 'tool_result',
             tool_use_id: block.tool_use_id,
             content: `[Tool result: ${toolName} — ${sizeDescription}, compacted]`,
-          } satisfies ToolResultBlock
+          }
+          rewrite?.replacements.push({ block: compacted, sources: [block] })
+          return compacted
         }
         return block
       })
@@ -1734,7 +2169,10 @@ export class AgentRunner implements AgentBackend {
    *
    * Error results and results shorter than `minChars` are never compressed.
    */
-  private compressConsumedToolResults(messages: LLMMessage[]): LLMMessage[] {
+  private compressConsumedToolResults(
+    messages: LLMMessage[],
+    rewrite?: ContextRewriteDraft,
+  ): LLMMessage[] {
     const config = this.options.compressToolResults
     if (!config) return messages
 
@@ -1799,11 +2237,13 @@ export class AgentRunner implements AgentBackend {
         const sizeDescription = typeof block.content === 'string'
           ? `${contentSize} chars`
           : `${contentSize} estimated chars`
-        return {
+        const compressed: ToolResultBlock = {
           type: 'tool_result',
           tool_use_id: block.tool_use_id,
           content: `[Tool output compressed — ${sizeDescription}, already processed]`,
-        } satisfies ToolResultBlock
+        }
+        rewrite?.replacements.push({ block: compressed, sources: [block] })
+        return compressed
       })
 
       if (msgChanged) {

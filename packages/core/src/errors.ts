@@ -2,7 +2,7 @@
  * @fileoverview Framework-specific error classes.
  */
 
-import type { SemanticRoutingAssessment, TaskRequirementIssue } from './types.js'
+import type { ContentBlock, SemanticRoutingAssessment, TaskRequirementIssue } from './types.js'
 
 /**
  * Raised before task execution when a task has no eligible agent or its
@@ -229,6 +229,32 @@ export class UnsupportedToolResultContentError extends Error {
 }
 
 /**
+ * Raised before an adapter call when `enforceLineage` is on and a model-visible
+ * block cannot name the journal event it came from.
+ *
+ * Failing here rather than at verification time turns "the model saw something
+ * the journal cannot explain" into a run-time error at the exact request that
+ * would have hidden it. Enforcement is off by default; see
+ * `docs/run-journal.md` for which configurations currently satisfy it.
+ */
+export class JournalLineageError extends Error {
+  readonly code = 'MISSING_CONTEXT_REPLACE'
+
+  constructor(
+    readonly messageIndex: number,
+    readonly blockIndex: number,
+    readonly blockType: ContentBlock['type'],
+  ) {
+    super(
+      `Journal lineage is missing for the ${blockType} block at message ` +
+        `${messageIndex}, block ${blockIndex}: it is model-visible but names no ` +
+        'journal event that reproduces it.',
+    )
+    this.name = 'JournalLineageError'
+  }
+}
+
+/**
  * Read an HTTP-style status code off an unknown error, if present. Provider
  * SDK errors (`Anthropic.APIError`, `OpenAI.APIError`) expose it as `.status`;
  * some libraries use `.statusCode`. Returns `undefined` for network/unknown
@@ -276,6 +302,9 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof UnsupportedToolCallError) return false
   if (error instanceof EgressPolicyError) return false
   if (error instanceof UnsupportedToolResultContentError) return false
+  // A lineage gap is a property of the conversation, not of the transport:
+  // the same request would fail the same way on every attempt.
+  if (error instanceof JournalLineageError) return false
   if (error instanceof LLMCallTimeoutError) return true
   if (error instanceof RoutingTimeoutError) return true
   if (error instanceof RoutingProfilerFailedError) return false

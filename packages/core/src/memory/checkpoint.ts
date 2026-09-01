@@ -109,6 +109,7 @@ export class Checkpoint {
       && snapshot['version'] !== 2
       && snapshot['version'] !== 3
       && snapshot['version'] !== 4
+      && snapshot['version'] !== 5
     ) return false
     if (
       snapshot['mode'] !== 'runTeam'
@@ -135,7 +136,11 @@ export class Checkpoint {
       if (typeof record['lastRootSpanId'] !== 'string') return false
     }
 
-    if (snapshot['version'] === 3 || snapshot['version'] === 4) {
+    if (
+      snapshot['version'] === 3
+      || snapshot['version'] === 4
+      || snapshot['version'] === 5
+    ) {
       const inFlightTasks = snapshot['inFlightTasks']
       if (!Array.isArray(inFlightTasks)) return false
       const taskIds = new Set<string>()
@@ -146,7 +151,18 @@ export class Checkpoint {
       }
     }
 
-    if (snapshot['version'] === 4) {
+    if (snapshot['version'] === 5) {
+      const watermark = snapshot['journalWatermarkSeq']
+      if (!Number.isInteger(watermark) || (watermark as number) < 0) return false
+      const journalRef = snapshot['journalRef']
+      if (journalRef !== undefined) {
+        if (!Checkpoint.isRecord(journalRef)) return false
+        if (typeof journalRef['kind'] !== 'string') return false
+        if (journalRef['path'] !== undefined && typeof journalRef['path'] !== 'string') return false
+      }
+    }
+
+    if (snapshot['version'] === 4 || snapshot['version'] === 5) {
       const pendingApprovals = snapshot['pendingApprovals']
       const approvalDecisions = snapshot['approvalDecisions']
       const identity = snapshot['identity'] as Record<string, unknown>
@@ -214,6 +230,14 @@ export class Checkpoint {
       && state['phase'] !== 'completed'
     ) return false
     if (!Array.isArray(state['conversationMessages'])) return false
+    if (!Checkpoint.isConversationLineage(
+      state['conversationLineage'],
+      state['conversationMessages'].length,
+    )) return false
+    if (
+      state['journalSeq'] !== undefined
+      && (!Number.isInteger(state['journalSeq']) || (state['journalSeq'] as number) < 0)
+    ) return false
     if (!Array.isArray(state['messages'])) return false
     if (!Array.isArray(state['toolCalls'])) return false
     if (!Number.isInteger(state['turns']) || (state['turns'] as number) < 0) return false
@@ -237,6 +261,25 @@ export class Checkpoint {
     }
     if (state['phase'] === 'completed' && typeof state['finalOutput'] !== 'string') return false
     if (state['phase'] !== 'completed' && state['finalOutput'] !== undefined) return false
+    return true
+  }
+
+  /**
+   * Optional per-block journal lineage, positional against the conversation.
+   * A length mismatch is corruption rather than an older schema: the field is
+   * only ever written together with the messages it indexes.
+   */
+  private static isConversationLineage(value: unknown, messageCount: number): boolean {
+    if (value === undefined) return true
+    if (!Array.isArray(value) || value.length !== messageCount) return false
+    for (const perMessage of value) {
+      if (!Array.isArray(perMessage)) return false
+      for (const seqs of perMessage) {
+        if (seqs === null) continue
+        if (!Array.isArray(seqs)) return false
+        if (!seqs.every(seq => Number.isInteger(seq) && (seq as number) > 0)) return false
+      }
+    }
     return true
   }
 

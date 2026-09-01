@@ -6,6 +6,7 @@
  */
 
 import type { ZodSchema } from 'zod'
+import type { RunJournalConfig } from './journal/journal.js'
 import type { SupportedProvider } from './llm/adapter.js'
 import type {
   SchedulingStrategy,
@@ -306,6 +307,12 @@ export interface RunIdentityOptions {
 /** Per-call options for {@link OpenMultiAgent.runAgent}. */
 export interface RunAgentOptions extends RunIdentityOptions {
   readonly abortSignal?: AbortSignal
+  /**
+   * Opt-in run event journal for this call. Overrides
+   * {@link OrchestratorConfig.journal}; `false` disables journaling for this
+   * run only. See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig | false
 }
 
 export type RunStatusCode =
@@ -1600,6 +1607,12 @@ export interface RunTasksOptions extends RunIdentityOptions {
    * a frozen plan remains an exact replay contract.
    */
   readonly recovery?: RecoveryOptions
+  /**
+   * Opt-in run event journal for this call. Overrides
+   * {@link OrchestratorConfig.journal}; `false` disables journaling for this
+   * run only. Inherited by {@link RestoreOptions}. See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig | false
 }
 
 /**
@@ -2323,6 +2336,13 @@ export interface OrchestratorConfig {
   readonly evaluation?: import('./eval/online.js').OnlineEvaluationConfig
   /** Observability v2 sinks. User code owns forceFlush/shutdown lifecycle. */
   readonly observability?: import('./observability/sink.js').ObservabilityConfig
+  /**
+   * Default opt-in run event journal. Off unless set; per-call `journal`
+   * options override it, and `false` disables it for a single run. The caller
+   * supplies and owns the backend instance — the framework never closes it.
+   * See `docs/run-journal.md`.
+   */
+  readonly journal?: RunJournalConfig
   readonly onTrace?: (event: TraceEvent) => void | Promise<void>
   /**
    * Optional per-call tool gate inherited by agents that do not define their own
@@ -2579,6 +2599,22 @@ export interface InFlightTaskCheckpoint {
   readonly phase: 'awaiting_model' | 'executing_tools' | 'completed'
   /** Full model context, including the task's initial user message. */
   readonly conversationMessages: readonly LLMMessage[]
+  /**
+   * Run-journal lineage for {@link conversationMessages}, positional: one entry
+   * per message, then one per block, holding the events that produced it or
+   * `null` when none was recorded. Written only by journaled runs, so v3 and v4
+   * snapshots — and any journal-off run — omit it.
+   */
+  readonly conversationLineage?: ReadonlyArray<ReadonlyArray<readonly number[] | null>>
+  /**
+   * Run-journal high-water mark for **this task**, captured while the entry was
+   * built. Every one of the task's events at or below it is reflected here and
+   * every one above it is not, which is what a tail replay needs: a snapshot
+   * refreshes each entry at that task's own boundaries, not all of them at
+   * once, so the snapshot-wide watermark says nothing about how fresh any
+   * individual entry is. Written only by journaled runs.
+   */
+  readonly journalSeq?: number
   /** Messages produced by the runner, excluding the initial user message. */
   readonly messages: readonly LLMMessage[]
   readonly tokenUsage: TokenUsage
@@ -2642,7 +2678,7 @@ export interface CheckpointSnapshotV3 extends CheckpointSnapshotBase {
   readonly inFlightTasks: readonly InFlightTaskCheckpoint[]
 }
 
-/** Current checkpoint schema with durable approval continuation state. */
+/** Checkpoint schema with durable approval continuation state. */
 export interface CheckpointSnapshotV4 extends CheckpointSnapshotBase {
   readonly version: 4
   readonly identity: CheckpointRunIdentity
@@ -2653,12 +2689,46 @@ export interface CheckpointSnapshotV4 extends CheckpointSnapshotBase {
   readonly approvalDecisions: readonly ApprovalDecisionRecord[]
 }
 
+/**
+ * Informational pointer to a run journal, produced by `RunJournal.describe()`
+ * and persisted with a v5 snapshot. Never resolved on restore — the caller
+ * supplies the journal instance, exactly as it supplies the store.
+ */
+export interface RunJournalRef {
+  readonly kind: string
+  readonly path?: string
+}
+
+/**
+ * Current checkpoint schema: v4 plus the run-journal watermark.
+ *
+ * Written only when the run has journaling enabled, so an unjournaled run keeps
+ * producing byte-identical v4 snapshots.
+ */
+export interface CheckpointSnapshotV5 extends CheckpointSnapshotBase {
+  readonly version: 5
+  readonly identity: CheckpointRunIdentity
+  readonly inFlightTasks: readonly InFlightTaskCheckpoint[]
+  /** Requests whose reviewed boundary has not yet been consumed by execution. */
+  readonly pendingApprovals: readonly ApprovalRequest[]
+  /** Durable decisions already consumed or ready to be consumed by this run. */
+  readonly approvalDecisions: readonly ApprovalDecisionRecord[]
+  /**
+   * Highest journal sequence this snapshot folds, captured while it was built.
+   * Restore replays the journal from `journalWatermarkSeq + 1`.
+   */
+  readonly journalWatermarkSeq: number
+  /** Where the events live. Informational; restore never resolves it. */
+  readonly journalRef?: RunJournalRef
+}
+
 /** Full persisted checkpoint for a task-based run. */
 export type CheckpointSnapshot =
   | CheckpointSnapshotV1
   | CheckpointSnapshotV2
   | CheckpointSnapshotV3
   | CheckpointSnapshotV4
+  | CheckpointSnapshotV5
 
 /**
  * Optional overrides for the temporary coordinator agent created by `runTeam`.

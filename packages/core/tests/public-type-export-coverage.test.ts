@@ -30,6 +30,7 @@ const ANCHORS = [
   'LLMChatOptions',
   'LLMStreamOptions',
   'CheckpointSnapshotV4',
+  'CheckpointSnapshotV5',
   'AgentRunResult',
   'TeamRunResult',
 ]

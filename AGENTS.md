@@ -98,6 +98,7 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | Providers, environment variables, local servers, and AI SDK | [docs/providers.md](docs/providers.md) |
 | Shared memory and custom stores | [docs/shared-memory.md](docs/shared-memory.md) |
 | Checkpoint and restore | [docs/checkpoint.md](docs/checkpoint.md) |
+| Run event journal, lineage, and the model-visible boundary | [docs/run-journal.md](docs/run-journal.md) |
 | Tracing, stores, progress, Run Viewer, privacy, and OpenTelemetry | [docs/observability.md](docs/observability.md) |
 | Evaluation, scorers, stores, reports, sampling, and gates | [docs/evaluation.md](docs/evaluation.md) |
 | CLI commands and JSON schemas | [docs/cli.md](docs/cli.md) |

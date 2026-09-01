@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 1.17.0 - 2026-08-28
+
+### Added
+
+- Added an opt-in append-only run event journal (RunEvent vocabulary,
+  InMemoryRunJournal, JsonlRunJournal) that records every adapter call and the
+  per-block lineage of what the model saw.
+- Added verifyRun() to cold-verify a finished run journal, proving model-visible
+  blocks are reproducible from the events they name.
+- Added journal-watermarked checkpoint schema v5 for journaled runs; v1–v4
+  snapshots keep loading and unjournaled runs keep writing byte-identical v4
+  snapshots.
+- Added JournalLineageError and the enforceLineage switch; built-in context
+  strategies now emit context/replace events for every persistent rewrite.
+- Added per-call journal options to runAgent/runTasks options and
+  OrchestratorConfig, off by default with best-effort appends that never fail
+  the run.
+
+### Changed
+
+- Journaled restores now replay the journal tail after the stalest per-task
+  watermark, re-anchoring in-flight state and replaying committed tool results
+  that reached the journal but not the checkpoint.
+
+### Fixed
+
+- Aligned JSON Schema required fields with Zod validation.
+
+### Compatibility
+
+- Run journaling and checkpoint v5 are opt-in and additive: no public export
+  was removed or narrowed, and a run that leaves journaling off still writes
+  byte-identical v4 snapshots.
+- Generated JSON Schema for tool parameters now derives `required` from Zod's
+  own optionality check rather than the declared wrapper type. Three property
+  shapes change as a result: `.nullable()` becomes required, while `z.any()`
+  and `z.unknown()` stop being required. Built-in tools are unaffected, and
+  MCP tools forward the server's own schema, so this reaches custom tools that
+  use those shapes in a parameter position.
+
 ## 1.16.1 - 2026-08-21
 
 ### Added

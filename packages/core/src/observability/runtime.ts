@@ -81,6 +81,13 @@ function safeEmit(sink: TraceSink | undefined, record: TraceRecord): void {
 export class TraceRuntime {
   readonly identity: RunIdentity
   readonly root: TraceSpan
+  /**
+   * True when the configured capture policy opts into tool input/output.
+   * Instrumentation sites read this before serializing content they would
+   * otherwise build and immediately discard; `SensitiveDataProcessor` still
+   * performs the authoritative filtering and redaction.
+   */
+  readonly capturesToolIO: boolean
   private sequence = 0
   private readonly sink?: TraceSink
 
@@ -90,8 +97,10 @@ export class TraceRuntime {
     legacyCallback?: (event: TraceEvent) => void | Promise<void>,
     sink?: TraceSink,
     rootAttributes: Readonly<Record<string, TraceAttributeValue>> = {},
+    capturesToolIO = false,
   ) {
     this.identity = identity
+    this.capturesToolIO = capturesToolIO
     const legacySink = legacyCallback && legacyCallback !== LEGACY_TRACE_METADATA_ONLY
       ? new LegacyCallbackTraceSink(legacyCallback)
       : undefined
@@ -258,8 +267,9 @@ export function createTraceRuntime(
   observer?: TraceRecordObserver,
   sink?: TraceSink,
   rootAttributes?: Readonly<Record<string, TraceAttributeValue>>,
+  capturesToolIO?: boolean,
 ): TraceRuntime | undefined {
   return legacyCallback || observer || sink
-    ? new TraceRuntime(identity, observer, legacyCallback, sink, rootAttributes)
+    ? new TraceRuntime(identity, observer, legacyCallback, sink, rootAttributes, capturesToolIO)
     : undefined
 }
