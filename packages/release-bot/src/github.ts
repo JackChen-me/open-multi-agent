@@ -33,6 +33,8 @@ export interface GitHubClient {
   createPullRequest(input: CreatePullRequestInput): Promise<GitHubPullRequest>
   getReleaseByTag(tag: string): Promise<GitHubRelease | null>
   createRelease(input: CreateReleaseInput): Promise<GitHubRelease>
+  /** The GitHub login linked to a commit, or null when no account claims it. */
+  getCommitAuthorLogin(sha: string): Promise<string | null>
 }
 
 interface PullResponse {
@@ -51,6 +53,10 @@ interface ReleaseResponse {
 
 interface RefResponse {
   object: { sha: string }
+}
+
+interface CommitResponse {
+  author: { login: string } | null
 }
 
 export class GitHubApiClient implements GitHubClient {
@@ -131,6 +137,16 @@ export class GitHubApiClient implements GitHubClient {
       }),
     })
     return mapRelease(release)
+  }
+
+  async getCommitAuthorLogin(sha: string): Promise<string | null> {
+    const response = await this.rawRequest(
+      `/repos/${this.repository}/commits/${encodeURIComponent(sha)}`,
+    )
+    if (response.status === 404) return null
+    if (!response.ok) await throwGitHubError(response)
+    // A commit whose email is not linked to any account has a null author.
+    return (await response.json() as CommitResponse).author?.login ?? null
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {

@@ -84,20 +84,37 @@ function isTokenUsageAttribute(key: string): boolean {
   return key.startsWith('oma.usage.') && (key.endsWith('_tokens') || key.endsWith('.tokens'))
 }
 
-/** OMA content is never exported by this package; only an explicit safe metadata allowlist crosses the boundary. */
-export function isSafeOmaAttribute(key: string): boolean {
+/**
+ * Content attributes that core only produces under an explicit
+ * `observability.capture` policy, and that this package forwards only when the
+ * application also opts in with `contentCapture: { mode: 'upstream-policy' }`.
+ * Both opt-ins are required; neither alone exports content.
+ */
+const UPSTREAM_POLICY_CONTENT_ATTRIBUTES = new Set([
+  'oma.tool.input',
+  'oma.tool.output',
+])
+
+/**
+ * OMA content crosses this boundary only through the safe metadata allowlist,
+ * or through `UPSTREAM_POLICY_CONTENT_ATTRIBUTES` when the caller has opted
+ * into the upstream capture policy.
+ */
+export function isSafeOmaAttribute(key: string, allowUpstreamContent = false): boolean {
   if (!key.startsWith('oma.')) return false
   if (isTokenUsageAttribute(key)) return true
+  if (allowUpstreamContent && UPSTREAM_POLICY_CONTENT_ATTRIBUTES.has(key)) return true
   if (CONTENT_ATTRIBUTE.test(key) || SECRET_ATTRIBUTE.test(key)) return false
   return SAFE_OMA_ATTRIBUTES.has(key)
 }
 
 export function mapOmaAttributes(
   attributes: Readonly<Record<string, TraceAttributeValue>>,
+  allowUpstreamContent = false,
 ): Attributes {
   const mapped: Attributes = {}
   for (const [key, value] of Object.entries(attributes)) {
-    if (isSafeOmaAttribute(key)) mapped[key] = toAttributeValue(value)
+    if (isSafeOmaAttribute(key, allowUpstreamContent)) mapped[key] = toAttributeValue(value)
   }
   return mapped
 }
@@ -210,11 +227,14 @@ export function baseAttributes(record: TraceRecordBase & { readonly recordType: 
   }
 }
 
-export function spanAttributes(record: SpanStartRecord | SpanEndRecord): Attributes {
+export function spanAttributes(
+  record: SpanStartRecord | SpanEndRecord,
+  allowUpstreamContent = false,
+): Attributes {
   const attributes: Attributes = {
     ...baseAttributes(record),
     'oma.span.kind': record.kind,
-    ...mapOmaAttributes(record.attributes),
+    ...mapOmaAttributes(record.attributes, allowUpstreamContent),
   }
   addGenAiAttributes(record.kind, attributes)
   return attributes

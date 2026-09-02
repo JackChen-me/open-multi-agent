@@ -83,7 +83,14 @@ export interface OTelMetadata {
 }
 
 export interface OTelContentCaptureExtension {
-  readonly mode?: 'disabled'
+  /**
+   * `disabled` (default) exports no content-bearing attribute. Under
+   * `upstream-policy` the adapter forwards the bounded set of content
+   * attributes that core produces only when `observability.capture` opts in,
+   * already redacted and truncated by `SensitiveDataProcessor`. Both opt-ins
+   * are required, so this alone never widens what a run records.
+   */
+  readonly mode?: 'disabled' | 'upstream-policy'
 }
 
 export interface OTelTraceSinkOptions extends OTelTraceExporterOptions {
@@ -145,14 +152,21 @@ export class OTelTraceExporter implements TraceExporter {
   private readonly recentRootContexts = new Map<string, SpanContext>()
   private readonly shutdownOnShutdown: boolean
   private readonly metadata: Attributes
+  private readonly allowUpstreamContent: boolean
 
   constructor(private readonly options: OTelTraceExporterOptions) {
     if ((options.tracer === undefined) === (options.tracerProvider === undefined)) {
       throw new TypeError('Provide exactly one of tracer or tracerProvider; global OpenTelemetry state is never used.')
     }
-    if (options.contentCapture?.mode !== undefined && options.contentCapture.mode !== 'disabled') {
-      throw new TypeError('Content capture is not implemented by @open-multi-agent/otel.')
+    if (options.contentCapture?.mode !== undefined
+      && options.contentCapture.mode !== 'disabled'
+      && options.contentCapture.mode !== 'upstream-policy') {
+      throw new TypeError(
+        'Unsupported contentCapture mode for @open-multi-agent/otel. '
+        + "Use 'disabled' (default) or 'upstream-policy'.",
+      )
     }
+    this.allowUpstreamContent = options.contentCapture?.mode === 'upstream-policy'
     this.provider = options.tracerProvider
     this.tracer = options.tracer ?? options.tracerProvider!.getTracer(
       options.instrumentationName ?? '@open-multi-agent/otel',
@@ -271,7 +285,7 @@ export class OTelTraceExporter implements TraceExporter {
       this.openSpans.set(key, entry)
     }
     entry.span.setAttributes({
-      ...spanAttributes(record),
+      ...spanAttributes(record, this.allowUpstreamContent),
       ...this.metadata,
       'oma.status': record.status.code,
     })
@@ -308,7 +322,7 @@ export class OTelTraceExporter implements TraceExporter {
     // active at export time; batching makes that ambient context arbitrary.
     const parentContext = parent ? trace.setSpanContext(ROOT_CONTEXT, parent) : ROOT_CONTEXT
     const attributes: Attributes = {
-      ...spanAttributes(record),
+      ...spanAttributes(record, this.allowUpstreamContent),
       ...this.metadata,
       ...(incomplete ? { 'oma.record.incomplete': true } : {}),
     }
@@ -322,7 +336,7 @@ export class OTelTraceExporter implements TraceExporter {
   }
 
   private safeEventAttributes(record: SpanEventRecord): Attributes {
-    return mapOmaAttributes(record.attributes)
+    return mapOmaAttributes(record.attributes, this.allowUpstreamContent)
   }
 
   private addEndLinks(entry: SpanEntry, links: readonly TraceLink[] | undefined): void {

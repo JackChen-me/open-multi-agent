@@ -133,11 +133,32 @@ Prompt, completion, tool arguments/results, raw payloads, credentials, and
 reasoning/chain-of-thought content are filtered by default. The adapter uses an
 explicit low-sensitivity `oma.*` allowlist rather than forwarding arbitrary
 record attributes. This includes `<thinking>` and provider reasoning content.
-Token counts remain eligible for
-export. `contentCapture` is a reserved type-level extension point whose only
-accepted value is `mode: 'disabled'`; there is intentionally no content-capture
-switch in this release. Applications that need such a feature must add an
-explicit, separately reviewed capture policy upstream of the adapter.
+Token counts remain eligible for export.
+
+`contentCapture` accepts `mode: 'disabled'` (the default) and
+`mode: 'upstream-policy'`. Under `upstream-policy` the adapter additionally
+forwards `oma.tool.input` and `oma.tool.output`, and nothing else:
+
+```typescript
+const sink = createOtelTraceSink({
+  tracerProvider: provider,
+  contentCapture: { mode: 'upstream-policy' },
+})
+```
+
+That mode defers to the capture policy upstream of the adapter rather than
+introducing one here. Core records those two attributes only when
+`observability.capture` sets `toolInput`/`toolOutput`, and only after
+`SensitiveDataProcessor` has stripped structured credentials, redacted the
+text, and truncated it to `maxContentChars`. Enabling the adapter mode without
+the core policy exports nothing extra, because the attributes do not exist.
+Reasoning and chain-of-thought content have no opt-in under any mode.
+
+`service.name` belongs to the Resource on the application's `TracerProvider`.
+This adapter never sets it; a provider built without a Resource reports OMA
+spans under the OTel default (`unknown_service:node`). `metadata.release` and
+`metadata.environment` are span attributes (`service.version`,
+`deployment.environment.name`) and do not replace a Resource.
 
 ## OTLP convenience decision
 

@@ -13,6 +13,7 @@ const examples = [
   'in-memory-store.ts',
   'file-trace-store.ts',
   'otel-provider.ts',
+  'otlp-backend.ts',
   'cli-lifecycle.ts',
   'server-lifecycle.ts',
   'serverless-lifecycle.ts',

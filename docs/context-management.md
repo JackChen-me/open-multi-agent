@@ -21,6 +21,40 @@ const agent: AgentConfig = {
 | `compact` | Rule-based: truncate large assistant text blocks and tool results, keep recent turns intact. No extra LLM call. |
 | `custom` | Supply your own `compress(messages, estimatedTokens)` function. |
 
+## Auditing What a Strategy Replaced
+
+Every strategy above rewrites the conversation destructively: the messages it
+produces are what the next request carries, and the originals are gone from the
+working conversation. With a [run journal](run-journal.md) enabled, each
+application also emits one `context/replace` event recording what was removed
+and what took its place, so the conversation the model actually saw stays
+reconstructable after the fact.
+
+```typescript
+const journal = new InMemoryRunJournal()
+await orchestrator.runTasks(team, tasks, { journal })
+
+for (const event of await journal.readFrom(0)) {
+  if (event.type !== 'context/replace') continue
+  console.log(event.strategy, event.replacements.length, event.dropped?.sourceEventSeqs)
+}
+```
+
+| Strategy | `strategy` | What the event records |
+|---|---|---|
+| `sliding-window` | `'sliding-window'` | `dropped` names every block of every removed turn; one replacement carries the truncation notice, sourced from the dropped turns and the message it was merged into. `detail: { droppedTurns }`. |
+| `summarize` | `'summarize'` | One replacement carrying the `[Conversation summary]` block, sourced from the old turns it condensed. `detail` names the summary model and its usage. The summary model call itself is not journaled as a turn — it is an implementation detail of this rewrite. |
+| `compact` | `'compact'` | One replacement per rewritten block (truncated text, `[Image compacted]`, `[Tool result: …, compacted]`), each naming the single block it replaced. Untouched blocks keep their own lineage. |
+| `compressToolResults` | `'compress-tool-results'` | One replacement per **newly** compressed result. Already-compressed markers are skipped, so a long run records one event per result, not one per request. |
+| `custom` | `'custom'` | Any block your function invented, stored verbatim with the whole input conversation as its lineage. Blocks you passed through by reference keep theirs. |
+
+Each derived block's lineage is the single sequence of the event that carries
+it, and the block is stored as-is rather than as a description of how to rebuild
+it — which is what makes `enforceLineage: true` pass with every built-in
+strategy. A pass that changes nothing emits nothing, and `summarize`'s memo
+cache reuses the event that first recorded a summary rather than writing it
+twice.
+
 ## Compressing Tool Results
 
 Tool outputs persist in the conversation history across turns even after the agent has acted on them. In long runs this can consume a significant portion of the context budget.

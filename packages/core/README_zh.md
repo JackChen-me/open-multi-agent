@@ -223,7 +223,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 支持 `open-multi-agent` 的付费赞助商。赞助不影响技术决策与模型推荐。
 
-- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**：全模态 AI 推理平台，单一 API 打通视频、图像与 LLM，覆盖 300+ 精选模型。OMA 用户可申请限量 $5 credit 兑换码。见 [Atlas Cloud 接入指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud_zh.md)。
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**：全模态 AI 推理平台，单一 API 打通视频、图像与 LLM，覆盖 300+ 精选模型。$5 credit 兑换码面向 OMA 用户开放，先到先得。见 [Atlas Cloud 接入指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud_zh.md)。
 
 ## 生产配置
 
@@ -247,6 +247,10 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) 是面向已有集中式 OpenTelemetry 平台团队的**可选企业集成**。它把 OMA trace 转成标准 OTel span，让多 agent 运行接入企业统一监控、告警和故障处理流程。应用负责 provider 及其生命周期；telemetry 故障不会改变业务运行结果。
 
 详见[可观测性指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[迁移指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md)与[性能指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md)。
+
+### 运行事件日志
+
+长时间运行出问题时，最缺的记录往往是每个 Agent 在被调用那一刻究竟看到了什么。可选的运行事件日志会把这部分保留下来：每条消息和工具结果都作为追加事件写入，上下文策略替换掉若干轮次后放进去的那个块也原样保存，运行结束后可以直接读回，而不必靠推测还原。`verifyRun()` 随后离线校验模型看到的每个块都能从日志中复现，而不是采信日志对自身的陈述；`restore()` 也可以从最后一条追加事件恢复，而不再局限于最后一次快照。该能力默认关闭，关闭时没有额外开销，详见[运行事件日志指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md)。
 
 ## 文档
 

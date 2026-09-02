@@ -317,6 +317,26 @@ describe('ToolRegistry', () => {
     expect(defs[0].name).toBe('echo')
     expect(defs[0].inputSchema).toHaveProperty('properties')
   })
+
+  it('marks nullable inputs as required when Zod rejects omission', () => {
+    const inputSchema = z.object({
+      requiredNullable: z.string().nullable(),
+      optional: z.string().optional(),
+    })
+    const registry = new ToolRegistry()
+    registry.register(defineTool({
+      name: 'nullable_input',
+      description: 'Accepts a required nullable value.',
+      inputSchema,
+      execute: async () => ({ data: 'ok' }),
+    }))
+
+    const [definition] = registry.toToolDefs()
+
+    expect(inputSchema.safeParse({}).success).toBe(false)
+    expect(inputSchema.safeParse({ requiredNullable: null }).success).toBe(true)
+    expect(definition.inputSchema).toMatchObject({ required: ['requiredNullable'] })
+  })
 })
 
 // ---------------------------------------------------------------------------
