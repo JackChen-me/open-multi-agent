@@ -356,6 +356,65 @@ describe('AgentRunner contextStrategy', () => {
     expect(promptText.toLowerCase().includes('image')).toBe(true)
   })
 
+  it('summarize strategy strips video attachments, and the video alone can trigger it', async () => {
+    // The image case above needs text FILLER to cross maxTokens because an
+    // ImageBlock is charged a flat 64 chars. A VideoBlock is charged its real
+    // payload, so the attachment that actually needs compacting is the thing
+    // that triggers compaction — no filler turns required.
+    const FAKE_VIDEO_DATA = 'A'.repeat(100_000)
+    const calls: { messages: LLMMessage[]; options: LLMChatOptions }[] = []
+    let callCount = 0
+    const adapter: LLMAdapter = {
+      name: 'mock',
+      async chat(messages, options) {
+        calls.push({ messages, options })
+        callCount++
+        if (callCount === 1) {
+          return toolUseResponse('echo', { message: 'x' })
+        }
+        return textResponse('done')
+      },
+      async *stream() {
+        /* unused */
+      },
+    }
+    const { registry, executor } = buildRegistryAndExecutor()
+    const runner = new AgentRunner(adapter, registry, executor, {
+      model: 'mock-model',
+      allowedTools: ['echo'],
+      maxTurns: 8,
+      contextStrategy: { type: 'summarize', maxTokens: 100 },
+    })
+
+    const history: LLMMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'start' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [
+        { type: 'text', text: 'analyze this clip' },
+        { type: 'video', source: { type: 'base64', media_type: 'video/mp4', data: FAKE_VIDEO_DATA } },
+      ] },
+      { role: 'assistant', content: [{ type: 'text', text: 'looking' }] },
+      { role: 'user', content: [{ type: 'text', text: 'and now' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'done thinking' }] },
+    ]
+
+    await runner.run(history)
+
+    const summaryCall = calls.find(
+      c => c.options.tools === undefined && c.messages.length === 1,
+    )
+    expect(summaryCall).toBeDefined()
+
+    const promptText = summaryCall!.messages[0]!.content
+      .filter((b): b is import('../src/types.js').TextBlock => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+
+    expect(promptText.includes(FAKE_VIDEO_DATA)).toBe(false)
+    expect(promptText.length).toBeLessThan(10_000)
+    expect(promptText).toContain('[video: video/mp4]')
+  })
+
   it('does not drop turns when context strategy shrinks array size', async () => {
     // The core bug from #152: if the strategy replaces the array with fewer messages than it started with,
     // the old `slice()` logic would incorrectly drop newly generated turns.

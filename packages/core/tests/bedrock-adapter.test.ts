@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { textMsg, toolUseMsg, toolResultMsg, chatOpts, toolDef, collectEvents } from './helpers/llm-fixtures.js'
 import type { LLMResponse, StreamEvent, ToolUseBlock } from '../src/types.js'
-import { UnsupportedToolResultContentError } from '../src/errors.js'
+import { UnsupportedContentBlockError, UnsupportedToolResultContentError, isRetryableError } from '../src/errors.js'
 
 // ---------------------------------------------------------------------------
 // Mock @aws-sdk/client-bedrock-runtime
@@ -291,6 +291,27 @@ describe('BedrockAdapter', () => {
         chatOpts(),
       )).rejects.toThrow(UnsupportedToolResultContentError)
       expect(mockSend).not.toHaveBeenCalled()
+    })
+
+    it('rejects video blocks with a terminal error before sending', async () => {
+      mockSend.mockResolvedValue(makeConverseResponse())
+
+      const call = adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'video',
+            source: { type: 'base64', media_type: 'video/mp4', data: 'dmlkZW8=' },
+          }],
+        }],
+        chatOpts(),
+      )
+
+      await expect(call).rejects.toThrow(UnsupportedContentBlockError)
+      expect(mockSend).not.toHaveBeenCalled()
+      await call.catch((error: unknown) => {
+        expect(isRetryableError(error)).toBe(false)
+      })
     })
   })
 

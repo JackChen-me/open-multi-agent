@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { LanguageModel } from 'ai'
+import { UnsupportedContentBlockError, isRetryableError } from '../src/errors.js'
 
 const generateTextMock = vi.fn()
 const streamTextMock = vi.fn()
@@ -117,7 +118,7 @@ describe('llmMessagesToAiSdkModelMessages', () => {
   })
 
   it('rejects video blocks instead of silently dropping them', () => {
-    expect(() => llmMessagesToAiSdkModelMessages([
+    const convert = () => llmMessagesToAiSdkModelMessages([
       {
         role: 'user',
         content: [
@@ -127,7 +128,20 @@ describe('llmMessagesToAiSdkModelMessages', () => {
           },
         ],
       },
-    ])).toThrow('This adapter does not support video content blocks')
+    ])
+
+    expect(convert).toThrow(UnsupportedContentBlockError)
+    // Typed, not a bare Error: the run is failed permanently rather than
+    // retried through the backoff ladder on a capability that cannot appear.
+    try {
+      convert()
+      expect.unreachable('conversion should have thrown')
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnsupportedContentBlockError)
+      expect((error as UnsupportedContentBlockError).blockType).toBe('video')
+      expect((error as UnsupportedContentBlockError).provider).toContain('AI SDK')
+      expect(isRetryableError(error)).toBe(false)
+    }
   })
 
   it('does not serialize opaque redacted reasoning payloads', () => {

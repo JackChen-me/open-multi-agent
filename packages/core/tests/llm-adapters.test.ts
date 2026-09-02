@@ -397,6 +397,54 @@ describe('toOpenAIMessages', () => {
       { type: 'video_url', video_url: { url: 'data:video/mp4;base64,YWJj' } },
     ])
   })
+
+  it('passes a video url source through without rebuilding it as a data URL', () => {
+    const msgs: LLMMessage[] = [{
+      role: 'user',
+      content: [{
+        type: 'video',
+        source: {
+          type: 'url',
+          media_type: 'video/mp4',
+          url: 'https://example.com/clip.mp4?token=abc',
+        },
+      }],
+    }]
+
+    const content = (toOpenAIMessages(msgs)[0] as any).content
+    expect(content).toEqual([
+      { type: 'video_url', video_url: { url: 'https://example.com/clip.mp4?token=abc' } },
+    ])
+  })
+
+  it('emits video alongside tool-result attachments in one user message', () => {
+    const msgs: LLMMessage[] = [{
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'call-1',
+          content: [{
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aW1n' },
+          }],
+        },
+        {
+          type: 'video',
+          source: { type: 'url', media_type: 'video/mp4', url: 'https://example.com/clip.mp4' },
+        },
+      ],
+    }]
+
+    const result = toOpenAIMessages(msgs)
+    // tool message first, then the attachment-carrying user message.
+    expect((result[0] as any).role).toBe('tool')
+    const userContent = (result[1] as any).content
+    expect(userContent).toContainEqual({
+      type: 'video_url',
+      video_url: { url: 'https://example.com/clip.mp4' },
+    })
+  })
 })
 
 describe('fromOpenAICompletion', () => {

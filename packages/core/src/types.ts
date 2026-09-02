@@ -157,18 +157,30 @@ export interface ImageBlock {
   }
 }
 
-/** A video passed to a model as inline bytes or a remote URL. */
+/**
+ * A video passed to a model as inline bytes or a remote reference.
+ *
+ * Unlike {@link ImageBlock}, a `url` source is dereferenced by the provider
+ * rather than by OMA, so the reference leaves the process. Public entry points
+ * validate it the same way tool-result media is validated: absolute HTTP(S)
+ * only, and raw canonical base64 with a parameterless MIME type for inline
+ * bytes. Provider-private reference schemes are not accepted.
+ */
 export interface VideoBlock {
   readonly type: 'video'
   readonly source:
     | {
         readonly type: 'base64'
+        /** IANA media type for the encoded bytes. */
         readonly media_type: string
+        /** Raw base64 data without a data-URL prefix. */
         readonly data: string
       }
     | {
         readonly type: 'url'
+        /** IANA media type expected at the reference. */
         readonly media_type: string
+        /** Absolute HTTP(S) URL. Provider/model support still varies. */
         readonly url: string
       }
 }

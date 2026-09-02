@@ -22,6 +22,7 @@ import type {
   ToolUseBlock,
 } from '../types.js'
 import { normalizeFinishReason } from './openai-common.js'
+import { UnsupportedContentBlockError } from '../errors.js'
 import { assertValidMessages } from './validate.js'
 import {
   reasoningBlockToInlineText,
@@ -178,7 +179,11 @@ export function llmMessagesToAiSdkModelMessages(
             mediaType: block.source.media_type,
           })
         } else if (block.type === 'video') {
-          throw new Error('This adapter does not support video content blocks')
+          throw new UnsupportedContentBlockError(
+            'the AI SDK bridge',
+            'video',
+            'OMA does not map video for this adapter yet',
+          )
         }
       }
       if (userParts.length > 0) out.push({ role: 'user', content: userParts } as ModelMessage)

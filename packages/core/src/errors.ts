@@ -229,6 +229,33 @@ export class UnsupportedToolResultContentError extends Error {
 }
 
 /**
+ * Raised before an SDK request when a built-in adapter has no wire mapping for
+ * a whole model-visible content block.
+ *
+ * Terminal for the same reason {@link UnsupportedToolResultContentError} is:
+ * the block and the adapter are both fixed for the attempt, so a retry re-runs
+ * the identical conversion and fails identically. A bare `Error` here would
+ * instead fall through {@link isRetryableError}'s conservative default and
+ * spend the whole backoff ladder — plus a checkpoint rewrite per attempt — on
+ * a capability gap that cannot resolve itself.
+ */
+export class UnsupportedContentBlockError extends Error {
+  readonly code = 'UNSUPPORTED_CONTENT_BLOCK'
+
+  constructor(
+    readonly provider: string,
+    readonly blockType: ContentBlock['type'],
+    detail?: string,
+  ) {
+    super(
+      `${provider} cannot represent the "${blockType}" content block` +
+        (detail ? `: ${detail}` : ''),
+    )
+    this.name = 'UnsupportedContentBlockError'
+  }
+}
+
+/**
  * Raised before an adapter call when `enforceLineage` is on and a model-visible
  * block cannot name the journal event it came from.
  *
@@ -302,6 +329,7 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof UnsupportedToolCallError) return false
   if (error instanceof EgressPolicyError) return false
   if (error instanceof UnsupportedToolResultContentError) return false
+  if (error instanceof UnsupportedContentBlockError) return false
   // A lineage gap is a property of the conversation, not of the transport:
   // the same request would fail the same way on every attempt.
   if (error instanceof JournalLineageError) return false

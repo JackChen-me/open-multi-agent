@@ -64,7 +64,7 @@ import {
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
 import { createEgressFetch } from './egress.js'
-import { UnsupportedToolResultContentError } from '../errors.js'
+import { UnsupportedContentBlockError, UnsupportedToolResultContentError } from '../errors.js'
 import { toolResultContentParts } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,11 @@ function toAnthropicContentBlockParams(
       return [param]
     }
     case 'video':
-      throw new Error('This adapter does not support video content blocks')
+      throw new UnsupportedContentBlockError(
+        'Anthropic Messages',
+        'video',
+        'OMA does not map video for this adapter yet',
+      )
     default: {
       // Exhaustiveness guard — TypeScript will flag this at compile time if a
       // new variant is added to ContentBlock without updating this switch.
