@@ -157,8 +157,24 @@ export interface ImageBlock {
   }
 }
 
+/** A video passed to a model as inline bytes or a remote URL. */
+export interface VideoBlock {
+  readonly type: 'video'
+  readonly source:
+    | {
+        readonly type: 'base64'
+        readonly media_type: string
+        readonly data: string
+      }
+    | {
+        readonly type: 'url'
+        readonly media_type: string
+        readonly url: string
+      }
+}
+
 /** Union of all content block variants that may appear in a message. */
-export type ContentBlock = ReasoningBlock | TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock
+export type ContentBlock = ReasoningBlock | TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock | VideoBlock
 
 // ---------------------------------------------------------------------------
 // LLM messages & responses

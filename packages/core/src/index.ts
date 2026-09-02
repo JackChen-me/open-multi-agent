@@ -374,6 +374,7 @@ export type {
   ToolResultMediaSource,
   ToolResultTextPart,
   ImageBlock,
+  VideoBlock,
   ContentBlock,
 
   // LLM

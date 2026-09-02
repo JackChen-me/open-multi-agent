@@ -390,13 +390,14 @@ function groupIntoTurns(messages: LLMMessage[]): Turn[] {
 }
 
 /**
- * Replace `image` blocks with text placeholders so binary attachment data
+ * Replace media blocks with text placeholders so binary attachment data
  * never leaks into the summarisation prompt.
  *
  * `summarizeMessages` flattens old turns via `JSON.stringify(message)` and
  * inlines the result into a text user-message it ships to the summary model.
- * For an `ImageBlock`, that serialisation includes the full base64 payload —
- * a 1MB image would balloon the "compression" call by ~250k tokens, defeating
+ * For an `ImageBlock` or `VideoBlock`, that serialisation includes the full
+ * base64 payload — a 1MB attachment would balloon the "compression" call by
+ * ~250k tokens, defeating
  * its purpose and risking context-limit rejection.
  *
  * The placeholder still tells the summariser that media was present at this
@@ -406,10 +407,13 @@ function groupIntoTurns(messages: LLMMessage[]): Turn[] {
 function stripImageBlocksForSummary(messages: LLMMessage[]): LLMMessage[] {
   return messages.map((msg) => {
     if (!msg.content.some(b =>
-      b.type === 'image' || (b.type === 'tool_result' && toolResultHasMedia(b.content)))) return msg
+      b.type === 'image' || b.type === 'video' || (b.type === 'tool_result' && toolResultHasMedia(b.content)))) return msg
     const newContent: ContentBlock[] = msg.content.map((block) => {
       if (block.type === 'image') {
         return { type: 'text', text: `[image: ${block.source.media_type}]` } satisfies TextBlock
+      }
+      if (block.type === 'video') {
+        return { type: 'text', text: `[video: ${block.source.media_type}]` } satisfies TextBlock
       }
       if (block.type === 'tool_result' && toolResultHasMedia(block.content)) {
         return { ...block, content: stripToolResultMedia(block.content) }
