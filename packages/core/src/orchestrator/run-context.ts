@@ -30,6 +30,7 @@ import type { AgentPool } from '../agent/pool.js'
 import type { Team } from '../team/team.js'
 import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
+import type { JournalRecorder } from '../journal/journal.js'
 import type { DurableApprovalLedger } from '../approval/durable.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import type { ResolvedRecoveryOptions } from './recovery.js'
@@ -145,6 +146,8 @@ export interface RunContext {
   readonly agentResults: Map<string, AgentRunResult>
   readonly config: OrchestratorConfig
   readonly checkpoint?: ActiveCheckpoint
+  /** Present only when the run resolved a journal. Every emission guards on it. */
+  readonly journal?: JournalRecorder
   /** Stable top-level execution identity, independent of trace callbacks. */
   readonly identity: RunIdentity
   /** Validated facts echoed on the result and persisted with checkpoints. */
@@ -192,6 +195,12 @@ export interface ActiveCheckpoint {
   readonly reusesSharedMemoryStore: boolean
   /** Latest safe runner state for every task currently between queue boundaries. */
   readonly inFlightTasks: Map<string, InFlightTaskCheckpoint>
+  /**
+   * Journal watermark of the v5 snapshot this run resumed from. Present only on
+   * a restore, and only when that snapshot carried one; it is what the tail
+   * replay reads from and where the recorder continues numbering.
+   */
+  readonly journalWatermarkSeq?: number
   /** Reviewed boundaries not yet durably consumed by execution. */
   readonly pendingApprovals: Map<string, ApprovalRequest>
   /** Primary decisions loaded from the approval ledger and copied into results/checkpoints. */

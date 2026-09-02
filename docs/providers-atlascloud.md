@@ -6,9 +6,19 @@ Atlas Cloud is a full-modal AI inference platform that gives developers a single
 
 ## OMA user vouchers
 
-20 limited vouchers ($5 each) available to OMA users on a first-come-first-serve basis.
+$5 Atlas Cloud vouchers for OMA users, first come first served. Take one code and leave the rest for others.
 
-**How to apply**: Email [jack@yuanasi.com](mailto:jack@yuanasi.com) with your GitHub username and a one-line use case. We'll reply with a voucher code by email (limited supply).
+```
+37699C92-8CCC-4224-963E-126CC2475C3B
+E4D81992-9FB2-4823-A970-D90E58DB0377
+29A2888B-F8B3-4157-A6EA-705781815EA6
+BDA10EA7-1F2D-48EF-BF26-F37EEE325B1B
+DCD47541-22BE-4314-BF6B-9EE031E5F421
+```
+
+Redeem a code on the Atlas Cloud [Claim Your Model Rewards](https://www.atlascloud.ai/event/claim-model-rewards) page.
+
+If every code above has already been claimed, email [jack@yuanasi.com](mailto:jack@yuanasi.com) with your GitHub username and a one-line use case. Supply is limited, so we can't promise one.
 
 Disclosure: Sponsorship from Atlas Cloud; vouchers are limited and don't constitute paid endorsement of any model or feature.
 

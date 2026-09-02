@@ -1,0 +1,367 @@
+/**
+ * @fileoverview Restore-side journal folding: re-attach persisted lineage to a
+ * checkpoint's conversation, and replay the events a crash left behind after
+ * the snapshot's watermark.
+ *
+ * The snapshot stays the recovery anchor. A tail may only *extend* it, and any
+ * inconsistency discards the whole tail rather than resuming from a state
+ * neither record describes. That asymmetry is deliberate: losing a few
+ * post-snapshot events costs one repeated model call, while folding a tail that
+ * does not belong to this snapshot corrupts the conversation.
+ */
+
+import type {
+  InFlightTaskCheckpoint,
+  LLMMessage,
+  PendingToolCallCheckpoint,
+  TokenUsage,
+  ToolCallRecord,
+} from '../types.js'
+import type { RunEvent } from './events.js'
+import type { JournalRecorder } from './journal.js'
+
+/** Outcome of {@link foldJournalTail}. */
+export interface JournalTailFold {
+  /** States to resume from: the snapshot's, extended when the tail folded. */
+  readonly tasks: readonly InFlightTaskCheckpoint[]
+  /** Events that changed a state. Zero when the tail was empty or discarded. */
+  readonly foldedEvents: number
+  /** Why the tail was rejected. Absent when it folded cleanly. */
+  readonly discardReason?: string
+}
+
+/** Per-block lineage of one restored conversation, parallel to its messages. */
+type ConversationLineage = ReadonlyArray<ReadonlyArray<readonly number[] | null>>
+
+interface TaskDraft {
+  readonly base: InFlightTaskCheckpoint
+  /**
+   * This task's own high-water mark. Snapshot entries refresh at each task's
+   * boundaries rather than all at once, so under concurrency one entry can be
+   * many events staler than the snapshot as a whole; folding against the
+   * snapshot-wide watermark would silently skip everything in between.
+   */
+  readonly watermark: number
+  /** Highest sequence folded here, so a re-saved entry carries a true mark. */
+  lastSeq: number
+  /** Events that changed this draft; zero means the base is returned as-is. */
+  changes: number
+  phase: InFlightTaskCheckpoint['phase']
+  conversation: LLMMessage[]
+  lineage: Array<ReadonlyArray<readonly number[] | null>>
+  messages: LLMMessage[]
+  turns: number
+  tokenUsage: TokenUsage
+  toolCalls: ToolCallRecord[]
+  pending: PendingToolCallCheckpoint[]
+  pendingToolResultText: string | undefined
+}
+
+/**
+ * Event types the fold understands. Everything else has its own durable
+ * authority — the queue owns `task/status`, the store owns `memory/set`, the
+ * approval ledger owns `approval/*` — and folding it here would create a second
+ * source of truth for state the snapshot already reconciled.
+ */
+function isFoldable(event: RunEvent): boolean {
+  return event.type === 'assistant/message'
+    || event.type === 'user/message'
+    || event.type === 'tool/call'
+    || event.type === 'tool/result'
+    || event.type === 'turn/end'
+}
+
+/**
+ * A delegated child run journals under the parent's `taskId` with its own
+ * `agentName`, so the assignee is part of the identity a folded event must
+ * match.
+ */
+function draftKey(taskId: string, assignee: string): string {
+  return `${taskId}\u0000${assignee}`
+}
+
+/**
+ * Lowest sequence a tail read has to start from to cover every in-flight entry.
+ *
+ * Entries carry their own watermark, and the stalest one sets the window; the
+ * snapshot-wide watermark is only the fallback for entries written before
+ * per-task marks existed.
+ */
+export function journalTailReadFrom(
+  snapshotTasks: readonly InFlightTaskCheckpoint[],
+  watermarkSeq: number,
+): number {
+  let lowest = watermarkSeq
+  for (const state of snapshotTasks) {
+    lowest = Math.min(lowest, state.journalSeq ?? watermarkSeq)
+  }
+  return lowest + 1
+}
+
+/**
+ * Replay the journal events a snapshot does not yet include.
+ *
+ * Each task is folded against its own watermark: an event at or below it is
+ * already in the entry and is skipped, and one above it is applied. The read
+ * window therefore starts at the stalest entry, and events another task has
+ * long since absorbed pass through harmlessly.
+ *
+ * @param snapshotTasks - In-flight states exactly as the snapshot stored them.
+ * @param events - Journal tail, expected to be {@link journalTailReadFrom}.
+ * @param watermarkSeq - Snapshot-wide mark, used for entries with none of their own.
+ */
+export function foldJournalTail(
+  snapshotTasks: readonly InFlightTaskCheckpoint[],
+  events: readonly RunEvent[],
+  watermarkSeq: number,
+): JournalTailFold {
+  const discard = (reason: string): JournalTailFold =>
+    ({ tasks: snapshotTasks, foldedEvents: 0, discardReason: reason })
+
+  if (events.length === 0 || snapshotTasks.length === 0) {
+    return { tasks: snapshotTasks, foldedEvents: 0 }
+  }
+
+  const drafts = new Map<string, TaskDraft>()
+  for (const state of snapshotTasks) {
+    drafts.set(draftKey(state.taskId, state.assignee), toDraft(state, watermarkSeq))
+  }
+
+  let previousSeq = 0
+  for (const event of events) {
+    if (event.seq <= previousSeq) {
+      return discard(`event ${event.seq} does not extend the journal append-only`)
+    }
+    previousSeq = event.seq
+    if (!isFoldable(event)) continue
+    if (event.taskId === undefined || event.agentName === undefined) continue
+    // An unknown task is a task this snapshot is not resuming — another
+    // worker, a delegated child, or an attempt that never checkpointed.
+    const draft = drafts.get(draftKey(event.taskId, event.agentName))
+    if (draft === undefined) continue
+    // Already folded into this entry when it was written.
+    if (event.seq <= draft.watermark) continue
+    const failure = applyEvent(draft, event)
+    if (failure !== undefined) return discard(failure)
+    draft.lastSeq = event.seq
+  }
+
+  let foldedEvents = 0
+  for (const draft of drafts.values()) {
+    if (draft.changes === 0) continue
+    foldedEvents += draft.changes
+    const failure = validateDraft(draft)
+    if (failure !== undefined) return discard(failure)
+  }
+  if (foldedEvents === 0) return { tasks: snapshotTasks, foldedEvents: 0 }
+  return { tasks: [...drafts.values()].map(fromDraft), foldedEvents }
+}
+
+/**
+ * Re-attach persisted lineage to a restored conversation.
+ *
+ * Block identity does not survive serialization, so the checkpoint carries the
+ * tracker's entries positionally and they are re-keyed here onto the freshly
+ * parsed blocks. Without this a resumed run could not explain a single block it
+ * inherited, and `enforceLineage` would fail on its first request.
+ */
+export function restoreConversationLineage(
+  recorder: JournalRecorder,
+  states: readonly InFlightTaskCheckpoint[],
+): void {
+  for (const state of states) {
+    const lineage: ConversationLineage | undefined = state.conversationLineage
+    if (lineage === undefined) continue
+    const messageCount = Math.min(state.conversationMessages.length, lineage.length)
+    for (let i = 0; i < messageCount; i++) {
+      const content = state.conversationMessages[i]!.content
+      const perMessage = lineage[i]!
+      const blockCount = Math.min(content.length, perMessage.length)
+      for (let j = 0; j < blockCount; j++) {
+        const seqs = perMessage[j]
+        if (seqs === null || seqs === undefined) continue
+        recorder.registerBlocks([content[j]!], seqs)
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+function toDraft(state: InFlightTaskCheckpoint, watermarkSeq: number): TaskDraft {
+  const watermark = state.journalSeq ?? watermarkSeq
+  return {
+    base: state,
+    watermark,
+    lastSeq: watermark,
+    changes: 0,
+    phase: state.phase,
+    conversation: [...state.conversationMessages],
+    lineage: state.conversationLineage !== undefined
+      ? [...state.conversationLineage]
+      : state.conversationMessages.map((message) => message.content.map(() => null)),
+    messages: [...state.messages],
+    turns: state.turns,
+    tokenUsage: state.tokenUsage,
+    toolCalls: [...state.toolCalls],
+    pending: [...(state.pendingToolCalls ?? [])],
+    pendingToolResultText: state.pendingToolResultText,
+  }
+}
+
+function fromDraft(draft: TaskDraft): InFlightTaskCheckpoint {
+  if (draft.changes === 0) return draft.base
+  const executing = draft.phase === 'executing_tools'
+  return {
+    taskId: draft.base.taskId,
+    assignee: draft.base.assignee,
+    phase: draft.phase,
+    conversationMessages: draft.conversation,
+    conversationLineage: draft.lineage,
+    // The folded entry now reflects everything up to here, so a checkpoint
+    // written before this task next runs carries a mark that is still true.
+    journalSeq: draft.lastSeq,
+    messages: draft.messages,
+    tokenUsage: draft.tokenUsage,
+    toolCalls: draft.toolCalls,
+    turns: draft.turns,
+    ...(executing ? { pendingToolCalls: draft.pending } : {}),
+    ...(executing && draft.pendingToolResultText !== undefined
+      ? { pendingToolResultText: draft.pendingToolResultText }
+      : {}),
+    ...(draft.base.loopWarned ? { loopWarned: true } : {}),
+    ...(draft.base.loopDetected ? { loopDetected: true } : {}),
+    ...(draft.base.budgetExceeded ? { budgetExceeded: true } : {}),
+  }
+}
+
+/** True when `message` is the assistant turn that requested `toolCallId`. */
+function requestsToolCall(message: LLMMessage | undefined, toolCallId: string): boolean {
+  return message?.role === 'assistant'
+    && message.content.some((block) => block.type === 'tool_use' && block.id === toolCallId)
+}
+
+function appendMessage(draft: TaskDraft, message: LLMMessage, seq: number): void {
+  draft.conversation.push(message)
+  draft.lineage.push(message.content.map(() => [seq]))
+  draft.messages.push(message)
+  draft.changes++
+}
+
+function applyEvent(draft: TaskDraft, event: RunEvent): string | undefined {
+  if (draft.base.phase === 'completed') {
+    return `task "${draft.base.taskId}" is already complete in the snapshot`
+  }
+  switch (event.type) {
+    case 'assistant/message': {
+      appendMessage(draft, event.message, event.seq)
+      if (event.usage !== undefined) {
+        draft.tokenUsage = addUsage(draft.tokenUsage, event.usage)
+      }
+      return undefined
+    }
+    case 'user/message': {
+      if (event.origin === 'tool_results') {
+        // The round closes here, exactly as the runner closes it: no round at
+        // all, or uncommitted siblings, means the tail describes something this
+        // conversation never reached.
+        if (draft.pending.length === 0) {
+          return `event ${event.seq} assembles tool results with no tool round open`
+        }
+        if (draft.pending.some((pending) => pending.commit === undefined)) {
+          return `event ${event.seq} assembled tool results while a call had no commit`
+        }
+        for (const pending of draft.pending) {
+          draft.toolCalls.push(pending.commit!.record)
+          const delegated = pending.commit!.delegationUsage
+          if (delegated !== undefined) draft.tokenUsage = addUsage(draft.tokenUsage, delegated)
+        }
+        draft.pending = []
+        draft.pendingToolResultText = undefined
+      }
+      appendMessage(draft, event.message, event.seq)
+      draft.phase = 'awaiting_model'
+      return undefined
+    }
+    case 'tool/call': {
+      if (draft.pending.some((pending) => pending.call.id === event.call.id)) return undefined
+      // A call the entry does not already hold must be anchored by the
+      // assistant turn that requested it, which is the message immediately
+      // before it. Without that anchor the fold would hand the adapter a
+      // `tool_result` with no matching `tool_use` — a hard API rejection, and
+      // strictly worse than resuming from the snapshot alone.
+      if (!requestsToolCall(draft.conversation.at(-1), event.call.id)) {
+        return `event ${event.seq} announces tool call "${event.call.id}" `
+          + 'with no assistant turn requesting it'
+      }
+      draft.pending.push({ call: event.call })
+      draft.phase = 'executing_tools'
+      draft.changes++
+      return undefined
+    }
+    case 'tool/result': {
+      const index = draft.pending.findIndex((pending) => pending.call.id === event.toolCallId)
+      if (index < 0) {
+        return `event ${event.seq} commits tool call "${event.toolCallId}", which is not pending`
+      }
+      if (event.record === undefined) {
+        return `event ${event.seq} commits tool call "${event.toolCallId}" with no call record`
+      }
+      const pending = draft.pending[index]!
+      if (pending.commit !== undefined) return undefined
+      draft.pending[index] = {
+        call: pending.call,
+        commit: {
+          result: event.result,
+          record: event.record,
+          ...(event.delegationUsage !== undefined
+            ? { delegationUsage: event.delegationUsage }
+            : {}),
+        },
+      }
+      draft.phase = 'executing_tools'
+      draft.changes++
+      return undefined
+    }
+    case 'turn/end': {
+      if (event.turn < draft.turns) {
+        return `event ${event.seq} ends turn ${event.turn} below the snapshot's ${draft.turns}`
+      }
+      if (event.turn > draft.turns) {
+        draft.turns = event.turn
+        draft.changes++
+      }
+      return undefined
+    }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * A folded state has to be one the runner can actually resume from. An
+ * `awaiting_model` conversation ending in an assistant message would be sent
+ * straight back to the model, so a tail that stops there is rejected and the
+ * snapshot repeats that turn instead.
+ */
+function validateDraft(draft: TaskDraft): string | undefined {
+  if (draft.phase === 'executing_tools') {
+    return draft.pending.length > 0
+      ? undefined
+      : `task "${draft.base.taskId}" folded to a tool round with no calls`
+  }
+  const last = draft.conversation[draft.conversation.length - 1]
+  if (last === undefined || last.role !== 'user') {
+    return `task "${draft.base.taskId}" folded to a conversation the model cannot resume from`
+  }
+  return undefined
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+  }
+}

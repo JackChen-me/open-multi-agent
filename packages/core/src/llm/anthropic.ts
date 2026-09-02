@@ -54,6 +54,7 @@ import type {
   ToolResultContentPart,
   ToolResultBlock,
   ToolUseBlock,
+  VideoBlock,
   EgressPolicy,
 } from '../types.js'
 import {
@@ -220,6 +221,8 @@ function toAnthropicContentBlockParams(
       }
       return [param]
     }
+    case 'video':
+      throw new Error('This adapter does not support video content blocks')
     default: {
       // Exhaustiveness guard — TypeScript will flag this at compile time if a
       // new variant is added to ContentBlock without updating this switch.
@@ -613,6 +616,7 @@ export class AnthropicAdapter implements LLMAdapter {
 export type {
   ContentBlock,
   ImageBlock,
+  VideoBlock,
   LLMAdapter,
   LLMChatOptions,
   LLMMessage,

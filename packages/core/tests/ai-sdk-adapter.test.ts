@@ -116,6 +116,20 @@ describe('llmMessagesToAiSdkModelMessages', () => {
     })
   })
 
+  it('rejects video blocks instead of silently dropping them', () => {
+    expect(() => llmMessagesToAiSdkModelMessages([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'video',
+            source: { type: 'url', media_type: 'video/mp4', url: 'https://example.com/video.mp4' },
+          },
+        ],
+      },
+    ])).toThrow('This adapter does not support video content blocks')
+  })
+
   it('does not serialize opaque redacted reasoning payloads', () => {
     // Security regression guard (upstream 6b63302): the back-compat default-off
     // path must never leak the opaque `redactedData` blob into the AI SDK

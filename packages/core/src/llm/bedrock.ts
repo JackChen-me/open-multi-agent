@@ -53,6 +53,7 @@ import type {
   TextBlock,
   ToolResultBlock,
   ToolUseBlock,
+  VideoBlock,
 } from '../types.js'
 import {
   reasoningBlockToInlineText,
@@ -213,6 +214,9 @@ function toBedrockContentBlock(
       if (text.length === 0) return null
       return { text }
     }
+
+    case 'video':
+      throw new Error('This adapter does not support video content blocks')
 
     default: {
       const _exhaustive: never = block
@@ -543,4 +547,4 @@ export class BedrockAdapter implements LLMAdapter {
   }
 }
 
-export type { ContentBlock, ImageBlock, LLMAdapter, LLMChatOptions, LLMMessage, LLMResponse, LLMStreamOptions, LLMToolDef, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock }
+export type { ContentBlock, ImageBlock, VideoBlock, LLMAdapter, LLMChatOptions, LLMMessage, LLMResponse, LLMStreamOptions, LLMToolDef, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock }

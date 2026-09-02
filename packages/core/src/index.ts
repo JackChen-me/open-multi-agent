@@ -195,6 +195,7 @@ export {
   TokenBudgetExceededError,
   CostBudgetExceededError,
   InvalidMessageError,
+  JournalLineageError,
   StructuredOutputValidationError,
   InvalidTaskRequirementsError,
   LLMCallTimeoutError,
@@ -305,6 +306,58 @@ export {
 } from './memory/checkpoint.js'
 
 // ---------------------------------------------------------------------------
+// Run journal
+// ---------------------------------------------------------------------------
+
+export { InMemoryRunJournal, resolveRunJournal } from './journal/journal.js'
+export { JsonlRunJournal } from './journal/jsonl-journal.js'
+export { canonicalContentHash, canonicalJsonHash } from './journal/hash.js'
+export { isMessageEvent, isRunEvent, RUN_EVENT_TYPES } from './journal/events.js'
+export { verifyRun } from './journal/verify.js'
+export type {
+  InMemoryRunJournalOptions,
+  ResolvedRunJournal,
+  RunJournal,
+  RunJournalConfig,
+  RunJournalOptions,
+} from './journal/journal.js'
+export type { JsonlRunJournalOptions } from './journal/jsonl-journal.js'
+export type {
+  ApprovalDecisionEvent,
+  ApprovalRequestEvent,
+  AssistantMessageEvent,
+  CheckpointSavedEvent,
+  ContextReplaceEvent,
+  ContextReplacement,
+  ContextStrategyKind,
+  LLMRequestEvent,
+  MemorySetEvent,
+  PlanSetEvent,
+  PlanSetTask,
+  RequestBlockDescriptor,
+  RunEndEvent,
+  RunEvent,
+  RunEventBase,
+  RunJournalMode,
+  RunStartEvent,
+  TaskStatusEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  TurnEndEvent,
+  TurnOutcome,
+  TurnStartEvent,
+  UserMessageEvent,
+} from './journal/events.js'
+export type {
+  VerifyRunFailure,
+  VerifyRunFailureCode,
+  VerifyRunFailureReason,
+  VerifyRunGap,
+  VerifyRunResult,
+  VerifyRunStats,
+} from './journal/verify.js'
+
+// ---------------------------------------------------------------------------
 // Types — all public interfaces re-exported for consumer type-checking
 // ---------------------------------------------------------------------------
 
@@ -321,6 +374,7 @@ export type {
   ToolResultMediaSource,
   ToolResultTextPart,
   ImageBlock,
+  VideoBlock,
   ContentBlock,
 
   // LLM
@@ -454,7 +508,9 @@ export type {
   CheckpointSnapshotV2,
   CheckpointSnapshotV3,
   CheckpointSnapshotV4,
+  CheckpointSnapshotV5,
   CheckpointRunIdentity,
+  RunJournalRef,
   CompletedTaskCheckpoint,
   InFlightTaskCheckpoint,
   PendingToolCallCheckpoint,

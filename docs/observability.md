@@ -451,10 +451,30 @@ exported to OTel or another vendor.
 | Run Viewer | static post-run task DAG plus span Waterfall, timing, token/cost facts, and safe details | derived artifact; no live delivery or authoritative state |
 | TraceStore | append/query telemetry, retention, and trace deletion | best-effort; no CAS, lease, suspend, or resume |
 | CheckpointStore | safe-boundary execution snapshot consumed by `restore()` | execution recovery state; not a trace query system |
+| RunJournal | opt-in append-only record of what happened and what each model call saw | execution state; best-effort writes, never required to recover |
 | future RunStore | authoritative durable run state machine | not implemented by Observability v2 |
 
 Losing telemetry must not roll back a durable run. Deleting traces must not
 delete checkpoints, shared memory, or remotely exported OTel data.
+
+### Journal versus telemetry
+
+The optional [run journal](run-journal.md) describes the same run these records
+describe and is deliberately not part of this stack. Traces are **telemetry**:
+sampling, batching, export, and retention deletion may all discard them, and
+none of that may change a run. Journal events are **execution state**: they
+record what the run did and what each model call saw, and `restore()` can fold
+them back into a conversation.
+
+The separation is structural, not conventional — `journal/` does not import from
+`observability/` — and it runs to the failure signals as well: a trace delivery
+failure and a `journal_append_failed` progress event report on separate records,
+and neither implies the other. Journal events carry `traceId` and `spanId` when a
+trace runtime is active, which is enough to join the two streams after the fact.
+Reach for traces when the question is where the time and tokens went, and for the
+journal when it is why the model saw what it saw; the
+[run journal guide](run-journal.md) has the event vocabulary and the `verifyRun()`
+audit.
 
 ## Optional OpenTelemetry package
 
@@ -518,15 +538,34 @@ so no high-cardinality run/task/tenant/request fields become metric labels.
 The adapter exports no prompt, completion, tool arguments/results, raw payload,
 credential, chain-of-thought, or reasoning content. Numeric token counts remain
 eligible. It forwards only an explicit low-sensitivity `oma.*` allowlist rather
-than arbitrary record attributes. `contentCapture` is a reserved disabled-only extension point; there
-is no content-capture switch in this release.
+than arbitrary record attributes.
+
+`contentCapture` opens one bounded exception. Under
+`contentCapture: { mode: 'upstream-policy' }` the adapter also forwards
+`oma.tool.input` and `oma.tool.output`, which core produces only when
+`observability.capture` opts in and `SensitiveDataProcessor` has already
+redacted and truncated. Both opt-ins are required: the adapter setting alone
+exports nothing extra, because without the core policy those attributes are
+never recorded. No other content attribute is eligible under any mode, and
+reasoning content has no opt-in at all. The default remains
+`mode: 'disabled'`.
+
+`service.name` comes from the Resource on the application's own
+`TracerProvider`. The adapter never sets it, so a provider built without a
+Resource reports OMA spans under the OTel default (`unknown_service:node`).
+`metadata.release` and `metadata.environment` map to `service.version` and
+`deployment.environment.name` as span attributes; they are not a substitute for
+a Resource.
 
 The first release intentionally provides no OTLP convenience subpath. The
 application selects its own OTel SDK and OTLP/exporter implementation, avoiding
 eager OTLP imports, implicit global-provider configuration, and a second
-SDK/exporter compatibility matrix. See
-[`packages/otel/README.md`](../packages/otel/README.md) for the full API and
-mapping table.
+SDK/exporter compatibility matrix.
+[`observability-v2/otlp-backend.ts`](../packages/core/examples/integrations/observability-v2/otlp-backend.ts)
+wires that path end to end against a loopback listener it starts itself, so the
+exporter, Resource, headers, and shutdown order are all visible without an
+account anywhere. See [`packages/otel/README.md`](../packages/otel/README.md)
+for the full API and mapping table.
 
 ## Flush and shutdown
 
@@ -765,6 +804,24 @@ only core-controlled content opt-in. Structured credential fields are removed
 even when content capture is enabled. Chain-of-thought/reasoning content,
 signed reasoning blocks, and `<thinking>` text are never captured by OMA
 instrumentation; numeric reasoning-token counts may be recorded.
+
+Setting `toolInput` or `toolOutput` to `'redacted'` makes tool spans carry
+`oma.tool.input` and `oma.tool.output`:
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  observability: {
+    sinks: [sink],
+    capture: { toolInput: 'redacted', toolOutput: 'redacted' },
+  },
+})
+```
+
+The remaining fields are filters, not producers. `prompt` and `completion`
+currently gate content that no v2 instrumentation site emits, so setting them
+records nothing; they exist so a custom sink's own attributes are filtered
+consistently. Legacy `onTrace` is unaffected by this policy and keeps its
+own redacted fields.
 
 Legacy `onTrace` keeps its existing redacted tool input/output fields for
 compatibility, so its privacy surface is intentionally broader than the v2

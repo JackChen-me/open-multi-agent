@@ -377,6 +377,26 @@ describe('toOpenAIMessages', () => {
     expect(content[1].type).toBe('image_url')
     expect(content[1].image_url.url).toContain('data:image/png;base64,abc123')
   })
+
+  it('converts video blocks to OpenAI video_url content parts', () => {
+    const msgs: LLMMessage[] = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this clip.' },
+        {
+          type: 'video',
+          source: { type: 'base64', media_type: 'video/mp4', data: 'YWJj' },
+        },
+      ],
+    }]
+
+    const result = toOpenAIMessages(msgs)
+    const content = (result[0] as any).content
+    expect(content).toEqual([
+      { type: 'text', text: 'Describe this clip.' },
+      { type: 'video_url', video_url: { url: 'data:video/mp4;base64,YWJj' } },
+    ])
+  })
 })
 
 describe('fromOpenAICompletion', () => {

@@ -228,7 +228,7 @@ See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/d
 
 Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technical decisions or model recommendations.
 
-- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. OMA users can request a limited $5 credit voucher. See the [Atlas Cloud setup guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud.md).
+- **[Atlas Cloud](https://www.atlascloud.ai/console/coding-plan)**: Full-modal AI inference platform giving one API for video, image, and LLM across 300+ curated models. $5 credit vouchers for OMA users, first come first served. See the [Atlas Cloud setup guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers-atlascloud.md).
 
 ## Production
 
@@ -262,6 +262,10 @@ Core already provides run identity, trace sinks, execution receipts, queryable i
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) is an **optional enterprise integration** for teams that already operate a centralized OpenTelemetry stack. It converts OMA traces into standard OTel spans so multi-agent runs can join company-wide monitoring, alerting, and incident workflows. The application owns the provider and its lifecycle; telemetry failures never change the run result.
 
 See the [observability guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [migration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md), and [performance guidance](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md).
+
+### Run journal
+
+When a long run goes wrong, the record usually missing is what each agent actually saw at the moment it was asked. The opt-in run journal keeps it: every message and tool result as an appended event, plus the exact block a context strategy put in place of the turns it dropped, so a finished run can be read back instead of reconstructed by guesswork. `verifyRun()` then checks offline that every block the model saw is reproducible from the log rather than trusting the log's own account of itself, and `restore()` can resume from the last appended event instead of the last snapshot. It is off by default, costs nothing when off, and is documented in the [run journal guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md).
 
 ## Documentation
 

@@ -26,6 +26,7 @@ import type { Team } from '../team/team.js'
 import type { TaskQueue } from '../task/queue.js'
 import { createTask, validateTaskDependencies } from '../task/task.js'
 import { classifyRunFailure } from '../observability/status.js'
+import type { JournalRecorder } from '../journal/journal.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import { totalTokens, DEFAULT_MODEL } from './run-context.js'
 import { applyBudgetAccounting, buildCostEstimateContext, emitBudgetExceeded } from './budget.js'
@@ -564,6 +565,7 @@ export async function runCoordinatorSynthesis(
     readonly estimateCost?: OrchestratorConfig['estimateCost']
     readonly traceRuntime?: TraceRuntime
     readonly consumedTaskSpans?: readonly TraceSpan[]
+    readonly journal?: JournalRecorder
   },
 ): Promise<{ readonly result: AgentRunResult; readonly cumulativeUsage: TokenUsage; readonly cumulativeCost: number } | null> {
   if (opts.abortSignal?.aborted) return null
@@ -604,6 +606,7 @@ export async function runCoordinatorSynthesis(
       ? { onTrace: config.onTrace, traceAgent: 'coordinator' }
       : {}),
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+    ...(opts.journal ? { journal: opts.journal } : {}),
   }
   let result = await synthesisAgent.run(synthesisPrompt, synthTraceOptions)
   const accounting = applyBudgetAccounting({

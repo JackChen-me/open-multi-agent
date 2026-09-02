@@ -177,6 +177,8 @@ export function llmMessagesToAiSdkModelMessages(
             image: new Uint8Array(bytes),
             mediaType: block.source.media_type,
           })
+        } else if (block.type === 'video') {
+          throw new Error('This adapter does not support video content blocks')
         }
       }
       if (userParts.length > 0) out.push({ role: 'user', content: userParts } as ModelMessage)
