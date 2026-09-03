@@ -96,9 +96,32 @@ function hasToolResults(msg: LLMMessage): boolean {
   return msg.content.some((b) => b.type === 'tool_result')
 }
 
+/**
+ * A user content part, plus the one extension we emit beyond the SDK's union.
+ *
+ * `video_url` is not an OpenAI part. MiniMax accepts it on its
+ * OpenAI-compatible Chat Completions route, so it is emitted for every
+ * OpenAI-shaped provider and rejected by the ones that do not understand it —
+ * the same "the provider owns block support" contract documented for images in
+ * `docs/structured-input.md`.
+ */
 type OpenAIUserContentPart = OpenAI.Chat.ChatCompletionContentPart | {
   type: 'video_url'
   video_url: { url: string }
+}
+
+/**
+ * Widen built parts to the SDK's content type at the single assignment seam.
+ *
+ * The cast is unavoidable while `video_url` sits outside
+ * `ChatCompletionContentPart`, but keeping it here means every push site stays
+ * checked against {@link OpenAIUserContentPart} instead of being cast away
+ * along with it.
+ */
+function toSDKUserContent(
+  parts: OpenAIUserContentPart[],
+): ChatCompletionUserMessageParam['content'] {
+  return parts as ChatCompletionUserMessageParam['content']
 }
 
 function toOpenAIToolAttachmentPart(part: Exclude<ToolResultContentPart, { type: 'text' }>): OpenAIUserContentPart {
@@ -211,10 +234,7 @@ export function toOpenAIMessages(
         const nonToolBlocks = msg.content.filter((b) => b.type !== 'tool_result')
         if (attachmentParts.length > 0) {
           attachmentParts.push(...toOpenAIUserContentParts({ role: 'user', content: nonToolBlocks }))
-          result.push({
-            role: 'user',
-            content: attachmentParts as unknown as ChatCompletionUserMessageParam['content'],
-          })
+          result.push({ role: 'user', content: toSDKUserContent(attachmentParts) })
         } else if (nonToolBlocks.length > 0) {
           result.push(toOpenAIUserMessage({ role: 'user', content: nonToolBlocks }))
         }
@@ -234,10 +254,7 @@ function toOpenAIUserMessage(msg: LLMMessage): ChatCompletionUserMessageParam {
     return { role: 'user', content: msg.content[0].text }
   }
 
-  return {
-    role: 'user',
-    content: toOpenAIUserContentParts(msg) as unknown as ChatCompletionUserMessageParam['content'],
-  }
+  return { role: 'user', content: toSDKUserContent(toOpenAIUserContentParts(msg)) }
 }
 
 function toOpenAIUserContentParts(msg: LLMMessage): OpenAIUserContentPart[] {

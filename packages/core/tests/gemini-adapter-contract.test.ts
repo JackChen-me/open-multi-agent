@@ -23,6 +23,7 @@ vi.mock('@google/genai', () => ({
 }))
 
 import { GeminiAdapter } from '../src/llm/gemini.js'
+import { UnsupportedContentBlockError, isRetryableError } from '../src/errors.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -182,6 +183,30 @@ describe('GeminiAdapter (contract)', () => {
       expect(parts[0].inlineData).toEqual({
         mimeType: 'image/png',
         data: 'base64data',
+      })
+    })
+
+    it('rejects video blocks with a terminal error before sending', async () => {
+      // Gemini has native video support upstream; the gap is OMA's mapping.
+      // Either way the caller gets a typed terminal failure, not a retry loop.
+      mockGenerateContent.mockResolvedValue(makeGeminiResponse([{ text: 'ok' }]))
+
+      const call = adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'video',
+            source: { type: 'base64', media_type: 'video/mp4', data: 'dmlkZW8=' },
+          }],
+        }],
+        chatOpts(),
+      )
+
+      await expect(call).rejects.toThrow(UnsupportedContentBlockError)
+      expect(mockGenerateContent).not.toHaveBeenCalled()
+      await call.catch((error: unknown) => {
+        expect(isRetryableError(error)).toBe(false)
+        expect((error as UnsupportedContentBlockError).provider).toContain('Gemini')
       })
     })
   })

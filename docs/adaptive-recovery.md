@@ -118,6 +118,28 @@ Historical tasks remain truthful in `result.tasks`: a repaired failure is still
 fail when the active repaired graph finishes successfully. Accepted revisions
 are returned in `result.planRevisions`.
 
+## Complete cookbook recipe
+
+[`commission-reconciliation-recovery.ts`](../packages/core/examples/cookbook/commission-reconciliation-recovery.ts)
+is a no-key, synthetic example of the full outcome-barrier flow. Three
+source-scoped investigations produce an initial temporal-evidence gap, a named
+`Replanner` adds targeted agreement and policy history tasks, and replacement
+tasks reconcile only their validated direct dependencies.
+
+```bash
+# Accepted repair: exits 0 with a RECONCILED outcome.
+npx tsx packages/core/examples/cookbook/commission-reconciliation-recovery.ts --case recovered
+
+# Still missing evidence: intentionally exits 1 with MANUAL_REVIEW_REQUIRED.
+npx tsx packages/core/examples/cookbook/commission-reconciliation-recovery.ts --case unresolved
+```
+
+The recipe caps recovery at one accepted revision and four added tasks. In the
+unresolved case, the replanner proposes further evidence work, OMA rejects it at
+`maxPlanRevisions`, and the application maps the final typed evidence gap to
+manual review after orchestration finishes. Manual review is an application
+terminal state, not a framework task status. Neither case performs a payment.
+
 ## Boundaries
 
 - Recovery is opt-in. Existing callers remain fixed-DAG.

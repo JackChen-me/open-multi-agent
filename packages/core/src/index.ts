@@ -201,6 +201,7 @@ export {
   LLMCallTimeoutError,
   UnsupportedToolCallError,
   UnsupportedToolResultContentError,
+  UnsupportedContentBlockError,
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
   RoutingTimeoutError,

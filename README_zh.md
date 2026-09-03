@@ -31,8 +31,8 @@
 <br />
 
 <p align="center">
-  <a href="https://open-multi-agent.com/zh/">官网</a> ·
-  <a href="https://open-multi-agent.com/zh/getting-started/introduction/">文档</a> ·
+  <a href="https://open-multi-agent.com/zh/?utm_source=github&utm_medium=readme">官网</a> ·
+  <a href="https://open-multi-agent.com/zh/getting-started/introduction/?utm_source=github&utm_medium=readme">文档</a> ·
   <a href="./packages/core/examples/">示例</a> ·
   <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a>
 </p>
@@ -166,7 +166,7 @@ OMA 面向希望任务图随目标动态生成的 TypeScript 团队。
 
 如果工作流必须逐节点手工设计，图优先框架更合适；如果只需要单个 Agent 调用，一个 LLM 工具库就够了。当多个 Agent、任务依赖、审批或恢复机制需要协同时，OMA 负责这一编排层。
 
-与 LangGraph、Mastra、CrewAI、Vercel AI SDK 等的逐项对比见[对比页](https://open-multi-agent.com/zh/compare/)。
+与 LangGraph、Mastra、CrewAI、Vercel AI SDK 等的逐项对比见[对比页](https://open-multi-agent.com/zh/compare/?utm_source=github&utm_medium=readme)。
 
 ## 包
 

@@ -56,6 +56,7 @@ import {
   resolveReasoningOutboundMaxChars,
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
+import { UnsupportedContentBlockError } from '../errors.js'
 import { assertValidMessages } from './validate.js'
 import { toolResultContentParts, toolResultText } from '../tool/result.js'
 
@@ -222,7 +223,11 @@ function toGeminiContents(
           break
 
         case 'video':
-          throw new Error('This adapter does not support video content blocks')
+          throw new UnsupportedContentBlockError(
+            'Google Gemini',
+            'video',
+            'OMA does not map video for this adapter yet',
+          )
 
         default: {
           const _exhaustive: never = block

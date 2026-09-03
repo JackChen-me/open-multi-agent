@@ -397,14 +397,14 @@ function groupIntoTurns(messages: LLMMessage[]): Turn[] {
  * inlines the result into a text user-message it ships to the summary model.
  * For an `ImageBlock` or `VideoBlock`, that serialisation includes the full
  * base64 payload — a 1MB attachment would balloon the "compression" call by
- * ~250k tokens, defeating
- * its purpose and risking context-limit rejection.
+ * ~250k tokens, defeating its purpose and risking context-limit rejection. An
+ * inline video is larger still.
  *
  * The placeholder still tells the summariser that media was present at this
  * turn, so the produced summary can reference it. Modelled on chef Janitor's
  * `stripAttachmentsForCompression`.
  */
-function stripImageBlocksForSummary(messages: LLMMessage[]): LLMMessage[] {
+function stripMediaBlocksForSummary(messages: LLMMessage[]): LLMMessage[] {
   return messages.map((msg) => {
     if (!msg.content.some(b =>
       b.type === 'image' || b.type === 'video' || (b.type === 'tool_result' && toolResultHasMedia(b.content)))) return msg
@@ -842,7 +842,7 @@ export class AgentRunner implements AgentBackend {
     // The placeholder still flags that media existed at this turn so the
     // summariser can mention it. recentPortion is untouched (returned to
     // the caller verbatim, never serialised here).
-    const oldPortionForSummary = stripImageBlocksForSummary(oldPortion)
+    const oldPortionForSummary = stripMediaBlocksForSummary(oldPortion)
     const oldSignature = oldPortionForSummary.map(m => this.serializeMessage(m)).join('\n')
     if (this.summarizeCache !== null && this.summarizeCache.oldSignature === oldSignature) {
       const derived: SyntheticPrefixRecord | undefined = rewrite ? {} : undefined

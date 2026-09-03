@@ -23,6 +23,7 @@
     "capability": {
       "enum": [
         "acp",
+        "adaptive-recovery",
         "agent-pool",
         "ai-sdk",
         "conflict-detection",
