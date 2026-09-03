@@ -60,16 +60,40 @@ jobs:
         run: |
           set -euo pipefail
           echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
-          if git diff --quiet "$RELEASE_SHA^" "$RELEASE_SHA" -- packages/core/package.json; then
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "core version manifest did not change; publication is a no-op"
-            exit 0
-          fi
-          if git diff --quiet "$RELEASE_SHA^" "$RELEASE_SHA" -- packages/create-oma-app/package.json; then
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "create-oma-app version manifest did not change; publication is a no-op"
-            exit 0
-          fi
+          # Read the version field rather than asking whether the manifest
+          # changed at all, so this agrees with the publisher's own guard:
+          # both versions must have incremented from the first parent. A
+          # dependency bump, a metadata fix, or an `exports` edit touches
+          # these files without being a release, and detecting on the file
+          # made every one of those start the publish job, mint a
+          # contents:write App token, and only then fail closed. Verified on
+          # 98516ce, a dependency-only commit that reached this step as a
+          # false positive.
+          manifest_exists() { git cat-file -e "$1:$2" 2>/dev/null; }
+          version_at() { git show "$1:$2" | jq -r '.version // empty'; }
+          for manifest in packages/core/package.json packages/create-oma-app/package.json; do
+            if ! manifest_exists "$RELEASE_SHA" "$manifest"; then
+              echo "is_release=false" >> "$GITHUB_OUTPUT"
+              echo "$manifest does not exist at $RELEASE_SHA; publication is a no-op"
+              exit 0
+            fi
+            version=$(version_at "$RELEASE_SHA" "$manifest")
+            if [ -z "$version" ]; then
+              echo "::error::$manifest declares no version at $RELEASE_SHA"
+              exit 1
+            fi
+            # A missing parent manifest means this one is new here, which
+            # counts as a change rather than a reason to skip publication.
+            parent=''
+            if manifest_exists "$RELEASE_SHA^" "$manifest"; then
+              parent=$(version_at "$RELEASE_SHA^" "$manifest")
+            fi
+            if [ "$version" = "$parent" ]; then
+              echo "is_release=false" >> "$GITHUB_OUTPUT"
+              echo "$manifest still declares $version; publication is a no-op"
+              exit 0
+            fi
+          done
           echo "is_release=true" >> "$GITHUB_OUTPUT"
 
   publish:
