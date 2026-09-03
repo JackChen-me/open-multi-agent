@@ -4,6 +4,7 @@ import {
   createJudgeScorer,
   type ScorerContext,
 } from '../src/eval/index.js'
+import { buildStructuredOutputInstruction } from '../src/agent/structured-output.js'
 import type {
   AgentConfig,
   LLMAdapter,
@@ -276,7 +277,7 @@ describe('createJudgeScorer', () => {
     expect(seenJudges).toEqual(['alpha', 'beta'])
   })
 
-  it('passes a structured judgePrompt result straight through, bypassing the text prompt template', async () => {
+  it('passes a structured judgePrompt through and lets it own the output instruction', async () => {
     const capturedMessages: LLMMessage[][] = []
     const adapter: LLMAdapter = {
       name: 'mock',
@@ -285,9 +286,15 @@ describe('createJudgeScorer', () => {
         // array and keeps growing (e.g. the assistant reply gets appended)
         // after this call returns, so a bare reference would show stale data.
         capturedMessages.push(structuredClone(messages))
+        const hasOutputInstruction = userPrompt(messages).includes('Output Format (REQUIRED)')
         return {
           id: 'response-1',
-          content: [{ type: 'text', text: '{"score":1,"reason":"matches"}' }],
+          content: [{
+            type: 'text',
+            text: hasOutputInstruction
+              ? '{"score":1,"pass":true,"reason":"matches"}'
+              : 'A verdict without the required JSON instruction.',
+          }],
           model: 'mock-model',
           stop_reason: 'end_turn',
           usage: { input_tokens: 1, output_tokens: 1 },
@@ -309,6 +316,7 @@ describe('createJudgeScorer', () => {
         content: [
           { type: 'text', text: 'What does this chart show?' },
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' } },
+          { type: 'text', text: buildStructuredOutputInstruction(verdictWithPass) },
         ],
       },
     ]
@@ -317,13 +325,15 @@ describe('createJudgeScorer', () => {
       name: 'structured',
       judges: [visionJudge],
       quorum: 1,
+      verdictSchema: verdictWithPass,
       judgePrompt: () => structuredInput,
     })
 
     await scorer.score(context())
 
     // Passed through unchanged — no "## Case input" / "## Candidate output"
-    // template wrapping from buildPrompt, and the image block survives intact.
+    // template wrapping from buildPrompt. Structured callers supply their own
+    // schema instruction, and the image block survives intact.
     expect(capturedMessages).toEqual([structuredInput])
   })
 
@@ -335,9 +345,15 @@ describe('createJudgeScorer', () => {
         async chat(messages): Promise<LLMResponse> {
           const hasImage = messages.some((message) => message.content.some((block) => block.type === 'image'))
           receivedByJudge[name] = hasImage ? 'image' : 'text'
+          const hasOutputInstruction = userPrompt(messages).includes('Output Format (REQUIRED)')
           return {
             id: `response-${name}`,
-            content: [{ type: 'text', text: '{"score":1,"reason":"ok"}' }],
+            content: [{
+              type: 'text',
+              text: hasOutputInstruction
+                ? '{"score":1,"reason":"ok"}'
+                : 'A verdict without the required JSON instruction.',
+            }],
             model: 'mock-model',
             stop_reason: 'end_turn',
             usage: { input_tokens: 1, output_tokens: 1 },
@@ -366,15 +382,26 @@ describe('createJudgeScorer', () => {
       quorum: 2,
       judgePrompt(_context, judgeConfig) {
         const supportsVision = judgeConfig.capabilities?.includes('vision') ?? false
+        const outputInstruction = buildStructuredOutputInstruction(z.object({
+          score: z.number().min(0).max(1),
+          reason: z.string(),
+        }))
         return supportsVision
           ? [{
               role: 'user',
               content: [
                 { type: 'text', text: 'Rate this image.' },
                 { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' } },
+                { type: 'text', text: outputInstruction },
               ],
             }]
-          : [{ role: 'user', content: [{ type: 'text', text: 'Rate this: chart shows upward trend.' }] }]
+          : [{
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Rate this: chart shows upward trend.' },
+                { type: 'text', text: outputInstruction },
+              ],
+            }]
       },
     })
 

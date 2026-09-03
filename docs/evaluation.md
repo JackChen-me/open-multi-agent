@@ -791,6 +791,15 @@ this — OMA does not infer it, so an unset judge falls back to whatever content
 its own `judgePrompt` branch decides to send:
 
 ```ts
+import { z } from 'zod'
+import { buildStructuredOutputInstruction } from '@open-multi-agent/core'
+
+const verdictSchema = z.object({
+  score: z.number().min(0).max(1),
+  pass: z.boolean(),
+  reason: z.string(),
+})
+
 const artifactQuality = createJudgeScorer({
   name: 'artifact-quality',
   judges: [
@@ -798,20 +807,44 @@ const artifactQuality = createJudgeScorer({
     { name: 'text-judge', model: 'gpt-5' },
   ],
   quorum: 2,
+  verdictSchema,
   judgePrompt(context, judge) {
     const supportsVision = judge.capabilities?.includes('vision') ?? false
-    return supportsVision
-      ? [{
+    const image = context.result && 'messages' in context.result
+      ? context.result.messages
+          .flatMap((message) => message.content)
+          .find((block) => block.type === 'image')
+      : undefined
+    const outputInstruction = buildStructuredOutputInstruction(verdictSchema)
+
+    if (supportsVision && image) {
+      return [{
           role: 'user',
           content: [
             { type: 'text', text: 'Rate how well this chart matches the request.' },
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: chartPng } },
+            image,
+            { type: 'text', text: outputInstruction },
           ],
         }]
-      : [{ role: 'user', content: [{ type: 'text', text: `Rate this description: ${chartDescription}` }] }]
+    }
+
+    return [{
+      role: 'user',
+      content: [
+        { type: 'text', text: `Rate this candidate output: ${String(context.output)}` },
+        { type: 'text', text: outputInstruction },
+      ],
+    }]
   },
 })
 ```
+
+When `judgePrompt` returns messages, the caller owns the complete input. OMA
+passes those messages through unchanged: it does not add the standard case
+template or a verdict-schema instruction. Append
+`buildStructuredOutputInstruction(verdictSchema)` to every branch that returns
+messages so the judge is instructed to emit JSON that `createJudgeScorer` can
+parse.
 
 A judge that fails on content it cannot handle fails the whole `score()` call —
 `createJudgeScorer` has no per-judge failure isolation. Give every non-vision
