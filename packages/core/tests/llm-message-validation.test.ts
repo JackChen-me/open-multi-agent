@@ -75,6 +75,74 @@ describe('assertValidMessages', () => {
     expect(() => assertValidMessages(invalid)).toThrow(/must use HTTP or HTTPS/)
   })
 
+  it('accepts both video source shapes', () => {
+    expect(() => assertValidMessages([{
+      role: 'user',
+      content: [
+        {
+          type: 'video',
+          source: { type: 'url', media_type: 'video/mp4', url: 'https://example.com/clip.mp4' },
+        },
+        {
+          type: 'video',
+          source: { type: 'base64', media_type: 'video/mp4', data: 'dmlkZW8=' },
+        },
+      ],
+    }])).not.toThrow()
+  })
+
+  it('rejects a video url the provider would dereference off HTTP(S)', () => {
+    // A `url` video source is fetched by the provider, not by OMA, so an
+    // unchecked scheme would hand the provider whatever the caller supplied.
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'video',
+        source: { type: 'url', media_type: 'video/mp4', url: 'file:///etc/passwd' },
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(InvalidMessageError)
+    expect(() => assertValidMessages(invalid)).toThrow(/must use HTTP or HTTPS/)
+  })
+
+  it('rejects a provider-private video reference scheme', () => {
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'video',
+        source: { type: 'url', media_type: 'video/mp4', url: 'mm_file://abc123' },
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(InvalidMessageError)
+    expect(() => assertValidMessages(invalid)).toThrow(/must be an absolute HTTP\(S\) URL/)
+  })
+
+  it('rejects a video media type that would corrupt the data URL', () => {
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'video',
+        source: { type: 'base64', media_type: 'video/mp4,evil', data: 'dmlkZW8=' },
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(/MIME type without parameters/)
+  })
+
+  it('rejects non-canonical base64 video bytes', () => {
+    const invalid = [{
+      role: 'user',
+      content: [{
+        type: 'video',
+        source: { type: 'base64', media_type: 'video/mp4', data: 'not base64!' },
+      }],
+    }] as unknown as LLMMessage[]
+
+    expect(() => assertValidMessages(invalid)).toThrow(/must contain raw base64 data/)
+  })
+
   it('requires error tool results to remain text-only', () => {
     const invalid = [{
       role: 'user',

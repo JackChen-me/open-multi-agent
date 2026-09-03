@@ -13,7 +13,7 @@
 
 import type { LLMMessage } from '../types.js'
 import { InvalidMessageError } from '../errors.js'
-import { copyToolResultContent } from '../tool/result.js'
+import { copyMediaSource, copyToolResultContent } from '../tool/result.js'
 
 function describeType(value: unknown): string {
   if (value === null) return 'null'
@@ -24,10 +24,14 @@ function describeType(value: unknown): string {
 /**
  * Assert that `messages` satisfies the shared shape every adapter relies on:
  * an array of `{ role, content }` objects whose `content` is an array of content
- * blocks. Rich `tool_result` content receives full nested validation because a
- * malformed media part otherwise fails differently across provider SDKs.
- * Other block internals remain the responsibility of their existing adapters.
- * Invalid input is rejected rather than coerced or silently reshaped.
+ * blocks. Rich `tool_result` content and `video` blocks receive full nested
+ * validation because a malformed media source otherwise fails differently
+ * across provider SDKs — or, for a `url` source, is handed to the provider to
+ * dereference on our behalf. Both carry the same source shape and go through
+ * the same {@link copyMediaSource} rules, so an absolute HTTP(S) reference or
+ * canonical base64 is the only thing that reaches an adapter. Remaining block
+ * internals stay the responsibility of their existing adapters. Invalid input
+ * is rejected rather than coerced or silently reshaped.
  */
 export function assertValidMessages(messages: readonly LLMMessage[]): void {
   if (!Array.isArray(messages)) {
@@ -83,6 +87,14 @@ export function assertValidMessages(messages: readonly LLMMessage[]): void {
           throw new InvalidMessageError(
             `messages[${i}].content[${j}].content must be a string for an error tool result`,
           )
+        }
+      }
+
+      if (record['type'] === 'video') {
+        try {
+          copyMediaSource(record['source'], `messages[${i}].content[${j}].source`)
+        } catch (error) {
+          throw new InvalidMessageError(error instanceof Error ? error.message : String(error))
         }
       }
     }

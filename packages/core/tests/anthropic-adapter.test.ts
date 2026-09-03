@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { textMsg, toolUseMsg, toolResultMsg, imageMsg, chatOpts, toolDef, collectEvents } from './helpers/llm-fixtures.js'
 import type { LLMMessage, LLMResponse, ReasoningBlock, StreamEvent, ToolUseBlock } from '../src/types.js'
-import { UnsupportedToolResultContentError } from '../src/errors.js'
+import { UnsupportedContentBlockError, UnsupportedToolResultContentError, isRetryableError } from '../src/errors.js'
 
 // ---------------------------------------------------------------------------
 // Mock the Anthropic SDK
@@ -204,6 +204,28 @@ describe('AnthropicAdapter', () => {
         chatOpts(),
       )).rejects.toThrow(UnsupportedToolResultContentError)
       expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it('rejects video blocks with a terminal error before sending', async () => {
+      mockCreate.mockResolvedValue(makeAnthropicResponse())
+
+      const call = adapter.chat(
+        [{
+          role: 'user',
+          content: [{
+            type: 'video',
+            source: { type: 'base64', media_type: 'video/mp4', data: 'dmlkZW8=' },
+          }],
+        }],
+        chatOpts(),
+      )
+
+      await expect(call).rejects.toThrow(UnsupportedContentBlockError)
+      expect(mockCreate).not.toHaveBeenCalled()
+      await call.catch((error: unknown) => {
+        expect(isRetryableError(error)).toBe(false)
+        expect((error as UnsupportedContentBlockError).blockType).toBe('video')
+      })
     })
 
     it('converts image blocks to Anthropic format', async () => {

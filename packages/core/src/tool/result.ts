@@ -22,7 +22,12 @@ function assertNonEmptyString(value: unknown, path: string): asserts value is st
   }
 }
 
-function copyMediaSource(value: unknown, path: string): ToolResultMediaSource {
+/**
+ * Validate and copy a media source: an absolute HTTP(S) reference or raw
+ * canonical base64 with a parameterless MIME type. Shared by tool-result
+ * media and by `video` content blocks, which carry the same source shape.
+ */
+export function copyMediaSource(value: unknown, path: string): ToolResultMediaSource {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`${path} must be a media source object`)
   }

@@ -61,7 +61,7 @@ import {
   type ReasoningOutboundOptions,
 } from './reasoning-fallback.js'
 import { assertValidMessages } from './validate.js'
-import { UnsupportedToolResultContentError } from '../errors.js'
+import { UnsupportedContentBlockError, UnsupportedToolResultContentError } from '../errors.js'
 import { toolResultContentParts } from '../tool/result.js'
 
 // ---------------------------------------------------------------------------
@@ -216,7 +216,11 @@ function toBedrockContentBlock(
     }
 
     case 'video':
-      throw new Error('This adapter does not support video content blocks')
+      throw new UnsupportedContentBlockError(
+        'Amazon Bedrock Converse',
+        'video',
+        'OMA does not map video for this adapter yet',
+      )
 
     default: {
       const _exhaustive: never = block

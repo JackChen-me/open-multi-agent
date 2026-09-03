@@ -6,6 +6,7 @@ import {
   StructuredOutputValidationError,
   UnsupportedToolCallError,
   UnsupportedToolResultContentError,
+  UnsupportedContentBlockError,
 } from '../src/errors.js'
 
 describe('TokenBudgetExceededError', () => {
@@ -104,6 +105,28 @@ describe('UnsupportedToolResultContentError', () => {
     expect(err.provider).toBe('Anthropic Messages')
     expect(err.contentType).toBe('file:text/plain')
     expect(err.message).toContain('only PDF files are supported')
+  })
+})
+
+describe('UnsupportedContentBlockError', () => {
+  it('identifies the provider and the block it cannot map', () => {
+    const err = new UnsupportedContentBlockError(
+      'Anthropic Messages',
+      'video',
+      'OMA does not map video for this adapter yet',
+    )
+    expect(err.name).toBe('UnsupportedContentBlockError')
+    expect(err.code).toBe('UNSUPPORTED_CONTENT_BLOCK')
+    expect(err.provider).toBe('Anthropic Messages')
+    expect(err.blockType).toBe('video')
+    expect(err.message).toContain('Anthropic Messages')
+    expect(err.message).toContain('video')
+    expect(err.message).toContain('OMA does not map video for this adapter yet')
+  })
+
+  it('omits the detail clause when none is given', () => {
+    const err = new UnsupportedContentBlockError('Google Gemini', 'video')
+    expect(err.message).toBe('Google Gemini cannot represent the "video" content block')
   })
 })
 

@@ -9,6 +9,7 @@ import {
   StructuredOutputValidationError,
   UnsupportedToolCallError,
   UnsupportedToolResultContentError,
+  UnsupportedContentBlockError,
 } from '../src/errors.js'
 import { classifyRunFailure } from '../src/observability/status.js'
 
@@ -57,6 +58,18 @@ describe('isRetryableError', () => {
       taskTitle: 'Restricted',
       reasons: ['worker excluded'],
     }]))).toBe(false)
+  })
+
+  it('classifies an unsupported content block as terminal', () => {
+    // A block the adapter has no mapping for cannot become mappable on a
+    // second attempt, so retrying only spends the backoff ladder and a
+    // checkpoint rewrite per attempt before failing the same way.
+    const error = new UnsupportedContentBlockError('Google Gemini', 'video')
+    expect(isRetryableError(error)).toBe(false)
+    expect(error.code).toBe('UNSUPPORTED_CONTENT_BLOCK')
+    expect(error.message).toContain('Google Gemini')
+    expect(error.message).toContain('video')
+    expect(classifyRunFailure(error).errorInfo.retryable).toBe(false)
   })
 
   it('classifies a per-call timeout as retryable', () => {

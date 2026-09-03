@@ -55,15 +55,9 @@ CI is the source of truth for the full pre-merge matrix. It runs lint, unit test
 2. Make your changes
 3. Add or update tests and user-facing documentation when behavior changes
 4. Run the checks relevant to your change and note any skipped checks with a reason
-5. Open a PR against `main`
+5. Open a PR against `main`, titled as a conventional commit such as `fix(core): reject empty tool names`
 
-### PR Checklist
-
-- [ ] Tests cover changed behavior, or the PR explains why tests are not needed
-- [ ] User-facing documentation and examples are updated, or marked not applicable
-- [ ] Compatibility, breaking changes, and migration requirements are documented, or marked not applicable
-- [ ] Dependency changes are justified and follow the package-specific rules below
-- [ ] The PR links a relevant issue when one exists
+Opening a PR prefills the [pull request template](pull_request_template.md), which carries the review checklist. Fill in the sections it asks for instead of deleting them, and write "None" or "Not applicable" where a category does not apply.
 
 ## Code Style
 

@@ -22,8 +22,15 @@ export function estimateTokens(messages: LLMMessage[]): number {
         // Account for non-text payloads with a small fixed cost.
         chars += 64
       } else if (block.type === 'video') {
-        // Video bytes are opaque to the lightweight estimator.
-        chars += 64
+        // Deliberately not the fixed cost images get. An inline video runs to
+        // tens of megabytes, and charging it 64 characters leaves the context
+        // strategies blind to the payload that dominates every request: they
+        // would never compact the one block worth compacting. Sized the same
+        // way `toolResultContentSize` sizes rich tool-result media.
+        chars += block.source.type === 'base64'
+          ? block.source.data.length
+          : block.source.url.length
+        chars += block.source.media_type.length + 32
       }
     }
   }
