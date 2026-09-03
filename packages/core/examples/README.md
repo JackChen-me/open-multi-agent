@@ -81,6 +81,7 @@ End-to-end examples framed around a concrete problem (meeting summarization, tra
 | Example | Problem solved |
 |---------|----------------|
 | [`cookbook/adaptive-customer-support`](cookbook/adaptive-customer-support.ts) | `runTeam()` selects only the relevant specialists for a shipping or billing escalation, then synthesizes a grounded customer response. |
+| [`cookbook/commission-reconciliation-recovery`](cookbook/commission-reconciliation-recovery.ts) | No-key repairable reconciliation: `--case recovered` completes a targeted evidence repair; `--case unresolved` reaches the real revision limit and fails closed to `MANUAL_REVIEW_REQUIRED` (intentional exit 1), while both preserve truthful task history. |
 | [`cookbook/meeting-summarizer`](cookbook/meeting-summarizer.ts) | Fan-out post-processing of a transcript into summary, structured action items, and sentiment. |
 | [`cookbook/contract-review-dag`](cookbook/contract-review-dag.ts) | 4-task DAG (extract → compliance-check + summary → notify) with step-level retry. Run normally or with `FORCE_FAIL=task2` to exercise retry. |
 | [`cookbook/incident-postmortem-dag`](cookbook/incident-postmortem-dag.ts) | 5-task DAG with three parallel root tasks (log patterns + deploy correlation + blast radius) feeding root-cause hypothesis and final postmortem synthesis. |

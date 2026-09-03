@@ -74,6 +74,17 @@
       "featuredOrder": 1
     },
     {
+      "id": "commission-reconciliation-recovery",
+      "path": "cookbook/commission-reconciliation-recovery.ts",
+      "title": "Commission Reconciliation Recovery",
+      "description": "Repair a typed evidence gap with targeted archive lookups, or stop at a real recovery limit and fail closed to manual review, while retaining truthful task history.",
+      "section": "goal",
+      "goal": "use-case-recipes",
+      "capabilities": ["run-tasks", "task-dependencies", "structured-output"],
+      "format": "script",
+      "level": "intermediate"
+    },
+    {
       "id": "contract-review-dag",
       "path": "cookbook/contract-review-dag.ts",
       "title": "Contract Review DAG",
