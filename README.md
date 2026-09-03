@@ -31,8 +31,8 @@
 <br />
 
 <p align="center">
-  <a href="https://open-multi-agent.com">Website</a> ·
-  <a href="https://open-multi-agent.com/getting-started/introduction/">Docs</a> ·
+  <a href="https://open-multi-agent.com/?utm_source=github&utm_medium=readme">Website</a> ·
+  <a href="https://open-multi-agent.com/getting-started/introduction/?utm_source=github&utm_medium=readme">Docs</a> ·
   <a href="./packages/core/examples/">Examples</a> ·
   <a href="https://www.npmjs.com/package/@open-multi-agent/core">npm</a>
 </p>
@@ -167,7 +167,7 @@ OMA is designed for TypeScript teams that want the task graph to emerge from the
 
 Choose a graph-first framework when the workflow must be authored node by node. Use an LLM toolkit alone when one agent call is enough. OMA sits at the orchestration layer when several agents, dependencies, approvals, or recovery steps must work together.
 
-For a named head-to-head against LangGraph, Mastra, CrewAI, the Vercel AI SDK, and others, see the [comparison page](https://open-multi-agent.com/compare/).
+For a named head-to-head against LangGraph, Mastra, CrewAI, the Vercel AI SDK, and others, see the [comparison page](https://open-multi-agent.com/compare/?utm_source=github&utm_medium=readme).
 
 ## Packages
 
