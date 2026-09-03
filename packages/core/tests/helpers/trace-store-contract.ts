@@ -1,7 +1,23 @@
+/**
+ * Behavioral contract for {@link TraceStore} implementations.
+ *
+ * Imports resolve through the public barrels rather than deep `src/` paths, so
+ * the suite type-checks against exactly the surface a third-party implementer
+ * sees. Only the observability barrel is a runtime import; the root-barrel
+ * types are erased at compile time and cost the consumer nothing.
+ */
+
 import { describe, expect, it } from 'vitest'
-import type { RunStatusCode, TraceLink } from '../../src/types.js'
-import type { SpanEndRecord, SpanEventRecord, SpanStartRecord, TraceRecord } from '../../src/observability/records.js'
-import { TraceStoreError, type TraceStore, type TraceStoreDiagnostic } from '../../src/observability/store.js'
+import type { RunStatusCode, TraceLink } from '../../src/index.js'
+import {
+  TraceStoreError,
+  type SpanEndRecord,
+  type SpanEventRecord,
+  type SpanStartRecord,
+  type TraceRecord,
+  type TraceStore,
+  type TraceStoreDiagnostic,
+} from '../../src/observability/index.js'
 
 export interface TraceStoreContractFactoryOptions {
   readonly now?: () => number
@@ -66,7 +82,11 @@ function event(options: AttemptOptions): SpanEventRecord {
   }
 }
 
-/** Reusable behavioral suite. OBS-4B should invoke this unchanged for FileTraceStore. */
+/**
+ * Reusable behavioral suite. Both shipped stores run it unchanged:
+ * `InMemoryTraceStore` in `trace-store-contract.test.ts` and `FileTraceStore`
+ * in `file-trace-store.test.ts`.
+ */
 export function runTraceStoreContractSuite(name: string, createStore: TraceStoreContractFactory): void {
   describe(`${name} TraceStore contract`, () => {
     it('makes a valid batch atomically visible and rejects an invalid batch atomically', async () => {
@@ -85,7 +105,9 @@ export function runTraceStoreContractSuite(name: string, createStore: TraceStore
       const store = createStore()
       const records = attemptRecords({ runId: 'dedupe', attributes: { custom: 'first' } })
       await store.append(records)
-      records[0]!.attributes = { custom: 'mutated' } as never
+      // `TraceRecord.attributes` is readonly by type; mutate through a writable
+      // view to prove the store copied rather than retained the caller's object.
+      ;(records[0] as { attributes: Record<string, unknown> }).attributes = { custom: 'mutated' }
       await expect(store.append(records)).resolves.toMatchObject({ written: 0, deduplicated: 2 })
       const first = await store.getRun('dedupe', { includeRecords: true })
       expect(first?.records?.[0]?.attributes).toMatchObject({ custom: 'first' })
@@ -258,7 +280,9 @@ export function runTraceStoreContractSuite(name: string, createStore: TraceStore
       const record = {
         ...attemptRecords({ runId: 'minor-field', endOnly: true })[0]!,
         futureMinorField: { preserved: true },
-      } as TraceRecord
+        // A forward-compatible record carries fields this version has no type
+        // for, so the widening cast is the point of the case, not an oversight.
+      } as unknown as TraceRecord
       await store.append([record])
       expect((await store.getRun('minor-field', { includeRecords: true }))?.records?.[0])
         .toMatchObject({ futureMinorField: { preserved: true } })

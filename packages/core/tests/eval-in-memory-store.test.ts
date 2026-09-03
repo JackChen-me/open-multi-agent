@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { InMemoryEvalStore } from '../src/eval/store.js'
-import { evalRecord, runEvalStoreContractSuite } from './eval-store-contract.js'
+import { evalRecord, runEvalStoreContractSuite } from './helpers/eval-store-contract.js'
 
 runEvalStoreContractSuite(
   'InMemoryEvalStore',
