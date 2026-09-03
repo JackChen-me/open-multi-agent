@@ -15,6 +15,7 @@ export const EXAMPLE_GOALS = [
 
 export const EXAMPLE_CAPABILITIES = [
   'acp',
+  'adaptive-recovery',
   'agent-pool',
   'ai-sdk',
   'conflict-detection',

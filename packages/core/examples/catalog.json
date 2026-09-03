@@ -80,7 +80,7 @@
       "description": "Repair a typed evidence gap with targeted archive lookups, or stop at a real recovery limit and fail closed to manual review, while retaining truthful task history.",
       "section": "goal",
       "goal": "use-case-recipes",
-      "capabilities": ["run-tasks", "task-dependencies", "structured-output"],
+      "capabilities": ["run-tasks", "adaptive-recovery", "task-dependencies", "structured-output"],
       "format": "script",
       "level": "intermediate"
     },
