@@ -64,6 +64,7 @@ Opening a PR prefills the [pull request template](pull_request_template.md), whi
 - TypeScript strict mode, ES modules (`.js` extensions in imports)
 - No additional linter/formatter configured — follow existing patterns
 - Keep dependency ownership explicit. Core must remain importable and runnable without optional integrations
+- Pin what stays in the repository; keep ranges on what a consumer installs. Every `devDependencies` entry is pinned to an exact version and the root [`.npmrc`](../.npmrc) sets `save-exact=true`, but core's `dependencies`, every `peerDependencies`, and otel's `@open-multi-agent/core` stay semver ranges. `save-exact` will pin a new dependency added to one of those blocks, so widen it by hand — CI fails when one is left exact
 - Add new optional provider SDKs as peer dependencies and load them lazily with dynamic `import()`
 - Keep OpenTelemetry APIs, SDKs, semantic-convention packages, and exporters in `@open-multi-agent/otel`, never in the core root import
 - Version `@open-multi-agent/otel` independently from core and express core compatibility in its dependency range

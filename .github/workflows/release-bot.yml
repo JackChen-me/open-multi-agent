@@ -56,7 +56,7 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: Configure auditable bot commit identity
         env:
