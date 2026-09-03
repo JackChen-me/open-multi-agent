@@ -18,36 +18,9 @@ Steps to reproduce the behavior:
 2. Call `runTeam(...)` with '...'
 3. See error
 
-## Current behavior
-
-Describe the observed behavior or the deterministic failing-test procedure.
-
 ## Expected behavior
 
 A clear description of what you expected to happen.
-
-## Acceptance criteria
-
-- State each objectively verifiable result as a separate bullet.
-- Include the focused test or command outcome when one is known.
-
-## Target paths
-
-- `path/to/exact-file.test.ts`
-
-Use normalized repository-relative files or directories. Do not use globs.
-
-## Out of scope
-
-- List code, behavior, public APIs, dependencies, or workspaces that must not change.
-
-## Open decisions
-
-None.
-
-## Blockers
-
-None.
 
 ## Error output
 
