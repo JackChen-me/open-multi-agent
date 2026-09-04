@@ -120,8 +120,14 @@ export interface ReleasePackageSummary {
 
 /** One outside contributor and what they landed in this release. */
 export interface ReleaseContributor {
-  /** GitHub login when the commit carried a noreply address, else the author name. */
+  /** GitHub login when one was resolved, else the author's display name. */
   readonly name: string
+  /**
+   * Whether {@link name} is a GitHub login rather than a display name, which
+   * decides whether it is safe to @-mention. See the Thanks section in
+   * {@link composeReleaseBody}.
+   */
+  readonly isLogin: boolean
   /** What they landed, one entry per merged commit, already stripped of its type prefix. */
   readonly contributions: readonly string[]
 }
@@ -158,11 +164,18 @@ export function composeReleaseBody(input: ReleaseBodyInput): string {
     return `- \`${item.name}\`: \`${item.version}\``
   })
 
-  // Plain names, never `@handle`: a release body that mentions an account
-  // notifies it, and this text is published without the person reviewing it.
+  // @-mention a contributor so the credit reaches them, but only when the name
+  // is a login GitHub itself confirmed. A display name is not a handle and can
+  // belong to someone else: v1.17.0 credited `s4kura` for #549 when the author
+  // was `Iams4kura`. As plain text that was a wrong name; as an @-mention it
+  // would have notified an uninvolved stranger, in a body this bot publishes
+  // without anyone reviewing it first. So the display-name fallback stays plain.
   const thanks = (input.contributors ?? [])
     .filter(contributor => contributor.contributions.length > 0)
-    .map(contributor => `- ${contributor.name}: ${contributor.contributions.join('; ')}`)
+    .map(contributor => {
+      const credit = contributor.isLogin ? `@${contributor.name}` : contributor.name
+      return `- ${credit}: ${contributor.contributions.join('; ')}`
+    })
   const thanksSection = thanks.length > 0 ? `\n## Thanks\n\n${thanks.join('\n')}\n` : ''
 
   return `${input.notes}
@@ -180,8 +193,24 @@ npm create oma-app@latest my-oma
 `
 }
 
+/**
+ * The title names every package this release publishes.
+ *
+ * It used to hard-code core and create-oma-app, so a release that republished
+ * otel never said so: v1.18.0 shipped otel 0.1.3 under a title that named two
+ * packages. otel is the only conditional one, because a release always moves
+ * core and create-oma-app, and `bumps.otel === null` is the same signal the
+ * body's package table already switches on.
+ *
+ * The `chore: release core vX.Y.Z` prefix is load-bearing and must stay first:
+ * `prepareReleasePr` recognizes an already-open release PR by it, and this
+ * string is also the release commit subject.
+ */
 export function buildReleasePrTitle(plan: ReleasePlan): string {
-  return `chore: release core v${plan.nextVersions.core} and create-oma-app v${plan.nextVersions.createOmaApp}`
+  const core = `core v${plan.nextVersions.core}`
+  const scaffolder = `create-oma-app v${plan.nextVersions.createOmaApp}`
+  if (plan.bumps.otel === null) return `chore: release ${core} and ${scaffolder}`
+  return `chore: release ${core}, otel v${plan.nextVersions.otel}, and ${scaffolder}`
 }
 
 export function buildReleasePrBody(plan: ReleasePlan): string {

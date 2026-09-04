@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   applyReleasePlan,
   buildReleasePrBody,
+  buildReleasePrTitle,
   composeReleaseBody,
   insertReleaseEntry,
   renderReleaseNotes,
@@ -118,6 +119,31 @@ describe('release plan materialization', () => {
     expect(body).toContain('Version calculation, template pins')
     expect(body).toContain('Merging this PR is the human release approval')
   })
+
+  it('titles a two-package release with core and the scaffolder', () => {
+    expect(buildReleasePrTitle(plan)).toBe('chore: release core v1.15.0 and create-oma-app v0.8.0')
+  })
+
+  it('names otel in the title when otel is part of the release', () => {
+    // v1.18.0 published otel 0.1.3 under a title that named two packages,
+    // because the title hard-coded them while the body's table did not.
+    const otelPlan: ReleasePlan = {
+      ...plan,
+      nextVersions: { ...plan.nextVersions, otel: '0.1.2' },
+      bumps: { ...plan.bumps, otel: 'patch' },
+    }
+
+    expect(buildReleasePrTitle(otelPlan))
+      .toBe('chore: release core v1.15.0, otel v0.1.2, and create-oma-app v0.8.0')
+  })
+
+  it('keeps the prefix prepareReleasePr matches on in both shapes', () => {
+    const otelPlan: ReleasePlan = { ...plan, bumps: { ...plan.bumps, otel: 'patch' } }
+    const prefix = /^chore: release core v\d+\.\d+\.\d+\b/i
+
+    expect(buildReleasePrTitle(plan)).toMatch(prefix)
+    expect(buildReleasePrTitle(otelPlan)).toMatch(prefix)
+  })
 })
 
 async function createFixture(): Promise<string> {
@@ -193,6 +219,32 @@ describe('published release body', () => {
       .filter(line => line.length > 0 && /^\s+\S/.test(line))
 
     expect(continuations).toEqual([])
+  })
+
+  it('@-mentions a contributor whose name is a confirmed GitHub login', () => {
+    const body = composeReleaseBody({
+      notes: '### Added\n\n- Something.',
+      coreVersion: '1.15.0',
+      packages,
+      contributors: [{ name: 'green3sf', isLogin: true, contributions: ['add a verify loop (#541)'] }],
+    })
+
+    expect(body).toContain('- @green3sf: add a verify loop (#541)')
+  })
+
+  it('leaves a display-name fallback unmentioned so it cannot notify a stranger', () => {
+    // v1.17.0 credited `s4kura` for #549 when the author was `Iams4kura`. An
+    // unresolved display name is not a handle, and this body is published
+    // without anyone reviewing it, so it must never become an @-mention.
+    const body = composeReleaseBody({
+      notes: '### Added\n\n- Something.',
+      coreVersion: '1.15.0',
+      packages,
+      contributors: [{ name: 'Ada Lovelace', isLogin: false, contributions: ['tighten a guard (#12)'] }],
+    })
+
+    expect(body).toContain('- Ada Lovelace: tighten a guard (#12)')
+    expect(body).not.toContain('@Ada Lovelace')
   })
 
   it('refuses a package set that does not carry core', () => {

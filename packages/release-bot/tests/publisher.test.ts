@@ -61,7 +61,7 @@ describe('deterministic publisher', () => {
     expect(body).toContain('@open-multi-agent/core@1.15.0')
     // Outside contributors only: the maintainer and the bot are filtered out.
     expect(body).toContain('## Thanks')
-    expect(body).toContain('- green3sf: add a verify loop (#541)')
+    expect(body).toContain('- @green3sf: add a verify loop (#541)')
     expect(body).not.toContain('Jack Chen')
     expect(body).not.toContain('oma-release-bot')
 
@@ -270,7 +270,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(contributors).toEqual([
-      { name: 'green3sf', contributions: ['add a verify loop (#541)', 'refresh output (#536)'] },
+      { name: 'green3sf', isLogin: true, contributions: ['add a verify loop (#541)', 'refresh output (#536)'] },
     ])
   })
 
@@ -284,7 +284,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(contributors).toEqual([
-      { name: 'Iams4kura', contributions: ['align required fields (#549)'] },
+      { name: 'Iams4kura', isLogin: true, contributions: ['align required fields (#549)'] },
     ])
   })
 
@@ -297,7 +297,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(calls).toEqual([])
-    expect(contributors).toEqual([{ name: 'green3sf', contributions: ['a fix (#1)'] }])
+    expect(contributors).toEqual([{ name: 'green3sf', isLogin: true, contributions: ['a fix (#1)'] }])
   })
 
   it('falls back to the author name when no account claims the commit', async () => {
@@ -308,7 +308,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(contributors).toEqual([
-      { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
+      { name: 'Ada Lovelace', isLogin: false, contributions: ['tighten a guard (#12)'] },
     ])
   })
 
@@ -321,7 +321,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(contributors).toEqual([
-      { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
+      { name: 'Ada Lovelace', isLogin: false, contributions: ['tighten a guard (#12)'] },
     ])
   })
 
@@ -332,7 +332,7 @@ describe('release contributor collection', () => {
     } as Parameters<typeof collectReleaseContributors>[0])
 
     expect(contributors).toEqual([
-      { name: 'Ada Lovelace', contributions: ['tighten a guard (#12)'] },
+      { name: 'Ada Lovelace', isLogin: false, contributions: ['tighten a guard (#12)'] },
     ])
   })
 
@@ -349,7 +349,7 @@ describe('release contributor collection', () => {
 
     expect(calls).toEqual(['a'.repeat(40)])
     expect(contributors).toEqual([
-      { name: 'Iams4kura', contributions: ['first (#1)', 'second (#2)'] },
+      { name: 'Iams4kura', isLogin: true, contributions: ['first (#1)', 'second (#2)'] },
     ])
   })
 

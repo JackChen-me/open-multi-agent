@@ -208,21 +208,21 @@ export async function collectReleaseContributors(
     { cwd: options.repoRoot },
   )
   const excluded = new Set(options.excludedContributors ?? DEFAULT_EXCLUDED_CONTRIBUTORS)
-  const byName = new Map<string, string[]>()
+  const byName = new Map<string, { isLogin: boolean; contributions: string[] }>()
   const loginByEmail = new Map<string, string | null>()
   for (const record of log.stdout.split('\u001e')) {
     const line = record.trim()
     if (line === '') continue
     const [sha = '', author = '', email = '', subject = ''] = line.split('\u001f')
-    const name = await resolveContributorName(sha, author, email, options.github, loginByEmail)
+    const { name, isLogin } = await resolveContributorName(sha, author, email, options.github, loginByEmail)
     if (name === '' || name.endsWith('[bot]') || excluded.has(name)) continue
     const contribution = describeContribution(subject)
     if (contribution === '') continue
     const existing = byName.get(name)
-    if (existing) existing.push(contribution)
-    else byName.set(name, [contribution])
+    if (existing) existing.contributions.push(contribution)
+    else byName.set(name, { isLogin, contributions: [contribution] })
   }
-  return [...byName].map(([name, contributions]) => ({ name, contributions }))
+  return [...byName].map(([name, entry]) => ({ name, isLogin: entry.isLogin, contributions: entry.contributions }))
 }
 
 /**
@@ -240,6 +240,10 @@ export async function collectReleaseContributors(
  * function had before, rather than failing a publish over a name. The result
  * is cached per address, so a contributor with several commits costs one
  * request and a transient failure degrades that contributor consistently.
+ *
+ * `isLogin` reports which of those happened, because the release body may only
+ * @-mention a confirmed login. A degraded display name is credited as plain
+ * text rather than used to notify whichever account happens to hold it.
  */
 async function resolveContributorName(
   sha: string,
@@ -247,16 +251,18 @@ async function resolveContributorName(
   email: string,
   github: GitHubClient | undefined,
   loginByEmail: Map<string, string | null>,
-): Promise<string> {
+): Promise<{ readonly name: string; readonly isLogin: boolean }> {
   const address = email.trim()
   const noreply = /^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/.exec(address)
-  if (noreply?.[1]) return noreply[1].trim()
-  if (!github || sha === '') return author.trim()
+  if (noreply?.[1]) return { name: noreply[1].trim(), isLogin: true }
+  if (!github || sha === '') return { name: author.trim(), isLogin: false }
 
   if (!loginByEmail.has(address)) {
     loginByEmail.set(address, await github.getCommitAuthorLogin(sha).catch(() => null))
   }
-  return (loginByEmail.get(address) ?? author).trim()
+  const login = loginByEmail.get(address)
+  if (login) return { name: login.trim(), isLogin: true }
+  return { name: author.trim(), isLogin: false }
 }
 
 /** `feat(examples): add a thing (#12)` becomes `add a thing (#12)`. */
