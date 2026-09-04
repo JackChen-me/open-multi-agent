@@ -14,8 +14,9 @@
   classification.
 - Tool input and output are now recorded on execute_tool v2 spans as
   oma.tool.input and oma.tool.output when the trace capture policy opts in.
-- Added contentCapture: { mode: 'upstream-policy' } to @open-multi-agent/otel,
-  forwarding core's opt-in tool input/output attributes.
+- Added contentCapture: { mode: 'upstream-policy' } to
+  @open-multi-agent/otel 0.1.3, forwarding core's opt-in tool input/output
+  attributes.
 - Evaluation judgePrompt can now return per-judge structured LLMMessage[] input
   in addition to the existing plain-text form.
 
@@ -26,6 +27,9 @@
   correctly.
 - The @open-multi-agent/otel contentCapture option is widened from only
   'disabled' to 'disabled' or 'upstream-policy'; default behavior is unchanged.
+- Evaluation judgePrompt is now invoked once per judge instead of once per
+  score() call, so a quorum calls it once for each member. Callers whose
+  judgePrompt is costly or has side effects will see the additional calls.
 
 ### Fixed
 
@@ -46,10 +50,11 @@
   classifications are unchanged.
 - To retain tool arguments/results previously delivered by the legacy onTrace
   callback, enable the core capture policy and the otel upstream-policy mode;
-  both opt-ins are required.
+  both opt-ins are required, and the mode needs @open-multi-agent/otel 0.1.3 or
+  newer.
 - Eval callers using judgePrompt's structured return path must append
   buildStructuredOutputInstruction themselves; the existing (context) => string
-  form is unchanged.
+  signature is unchanged and its result is still wrapped by the text template.
 - Video sources must be absolute HTTP(S) URLs or raw base64 with a parameterless
   MIME type; adapters without a video mapping fail fast with the terminal
   unsupported-content-block error rather than retrying.
