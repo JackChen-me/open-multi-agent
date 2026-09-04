@@ -1,6 +1,6 @@
 {
   "name": "@open-multi-agent/otel",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Optional OpenTelemetry adapter for @open-multi-agent/core TraceRecord v2.",
   "files": [
     "dist",

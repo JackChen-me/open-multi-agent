@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+## 1.18.0 - 2026-09-04
+
+### Added
+
+- Added VideoBlock with base64 or absolute HTTP(S) URL sources to the public
+  content-block API, serialized as an OpenAI-compatible video_url part for
+  MiniMax-compatible chat.
+- Added UnsupportedContentBlockError for adapters that cannot represent a
+  content block; unsupported video input is terminal and excluded from retry
+  classification.
+- Tool input and output are now recorded on execute_tool v2 spans as
+  oma.tool.input and oma.tool.output when the trace capture policy opts in.
+- Added contentCapture: { mode: 'upstream-policy' } to @open-multi-agent/otel,
+  forwarding core's opt-in tool input/output attributes.
+- Evaluation judgePrompt can now return per-judge structured LLMMessage[] input
+  in addition to the existing plain-text form.
+
+### Changed
+
+- Context-summary preparation now strips video blocks like image blocks, and
+  token estimation sizes inline video as rich media so compaction triggers
+  correctly.
+- The @open-multi-agent/otel contentCapture option is widened from only
+  'disabled' to 'disabled' or 'upstream-policy'; default behavior is unchanged.
+
+### Fixed
+
+- Fixed v2 trace sinks silently dropping tool input/output that the legacy
+  onTrace callback delivered; recording is now gated by an explicit capture
+  policy with default behavior unchanged.
+
+### Compatibility
+
+- Core remains backward-compatible: all reviewable executable changes are
+  additive exports, an additive ContentBlock union member, trailing optional
+  parameters, or opt-in trace attributes; no published dependency/peer ranges or
+  engine floors changed.
+- TypeScript consumers doing exhaustive matching over ContentBlock should add a
+  'video' case or default when upgrading because the union is widened.
+- No migration is required for default callers: v2 tool I/O capture remains off,
+  otel contentCapture remains disabled by default, and existing retry
+  classifications are unchanged.
+- To retain tool arguments/results previously delivered by the legacy onTrace
+  callback, enable the core capture policy and the otel upstream-policy mode;
+  both opt-ins are required.
+- Eval callers using judgePrompt's structured return path must append
+  buildStructuredOutputInstruction themselves; the existing (context) => string
+  form is unchanged.
+- Video sources must be absolute HTTP(S) URLs or raw base64 with a parameterless
+  MIME type; adapters without a video mapping fail fast with the terminal
+  unsupported-content-block error rather than retrying.
+
 ## 1.17.0 - 2026-08-28
 
 ### Added
