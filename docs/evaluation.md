@@ -793,12 +793,32 @@ its own `judgePrompt` branch decides to send:
 ```ts
 import { z } from 'zod'
 import { buildStructuredOutputInstruction } from '@open-multi-agent/core'
+import type { ImageBlock, LLMMessage } from '@open-multi-agent/core'
 
 const verdictSchema = z.object({
   score: z.number().min(0).max(1),
   pass: z.boolean(),
   reason: z.string(),
 })
+
+/**
+ * The newest image the run produced. A tool-produced artifact arrives as an
+ * image part nested inside a `tool_result` block rather than as a top-level
+ * image block, and only its base64 variant can be replayed into judge input.
+ */
+function latestImage(messages: readonly LLMMessage[]): ImageBlock | undefined {
+  for (const block of messages.flatMap((message) => message.content).reverse()) {
+    if (block.type === 'image') return block
+    if (block.type === 'tool_result' && typeof block.content !== 'string') {
+      for (const part of [...block.content].reverse()) {
+        if (part.type === 'image' && part.source.type === 'base64') {
+          return { type: 'image', source: part.source }
+        }
+      }
+    }
+  }
+  return undefined
+}
 
 const artifactQuality = createJudgeScorer({
   name: 'artifact-quality',
@@ -811,21 +831,19 @@ const artifactQuality = createJudgeScorer({
   judgePrompt(context, judge) {
     const supportsVision = judge.capabilities?.includes('vision') ?? false
     const image = context.result && 'messages' in context.result
-      ? context.result.messages
-          .flatMap((message) => message.content)
-          .find((block) => block.type === 'image')
+      ? latestImage(context.result.messages)
       : undefined
     const outputInstruction = buildStructuredOutputInstruction(verdictSchema)
 
     if (supportsVision && image) {
       return [{
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Rate how well this chart matches the request.' },
-            image,
-            { type: 'text', text: outputInstruction },
-          ],
-        }]
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Rate how well this chart matches the request.' },
+          image,
+          { type: 'text', text: outputInstruction },
+        ],
+      }]
     }
 
     return [{
@@ -845,6 +863,13 @@ template or a verdict-schema instruction. Append
 `buildStructuredOutputInstruction(verdictSchema)` to every branch that returns
 messages so the judge is instructed to emit JSON that `createJudgeScorer` can
 parse.
+
+Locating the artifact is the caller's job too: `ScorerContext` exposes the run
+transcript, not a produced artifact. Only content the caller passed into the run
+appears as a top-level image block. A scorer that searches those alone silently
+judges the run's own input image, or drops to its text branch with no image at
+all when the run took no image input. Search nested `tool_result` content as
+well, as `latestImage` above does.
 
 A judge that fails on content it cannot handle fails the whole `score()` call —
 `createJudgeScorer` has no per-judge failure isolation. Give every non-vision
