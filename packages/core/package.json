@@ -134,17 +134,17 @@
     }
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "^1.2.1",
-    "@ai-sdk/openai": "^4.0.0",
-    "@ai-sdk/provider": "^4.0.0",
-    "@aws-sdk/client-bedrock-runtime": "^3.1040.0",
-    "@google/genai": "^1.48.0",
-    "@modelcontextprotocol/sdk": "^1.18.0",
-    "@types/node": "^22.0.0",
-    "@vitest/coverage-v8": "^2.1.9",
-    "ai": "^7.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "@agentclientprotocol/sdk": "1.2.1",
+    "@ai-sdk/openai": "4.0.27",
+    "@ai-sdk/provider": "4.0.4",
+    "@aws-sdk/client-bedrock-runtime": "3.1101.0",
+    "@google/genai": "1.48.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@types/node": "22.19.15",
+    "@vitest/coverage-v8": "2.1.9",
+    "ai": "7.0.47",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
   }
 }

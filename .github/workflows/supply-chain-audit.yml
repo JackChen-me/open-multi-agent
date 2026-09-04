@@ -1,0 +1,98 @@
+name: Supply chain audit
+
+# Two questions about the dependencies that actually reach a consumer of the
+# published packages, asked on a schedule rather than on every pull request.
+#
+# `--omit=dev` is the whole point of running this separately. A full audit of
+# this repository reports well over a dozen advisories, every one of them in
+# the development tree (test runner, provider SDK fixtures, scaffolder
+# tooling) where nothing ships to npm. Auditing that tree on a schedule would
+# produce a permanently red job that everyone learns to ignore. The production
+# tree is small enough that a finding in it is worth reading.
+#
+# The two steps fail differently on purpose:
+#
+#   - `npm audit` REPORTS. A new advisory upstream is not this repository
+#     misbehaving, and there may be no fixed version to move to yet. The
+#     finding lands in the run summary; a maintainer decides what it means.
+#   - `npm audit signatures` FAILS. It compares the bytes npm served against
+#     the registry's own signature, so a mismatch is a tampering or corruption
+#     signal rather than upstream churn. Every production package verifies
+#     today, so this starts green and only turns red when something is wrong.
+#
+# Neither step gates a pull request. Scheduling this an hour before the weekly
+# release bot means a finding is on the record before the release PR is drafted.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Friday 09:41 UTC, an hour ahead of the release bot's 10:23. Off the top
+    # of the hour for the same reason release-bot.yml documents: the most
+    # contended slot is the one GitHub is most likely to drop.
+    - cron: '41 9 * * 5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: Report advisories against the production dependency tree
+        run: |
+          set -uo pipefail
+          npm audit --omit=dev --json > "$RUNNER_TEMP/audit.json"
+          audit_exit=$?
+          npm audit --omit=dev > "$RUNNER_TEMP/audit.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/audit.txt"
+
+          # A non-zero exit means either "advisories found" or "the audit could
+          # not run", and only the second one is this workflow's problem. A
+          # registry failure still writes well-formed JSON, so check for the
+          # metadata block rather than trusting the exit code or the parse.
+          if ! node -e 'const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.error || !r.metadata?.vulnerabilities) process.exit(1)' "$RUNNER_TEMP/audit.json"; then
+            echo "::error::npm audit did not produce a report (exit $audit_exit); the production tree was not actually checked"
+            exit 1
+          fi
+
+          node - "$RUNNER_TEMP/audit.json" "$RUNNER_TEMP/audit.txt" <<'REPORT' >> "$GITHUB_STEP_SUMMARY"
+          const fs = require('node:fs')
+          const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+          const counts = report.metadata?.vulnerabilities ?? {}
+          const total = counts.total ?? 0
+
+          console.log('## Production dependency advisories\n')
+          console.log(`Audited \`${report.metadata?.dependencies?.prod ?? '?'}\` production dependencies with \`npm audit --omit=dev\`.\n`)
+
+          if (total === 0) {
+            console.log('No advisories against the dependencies that reach a consumer of the published packages.')
+          } else {
+            console.log('| Severity | Count |')
+            console.log('|---|---|')
+            for (const level of ['critical', 'high', 'moderate', 'low', 'info']) {
+              if (counts[level]) console.log(`| ${level} | ${counts[level]} |`)
+            }
+            console.log('')
+            console.log('<details><summary>Full report</summary>\n')
+            console.log('```')
+            console.log(fs.readFileSync(process.argv[3], 'utf8').trimEnd())
+            console.log('```\n')
+            console.log('</details>\n')
+            console.log('This step reports rather than fails. Decide whether the advisory reaches a caller of the published packages before acting on it.')
+          }
+          REPORT
+
+      - name: Verify registry signatures and provenance attestations
+        run: npm audit signatures --omit=dev

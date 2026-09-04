@@ -29,7 +29,7 @@ import {
   evalRecord,
   runEvalStoreContractSuite,
   type EvalStoreContractFactoryOptions,
-} from './eval-store-contract.js'
+} from './helpers/eval-store-contract.js'
 
 const temporaryRoots: string[] = []
 

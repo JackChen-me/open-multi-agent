@@ -1,0 +1,14 @@
+{
+  "//": "Type-checks the reusable store contract suites, which the repository's other tsconfigs exclude along with the rest of tests/. Enforced by tests/contract-suite-types.test.ts, following the same in-test tsc idiom as examples/integrations/observability-v2. Only the contract suites are listed: they describe a public contract using the public barrels, so a type error here is a real defect rather than test-file noise.",
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "./eval-store-contract.ts",
+    "./memory-store-contract.ts",
+    "./trace-store-contract.ts"
+  ],
+  "exclude": []
+}

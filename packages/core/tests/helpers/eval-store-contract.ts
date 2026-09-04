@@ -1,9 +1,21 @@
+/**
+ * Behavioral contract for {@link EvalStore} implementations.
+ *
+ * Imports resolve through the public `/eval` barrel rather than deep `src/`
+ * paths, so the suite type-checks against exactly the surface a third-party
+ * implementer sees.
+ *
+ * Both shipped stores run it unchanged: `InMemoryEvalStore` in
+ * `eval-in-memory-store.test.ts` and `FileEvalStore` in
+ * `eval-file-store.test.ts`.
+ */
+
 import { describe, expect, it } from 'vitest'
-import type { EvalRecord } from '../src/eval/record.js'
 import {
   EvalStoreError,
+  type EvalRecord,
   type EvalStore,
-} from '../src/eval/store.js'
+} from '../../src/eval/index.js'
 
 export interface EvalStoreContractFactoryOptions {
   readonly now?: () => number

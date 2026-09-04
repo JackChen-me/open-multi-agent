@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run lint
 
   test:
@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm test
 
   coverage:
@@ -53,7 +53,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run test:coverage
       - uses: codecov/codecov-action@v5
         with:
@@ -70,7 +70,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - name: Smoke-test that the built entry points import and the CLI runs
         working-directory: packages/core
@@ -112,6 +112,28 @@ jobs:
               exit 1
             fi
           done
+      - name: Assert the published dependency blocks stay semver ranges
+        run: |
+          set -euo pipefail
+          # save-exact=true in the root .npmrc pins whatever `npm install`
+          # saves. That is right for the tree that never leaves this
+          # repository and wrong for the blocks a consumer installs: an exact
+          # version there overrides their own resolution and stops their
+          # `npm audit fix` from reaching a patched build until we cut a
+          # release. A new dependency added to one of these has to be widened
+          # by hand, so assert it rather than trusting the habit.
+          fail=0
+          for manifest in packages/core/package.json packages/otel/package.json packages/create-oma-app/package.json; do
+            for block in dependencies peerDependencies; do
+              pinned=$(jq -r --arg b "$block" '(.[$b] // {}) | to_entries[] | select(.value | test("^[0-9]")) | "\(.key)@\(.value)"' "$manifest" | tr '\n' ' ')
+              if [ -n "$pinned" ]; then
+                echo "::error::$manifest .$block ships to consumers and must stay semver ranges, but these are exact: $pinned"
+                fail=1
+              fi
+            done
+          done
+          test "$fail" -eq 0
+
       - name: Typecheck the create-oma-app template against core
         run: npm run typecheck:template -w create-oma-app
       - name: Assert the npm tarball ships exactly the expected files
@@ -232,6 +254,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: End-to-end scaffold smoke test (pack -> generate -> install -> run gate)
         run: npm run test:scaffold

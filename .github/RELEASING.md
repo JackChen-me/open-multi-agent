@@ -188,9 +188,14 @@ the full set of template traps.
    the normal PR CI remain authoritative. Never merge a release proposal merely
    because its model reviewer approved it.
 3. **Wait for `CI` on the exact merged release commit.** A successful `CI`
-   workflow run on `main` triggers `publish.yml`. The publisher verifies that
-   both core and create-oma-app versions increased relative to that commit's
-   first parent; later unrelated commits cannot accidentally publish.
+   workflow run on `main` triggers `publish.yml`, which reads the `version`
+   field of the core and create-oma-app manifests at that commit and at its
+   first parent and stops before the publish job unless both moved. The
+   publisher then re-derives the same fact and refuses a commit whose versions
+   did not increment, so later unrelated commits cannot accidentally publish.
+   Reading the version rather than asking whether those manifests changed at
+   all is what keeps an ordinary dependency or metadata edit from starting a
+   job that mints a write-scoped token and then fails closed.
 4. **Publish to npm in order: `core`, then `otel` when its declared version is
    not already live, then `create-oma-app`.** The publisher checks the public
    registry before every action and waits for each new version to resolve

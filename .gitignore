@@ -7,7 +7,10 @@ oma-dashboards/
 .agent-workspace/
 .github/brand/frames/
 .claude/
+# Local npm configuration, which may carry registry credentials. The
+# repository's own root .npmrc is tracked and is the one exception.
 .npmrc
+!/.npmrc
 .env
 
 # Benchmark output. The harness in bench/src/ is tracked; everything it
