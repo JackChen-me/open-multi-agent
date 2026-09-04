@@ -35,7 +35,7 @@ mutations, package order, registry checks, tags, and GitHub Releases.
 Each DAG task has one task-level attempt; malformed structured output may use
 OMA's single in-run correction, but the whole role is not restarted. Per-role
 turn and output budgets bound model work, and the complete planning DAG aborts
-after ten minutes. When core changes but `packages/create-oma-app` does not,
+after thirty minutes. When core changes but `packages/create-oma-app` does not,
 deterministic policy maps core's bump to a create-oma-app bump by breaking
 nature: a core major bumps create-oma-app minor (its 0.x minor position carries
 the "breaking" signal), and any non-breaking core bump bumps create-oma-app

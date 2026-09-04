@@ -8,6 +8,7 @@ import type {
   LLMResponse,
   LLMStreamOptions,
   StreamEvent,
+  ThinkingConfig,
 } from '@open-multi-agent/core'
 import type { CommandRunner } from '../src/command.js'
 import { generateReleaseDecision } from '../src/orchestrator.js'
@@ -77,11 +78,20 @@ describe('OMA release orchestration', () => {
       ])
     }
     expect(adapter.toolSets.slice(2)).toEqual([[], []])
+    // One budget for every role: reasoning and the answer are billed against
+    // the same ceiling, so a per-role figure sized for the answer starves the
+    // answer whenever reasoning grows.
     expect(adapter.maxTokensByRole).toEqual(new Map([
-      ['change-analyst', 4_500],
-      ['compatibility-auditor', 4_500],
-      ['release-planner', 3_500],
-      ['release-reviewer', 3_500],
+      ['change-analyst', 64_000],
+      ['compatibility-auditor', 64_000],
+      ['release-planner', 64_000],
+      ['release-reviewer', 64_000],
+    ]))
+    expect(adapter.thinkingByRole).toEqual(new Map([
+      ['change-analyst', { enabled: true, effort: 'max' }],
+      ['compatibility-auditor', { enabled: true, effort: 'max' }],
+      ['release-planner', { enabled: true, effort: 'max' }],
+      ['release-reviewer', { enabled: true, effort: 'max' }],
     ]))
     expect(run.tokenUsage).toEqual({ input_tokens: 40, output_tokens: 20 })
   })
@@ -182,6 +192,7 @@ class ReleaseScriptAdapter implements LLMAdapter {
   readonly roles: string[] = []
   readonly toolSets: string[][] = []
   readonly maxTokensByRole = new Map<string, number | undefined>()
+  readonly thinkingByRole = new Map<string, ThinkingConfig | undefined>()
   plannerMessages = ''
   reviewerMessages = ''
   private sequence = 0
@@ -191,6 +202,7 @@ class ReleaseScriptAdapter implements LLMAdapter {
     this.roles.push(role)
     this.toolSets.push((options.tools ?? []).map(tool => tool.name))
     this.maxTokensByRole.set(role, options.maxTokens)
+    this.thinkingByRole.set(role, options.thinking)
     const messageText = JSON.stringify(messages)
     if (role === 'release-planner') this.plannerMessages = messageText
     if (role === 'release-reviewer') this.reviewerMessages = messageText

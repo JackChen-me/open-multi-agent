@@ -19,11 +19,15 @@ The bot deliberately separates judgment from authority:
 5. A maintainer reviews and merges the PR. Only then can the deterministic
    publish workflow run after `CI` succeeds on the exact merged release commit.
 
-The two evidence roles have five turns and 4,500 output tokens each; the
-planner and reviewer have three turns and 3,500 output tokens each. Every DAG
-task has `maxRetries: 0`, so a failed role is not silently rerun as a whole new
-analysis (OMA's one in-run structured-output correction still applies). The
-complete planning DAG has a ten-minute wall-clock deadline.
+Every role thinks at DeepSeek's `max` effort and shares one 64,000-token
+output ceiling. Reasoning and the answer are billed against that same ceiling,
+so it is sized for both: a ceiling that only fits the answer leaves a role
+emitting reasoning and no JSON, which surfaces as a schema failure rather than
+as the truncation it is. The evidence roles have five turns and the planner and
+reviewer three. Every DAG task has `maxRetries: 0`, so a failed role is not
+silently rerun as a whole new analysis (OMA's one in-run structured-output
+correction still applies). The complete planning DAG has a thirty-minute
+wall-clock deadline.
 
 Repository diffs are untrusted evidence. The analyst and compatibility auditor
 receive only three custom read-only tools: immutable release evidence, a
