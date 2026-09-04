@@ -9,6 +9,7 @@ import {
   EXAMPLE_LEVELS,
   EXAMPLE_SECTIONS,
   compareCatalogInventory,
+  compareReadmeCoverage,
   discoverDocumentedEntrypoints,
   discoverExampleUnits,
   readCatalog,
@@ -66,6 +67,25 @@ test('multi-file suites register every self-documented runnable entrypoint', () 
   assert.deepEqual(
     discoverDocumentedEntrypoints(engram, examplesRoot),
     [...engram.entrypoints].sort(),
+  )
+})
+
+test('README coverage reports catalog entries with no link in the index', () => {
+  const readme = [
+    '| [`basics/single-agent`](basics/single-agent.ts) | row |',
+    '| [`integrations/observability-v2/`](integrations/observability-v2/) | row |',
+  ].join('\n')
+  assert.deepEqual(
+    compareReadmeCoverage(
+      [
+        { path: 'basics/single-agent.ts' },
+        { path: 'integrations/observability-v2' },
+        { path: 'integrations/with-engram' },
+        { path: 'patterns/unlisted.ts' },
+      ],
+      readme,
+    ),
+    ['integrations/with-engram', 'patterns/unlisted.ts'],
   )
 })
 

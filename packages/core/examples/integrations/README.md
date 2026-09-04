@@ -3,7 +3,7 @@
 OMA wired to external systems: MCP servers, observability backends, other
 frameworks, app shells. Runnable starting points, not product docs.
 
-Two categories live here.
+Three categories live here.
 
 **Reference integrations** demonstrate wiring against widely used protocols
 or frameworks. The OMA team maintains these once merged, regardless of who
@@ -23,13 +23,24 @@ contributed them. Current:
   InMemory/File TraceStore, an application-owned OTel provider, and explicit
   CLI/server/serverless lifecycle handling. The original
   `trace-observability.ts` remains the legacy callback example.
-- `with-vercel-ai-sdk/`: Next.js + AI SDK + `runTeam()`.
+
+**Full applications** embed OMA in a real app shell. Each has its own
+`package.json` and start script (`npm install` then `npm start` or
+`npm run dev`) instead of `npx tsx`, and imports the published
+`@open-multi-agent/core` package name. The main index lists them under
+**apps**. Current:
+
 - `express-customer-support/`: Express REST API + `runTasks()`. Contributed
   by [@CodingBangboo](https://github.com/CodingBangboo) via #191.
+- `with-vercel-ai-sdk/`: Next.js + AI SDK + `runTeam()`.
 
 **Vendor integrations** show OMA paired with a specific third-party
-commercial product. They live under `with-<product>/` and stay credited to
-the contributor. Current:
+commercial product and stay credited to the contributor. Naming follows the
+shape of the example, not the vendor: a single-file script that wires one
+protocol or MCP server keeps the protocol prefix (`mcp-<server>.ts`, as with
+`mcp-bilig-workpaper.ts` and `mcp-open-design.ts` above), while a multi-file
+integration that ships its own store, toolkit, or app shell lives under
+`with-<product>/`. Current:
 
 - `with-engram/`: Engram memory backend. Contributed by
   [@Agentscreator](https://github.com/Agentscreator) via #160.

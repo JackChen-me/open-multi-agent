@@ -8,14 +8,25 @@
  *   npx tsx packages/core/examples/basics/structured-input.ts ./photo.png
  *
  * Prerequisites:
- *   ANTHROPIC_API_KEY env var must be set.
+ *   ANTHROPIC_API_KEY env var must be set (default provider). To use any
+ *   other built-in provider, set OMA_PROVIDER and OMA_MODEL plus that
+ *   provider's key, for example:
+ *     OMA_PROVIDER=deepseek OMA_MODEL=deepseek-chat DEEPSEEK_API_KEY=...
+ *     OMA_PROVIDER=openai OMA_MODEL=gpt-5.4 OPENAI_API_KEY=...
+ *   The model must accept image input. See docs/providers.md for the full
+ *   provider and env var list.
  *   The image must be PNG, JPEG, GIF, or WebP.
  */
 
 import { readFile } from 'node:fs/promises'
 import { extname } from 'node:path'
 
-import { OpenMultiAgent, type LLMMessage } from '../../src/index.js'
+import { OpenMultiAgent, type LLMMessage, type SupportedProvider } from '../../src/index.js'
+
+// Defaults to Claude. Any built-in provider works: set OMA_PROVIDER and
+// OMA_MODEL plus that provider's API key (see docs/providers.md).
+const provider = (process.env.OMA_PROVIDER ?? 'anthropic') as SupportedProvider
+const model = process.env.OMA_MODEL ?? 'claude-sonnet-4-6'
 
 const imagePath = process.argv[2]
 if (!imagePath) {
@@ -61,8 +72,8 @@ const messages: LLMMessage[] = [
 ]
 
 const oma = new OpenMultiAgent({
-  defaultProvider: 'anthropic',
-  defaultModel: process.env.OMA_MODEL ?? 'claude-sonnet-4-6',
+  defaultProvider: provider,
+  defaultModel: model,
 })
 const result = await oma.runAgent({ name: 'vision-assistant' }, messages)
 

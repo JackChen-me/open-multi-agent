@@ -128,6 +128,14 @@ export function discoverDocumentedEntrypoints(entry, examplesRoot) {
     .sort()
 }
 
+export function compareReadmeCoverage(entries, readmeText) {
+  return entries
+    .filter((entry) => typeof entry?.path === 'string')
+    .filter((entry) => !readmeText.includes(`](${entry.path})`) && !readmeText.includes(`](${entry.path}/)`))
+    .map((entry) => entry.path)
+    .sort()
+}
+
 export function compareCatalogInventory(entries, discoveredPaths) {
   const catalogPaths = new Set(entries.map((entry) => entry.path))
   const discovered = new Set(discoveredPaths)
@@ -347,6 +355,11 @@ export function validateExampleCatalog(catalog, examplesRoot) {
   }
   for (const path of inventory.missingFromFilesystem) {
     errors.push(`catalog path is not a discovered example unit: ${path}`)
+  }
+  const readmePath = join(examplesRoot, 'README.md')
+  const readmeText = existsSync(readmePath) ? readFileSync(readmePath, 'utf8') : ''
+  for (const path of compareReadmeCoverage(catalog.examples, readmeText)) {
+    errors.push(`example is not linked from examples/README.md: ${path}`)
   }
   for (const entry of catalog.examples) {
     if (entry && typeof entry === 'object') {
