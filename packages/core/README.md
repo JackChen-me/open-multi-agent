@@ -21,11 +21,30 @@
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer replaying a real multi-agent run: task DAG and span waterfall views with per-task status, assignee, tokens, and tool calls" width="960" height="540" loading="eager">
-</p>
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
 
-<br />
+// Your keys and your endpoint: a hosted provider, or a local server through baseURL.
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // Consequential tool calls (file writes, shell) pause for a human decision.
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: 'Reconcile overdue invoices.', toolPreset: 'readwrite' }],
+})
+
+// The coordinator plans the task DAG from the goal; the checkpoint store keeps the run durable.
+const result = await oma.runTeam(team, 'Find overdue invoices and draft the reminders.', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// result.status?.code === 'suspended' until a reviewer decides result.pendingApprovals,
+// each bound to a hash of exactly what the reviewer was shown.
+```
 
 <p align="center">
   <a href="https://open-multi-agent.com/?utm_source=npm&utm_medium=package_readme">Website</a> ·
@@ -259,6 +278,11 @@ Core already provides run identity, trace sinks, execution receipts, queryable i
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) is an **optional enterprise integration** for teams that already operate a centralized OpenTelemetry stack. It converts OMA traces into standard OTel spans so multi-agent runs can join company-wide monitoring, alerting, and incident workflows. The application owns the provider and its lifecycle; telemetry failures never change the run result.
 
 See the [observability guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [migration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md), and [performance guidance](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md).
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer replaying a real multi-agent run: task DAG and span waterfall views with per-task status, assignee, tokens, and tool calls" width="960" height="540" loading="lazy">
+</p>
+<p align="center"><em>The offline Run Viewer replaying a real run from the trace store: task DAG, span waterfall, and per-task evidence, with no hosted service involved.</em></p>
 
 ### Run journal
 

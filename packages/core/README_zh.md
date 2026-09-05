@@ -21,11 +21,30 @@
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer 回放真实多智能体运行：任务 DAG 与 span 瀑布双视图，展示每个任务的状态、负责人、token 与工具调用" width="960" height="540" loading="eager">
-</p>
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
 
-<br />
+// 密钥与端点都是你自己的：托管模型，或通过 baseURL 接本地服务。
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // 有实际副作用的工具调用（写文件、执行 shell）挂起，等待人工决定。
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: '核对逾期发票。', toolPreset: 'readwrite' }],
+})
+
+// Coordinator 从目标规划任务 DAG；checkpoint store 让整次运行可持久化。
+const result = await oma.runTeam(team, '找出逾期发票并起草催款提醒。', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// 在审批人处理 result.pendingApprovals 之前，result.status?.code 保持为 'suspended'；
+// 每条待审批请求都绑定审批人实际看到内容的哈希。
+```
 
 <p align="center">
   <a href="https://open-multi-agent.com/zh/?utm_source=github&utm_medium=package_readme">官网</a> ·
@@ -244,6 +263,11 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) 是面向已有集中式 OpenTelemetry 平台团队的**可选企业集成**。它把 OMA trace 转成标准 OTel span，让多 agent 运行接入企业统一监控、告警和故障处理流程。应用负责 provider 及其生命周期；telemetry 故障不会改变业务运行结果。
 
 详见[可观测性指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[迁移指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md)与[性能指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md)。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer 回放真实多智能体运行：任务 DAG 与 span 瀑布双视图，展示每个任务的状态、负责人、token 与工具调用" width="960" height="540" loading="lazy">
+</p>
+<p align="center"><em>内置离线 Run Viewer 基于 trace store 回放一次真实运行：任务 DAG、span 瀑布与逐任务证据，不依赖任何托管服务。</em></p>
 
 ### 运行事件日志
 
