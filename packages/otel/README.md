@@ -1,18 +1,19 @@
 # `@open-multi-agent/otel`
 
 Optional OpenTelemetry adapter for `@open-multi-agent/core` TraceRecord v2.
-It converts OBS-2 `TraceExporter` batches into spans on a tracer you explicitly
+It converts `TraceExporter` batches into spans on a tracer you explicitly
 provide. The package never reads, registers, or replaces the global
 `TracerProvider`.
 
 ```bash
-npm install @open-multi-agent/core@^1.11.0 @open-multi-agent/otel@^0.1.0
+npm install @open-multi-agent/core @open-multi-agent/otel @opentelemetry/api
 # Install and configure the OpenTelemetry SDK/exporter chosen by your application.
 ```
 
-Core `1.11.0` is the first release containing the public TraceRecord v2,
-sink/exporter, and TraceStore APIs required by this package. Core `1.10.0` is
-not compatible.
+This package depends on `@open-multi-agent/core@^1.11.0` and declares
+`@opentelemetry/api@^1.9.0` as a peer dependency. Core `1.11.0` was the first
+release carrying the public TraceRecord v2, sink/exporter, and TraceStore APIs
+the adapter needs; anything earlier does not have them.
 
 ## Use an application-owned provider
 
@@ -58,7 +59,7 @@ The caller owns the tracer/provider in every mode.
   are retained so a same-process checkpoint restore can resolve its continuation
   link. Shutdown ends any still-open span as incomplete and clears all adapter
   state.
-- Provider rejection or timeout becomes the OBS-2 exporter result and sink
+- Provider rejection or timeout becomes the core exporter result and sink
   diagnostics/stats; it never changes an Agent, Task, or Run result.
 
 Use a `BatchingTraceSink` directly via `createOtelTraceExporter()` when the
@@ -85,7 +86,7 @@ adapter is the provider owner.
 
 The adapter creates one OTel span for each OMA `span_start`/`span_end` pair.
 An end record that arrives without a start creates a marked incomplete span so
-the self-contained OBS-2 end snapshot remains observable. Duplicates and
+the self-contained end snapshot remains observable. Duplicates and
 orphan events are ignored with payload-free diagnostics.
 
 | OMA operation | OTel representation |
@@ -154,6 +155,11 @@ text, and truncated it to `maxContentChars`. Enabling the adapter mode without
 the core policy exports nothing extra, because the attributes do not exist.
 Reasoning and chain-of-thought content have no opt-in under any mode.
 
+Both halves of that path shipped together, so `upstream-policy` needs
+`@open-multi-agent/otel` 0.1.3 or newer and `@open-multi-agent/core` 1.18.0 or
+newer. An older adapter rejects the mode as a configuration error, and an older
+core never records the two attributes for it to forward.
+
 `service.name` belongs to the Resource on the application's `TracerProvider`.
 This adapter never sets it; a provider built without a Resource reports OMA
 spans under the OTel default (`unknown_service:node`). `metadata.release` and
@@ -162,9 +168,8 @@ spans under the OTel default (`unknown_service:node`). `metadata.release` and
 
 ## OTLP convenience decision
 
-This initial release deliberately has no `/otlp-http` convenience subpath.
-The application chooses and configures its own OpenTelemetry SDK and OTLP (or
-other) exporter, keeping this package's runtime surface to the OTel API and
-avoiding eager OTLP imports, global-provider configuration, and a second
-SDK/exporter version matrix. An explicit convenience subpath can be added later
-without changing the root import.
+This package deliberately has no `/otlp-http` convenience subpath. The
+application chooses and configures its own OpenTelemetry SDK and OTLP (or
+other) exporter, which keeps this package's runtime surface to the OTel API and
+avoids eager OTLP imports, global-provider configuration, and a second
+SDK/exporter version matrix.

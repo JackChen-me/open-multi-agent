@@ -79,6 +79,9 @@ Without `--output`, the CLI creates a timestamped file under
 `oma-dashboards/`. An explicit destination is never overwritten: an existing
 file returns `dashboard_output_exists` with exit code 2.
 
+The [Run Viewer guide](run-viewer.md) covers what the rendered page shows, the
+other input modes, and its privacy boundary.
+
 ### `oma task`
 
 Runs **`OpenMultiAgent.runTasks(team, tasks)`** with a fixed task list (no coordinator decomposition).
@@ -169,7 +172,7 @@ oma eval gate --report ./candidate/report.json --gate ./evals/gate.json \
 `--report` and `--gate` are required. The command prints the exact
 `GateVerdict` JSON (`pass`, `failures`, and `warnings`) to stdout. It exits 0
 when the verdict passes, 1 when it fails, and 2 when a report, policy, baseline,
-or argument is invalid. See [Evaluation](evaluation.md#gate-quality-in-ci) for
+or argument is invalid. See [Evaluation in CI](evaluation-ci.md#gate-quality-in-ci) for
 the GatePolicy reference, baseline workflow, deterministic gate example, and
 GitHub Actions wiring.
 
@@ -178,7 +181,7 @@ GitHub Actions wiring.
 Read-only helper for wiring JSON configs and env vars.
 
 - **`oma provider`** or **`oma provider list`** — Prints JSON: built-in provider ids, API key environment variable names, whether `baseURL` is supported, and short notes (e.g. OpenAI-compatible servers, Copilot in CI).
-- **`oma provider template <provider>`** — Prints a JSON object with example `orchestrator` and `agent` fields plus placeholder `env` entries. `<provider>` is one of: `anthropic`, `azure-openai`, `openai`, `gemini`, `grok`, `minimax`, `mimo`, `deepseek`, `doubao`, `qiniu`, `copilot`, `bedrock`.
+- **`oma provider template <provider>`** — Prints a JSON object with example `orchestrator` and `agent` fields plus placeholder `env` entries. `<provider>` is one of: `anthropic`, `azure-openai`, `openai`, `gemini`, `grok`, `minimax`, `mimo`, `deepseek`, `doubao`, `hunyuan`, `qiniu`, `copilot`, `bedrock`.
 
 For OpenRouter, use the `openai` provider template, set `baseURL` to `https://openrouter.ai/api/v1`, and set `apiKey` from `OPENROUTER_API_KEY` in your JSON config.
 
@@ -295,9 +298,9 @@ If **`--team path.json`** is passed, the file’s top-level `team` property is i
 
 ### Orchestrator and coordinator JSON
 
-These files are arbitrary JSON objects merged into **`OrchestratorConfig`** and **`CoordinatorConfig`**. Function-valued options (`onProgress`, `onApproval`, `onTaskDispatch`, etc.) cannot appear in JSON and are not supported by the CLI.
+These files are arbitrary JSON objects merged into **`OrchestratorConfig`** and **`CoordinatorConfig`**. Function-valued options (`onProgress`, `onApproval`, `onTaskDispatch`, etc.) cannot appear in JSON and are not supported by the CLI. For what each `CoordinatorConfig` field changes, see [configuring the coordinator](coordinator.md#configuring-the-coordinator).
 
-Set `defaultCwd` on the orchestrator JSON, or `cwd` on individual agents/coordinator JSON, to choose the sandbox root for built-in filesystem tools. Paths passed to `file_read`, `file_write`, `file_edit`, `grep`, and `glob` must be absolute and resolve inside that root. When `defaultCwd` is omitted, the sandbox defaults to `<cwd>/.agent-workspace` (auto-created on first write). Pass the string `"<process.cwd()>"`-equivalent absolute path to widen it to the full working directory, or `null` to disable the sandbox. The `bash` tool is intentionally not covered — see `docs/tool-configuration.md` for the rationale and recommended posture.
+Set `defaultCwd` on the orchestrator JSON, or `cwd` on individual agents/coordinator JSON, to choose the sandbox root for built-in filesystem tools. Paths passed to `file_read`, `file_write`, `file_edit`, `grep`, and `glob` must be absolute and resolve inside that root. When `defaultCwd` is omitted, the sandbox defaults to `<cwd>/.agent-workspace` (auto-created on first write). Pass the string `"<process.cwd()>"`-equivalent absolute path to widen it to the full working directory, or `null` to disable the sandbox. The `bash` tool is intentionally not covered — see [sandbox and shell execution](sandbox-and-shell.md) for the rationale and recommended posture.
 
 ---
 

@@ -74,10 +74,11 @@ opt into validated structured handoff:
 `structured` injects only canonical JSON derived from the dependency's
 successful `AgentRunResult.structured`; narrative text in `output` is excluded.
 `both` injects labeled raw and structured sections. A missing or non-serializable
-structured value fails the dependent task with a machine-readable validation
-error—OMA never silently falls back to raw output. Each opt-in dependency
-payload is limited to 64 KiB before the consumer agent is invoked. The default
-`output` path is unchanged for 1.x compatibility.
+structured value fails the dependent task with
+`DEPENDENCY_STRUCTURED_RESULT_MISSING`; OMA never silently falls back to raw
+output. Each opt-in dependency payload is limited to 64 KiB before the consumer
+agent is invoked, and a larger one fails with `DEPENDENCY_PAYLOAD_TOO_LARGE`.
+The default `output` path is unchanged for 1.x compatibility.
 
 ## Task role and provenance metadata
 
@@ -179,6 +180,9 @@ the compatibility switch required by callers that depend on round boundaries;
 a no-op callback returning `true` retains batch scheduling without introducing
 a second overlapping mode flag.
 
+For each callback's arguments, timing, and throw behavior alongside the other
+approval hooks, see [hooks and callbacks](hooks-and-callbacks.md#approval-gates).
+
 ## Interruption, budgets, and checkpoints
 
 Abort, budget exhaustion, and approval rejection share one
@@ -190,7 +194,9 @@ Abort, budget exhaustion, and approval rejection share one
 
 This prevents a task from being reported as skipped while its agent continues
 running. Budget state is checked before dispatch and again after each completion.
-Crossing a budget stops new tasks; already-started work still settles.
+Crossing a budget stops new tasks; already-started work still settles. Every
+ceiling that can trigger this path is in
+[budgets and limits](budgets-and-limits.md).
 
 Checkpointing persists safe built-in-runner turn/tool boundaries as well as
 task completions. Writes are serialized through the existing save chain;

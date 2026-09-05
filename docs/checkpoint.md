@@ -1,10 +1,10 @@
-# Checkpoint & Resume
+# Checkpoint & resume
 
 Long-running task workflows can persist their progress and resume after a crash, an abort, or a process restart. Checkpointing is **opt-in** and runs entirely over the existing [`MemoryStore`](shared-memory.md) interface, so the same in-memory, Redis, Postgres, or custom backend that holds shared memory also holds checkpoints — no extra storage layer.
 
 It covers the orchestration paths (`runTeam`, `runTasks`, `runFromPlan`, and `restore`). A single `runAgent` call has nothing to resume and is not checkpointed.
 
-Checkpoint schema v4 also carries suspended continuation state for
+Checkpoint schema v4 and later also carry suspended continuation state for
 [durable approval gates](durable-approvals.md). Approval decisions live in
 separate primary records in the same store; they are not telemetry.
 

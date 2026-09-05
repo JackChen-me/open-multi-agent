@@ -22,7 +22,7 @@ const agent = {
 }
 ```
 
-## Built-In Provider Shortcuts
+## Built-in provider shortcuts
 
 The framework ships a wired-in provider name for each of these. Set `provider` and the env var, and the adapter handles the endpoint.
 
@@ -31,7 +31,7 @@ The framework ships a wired-in provider name for each of these. Set `provider` a
 | Provider | Config | Env var | Example model | Notes |
 |----------|--------|---------|---------------|-------|
 | Anthropic (Claude) | `provider: 'anthropic'` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` | Native Anthropic SDK. |
-| Gemini | `provider: 'gemini'` | `GEMINI_API_KEY` | `gemini-2.5-pro` | Native Google GenAI SDK. Requires `npm install @google/genai`. |
+| Gemini | `provider: 'gemini'` | `GEMINI_API_KEY`, falling back to `GOOGLE_API_KEY` | `gemini-2.5-pro` | Native Google GenAI SDK. Requires `npm install @google/genai`. |
 | OpenAI (GPT) | `provider: 'openai'` | `OPENAI_API_KEY` | `gpt-4o` | |
 | Azure OpenAI | `provider: 'azure-openai'` | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | `gpt-4` | Optional `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT`. |
 | GitHub Copilot | `provider: 'copilot'` | `GITHUB_COPILOT_TOKEN` (falls back to `GITHUB_TOKEN`) | `gpt-4o` | Custom token-exchange flow on top of OpenAI protocol. |
@@ -46,7 +46,7 @@ The framework ships a wired-in provider name for each of these. Set `provider` a
 | Qiniu | `provider: 'qiniu'` | `QINIU_API_KEY` | `deepseek-v3` | OpenAI-compatible. Endpoint `https://api.qnaigc.com/v1`; multiple model families, see [Qiniu AI docs](https://developer.qiniu.com/aitokenapi/12882/ai-inference-api). |
 | AWS Bedrock | `provider: 'bedrock'` | none (AWS SDK credential chain) | `anthropic.claude-3-5-haiku-20241022-v1:0` | No API key. Set `AWS_REGION` or pass `region` as the 4th arg to `createAdapter`. Credentials come from env vars, shared config, or IAM role. Newer Claude models can require a cross-region inference profile prefix such as `us.`. Also supports Llama, Mistral, and Cohere. See [`providers/bedrock`](../packages/core/examples/providers/bedrock.ts). Requires `npm install @aws-sdk/client-bedrock-runtime`. |
 
-## OpenAI-Compatible Providers
+## OpenAI-compatible providers
 
 No bundled shortcut is needed when a server speaks OpenAI Chat Completions. Use `provider: 'openai'` and point `baseURL` at the service.
 
@@ -75,6 +75,103 @@ OMA registers JSON-schema `function` tools. If an OpenAI-compatible response
 contains the separate `custom` tool-call variant, the adapter raises
 `UnsupportedToolCallError` instead of dropping the call or presenting an empty
 successful turn.
+
+## Credential and endpoint defaults
+
+An agent that omits `model`, `provider`, `baseURL`, or `apiKey` inherits the
+orchestrator's `defaultModel`, `defaultProvider`, `defaultBaseURL`, and
+`defaultApiKey`. The rule is a plain `??` per field, so an agent overrides only
+the fields it sets and the others still come from the orchestrator:
+
+```typescript
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultBaseURL: 'https://api.groq.com/openai/v1',
+  defaultApiKey: process.env.GROQ_API_KEY,
+  defaultModel: 'llama-3.3-70b-versatile',
+})
+
+const team = oma.createTeam('research', {
+  name: 'research',
+  agents: [
+    // Inherits provider, baseURL, apiKey, and model from the orchestrator.
+    { name: 'writer', systemPrompt: 'You are a technical writer.' },
+    // Switches provider: every endpoint-shaped field has to move together.
+    {
+      name: 'auditor',
+      systemPrompt: 'You audit drafts for factual errors.',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      baseURL: 'https://api.anthropic.com',
+    },
+  ],
+})
+```
+
+`defaultApiKey` is what makes a whole team point at one non-OpenAI
+OpenAI-compatible endpoint without repeating the key on every agent, which is
+why the runnable provider examples for Groq, OpenRouter, Zhipu, Qwen, Moonshot,
+Mistral, Doubao, and Hunyuan all set it once on the orchestrator.
+
+**There is no way to un-inherit a field.** `??` treats an explicit `undefined`
+as "not set", so an agent that switches `provider` while the orchestrator sets
+`defaultBaseURL` still receives that base URL unless it supplies its own. Set
+`baseURL` alongside `provider` and `apiKey` whenever one agent leaves the
+orchestrator's endpoint, or leave `defaultBaseURL` unset and give the endpoint
+to the agents that need it. Providers that never use a base URL are unaffected:
+`gemini` takes only an API key, and `copilot` and `bedrock` warn and ignore it.
+
+The inheritance applies uniformly across `runAgent()`, coordinator and worker
+agents, and the ephemeral proposer/judge agents in
+[consensus](consensus.md), so a `defaultApiKey` set once reaches every LLM call
+OMA makes. Two exceptions: `AgentConfig.adapter` (including the AI SDK bridge)
+takes over the transport and ignores `provider`, `apiKey`, and `baseURL`
+entirely, and `bedrock` uses the AWS SDK credential chain rather than an API
+key.
+
+When neither the agent nor the orchestrator supplies a key, the adapter falls
+back to its provider's standard environment variable, which is the column in
+the tables above. `egressPolicy` is the one field that does not follow the `??`
+rule: agent and run policies intersect with the orchestrator default, so they
+can narrow inherited network access but never widen it.
+
+## Sampling parameters
+
+`AgentConfig` exposes the sampling knobs directly. `temperature` and `topP` are
+the two that reach essentially every adapter; the rest exist for narrower
+targets and are forwarded only where the wire format accepts them.
+
+| `AgentConfig` field | Wire field | Anthropic | OpenAI and OpenAI-compatible built-ins | Azure OpenAI | Copilot | Gemini | Bedrock |
+|---|---|---|---|---|---|---|---|
+| `temperature` | `temperature` | yes | yes | yes | yes | yes | yes |
+| `topP` | `top_p` | yes | yes | yes | no | no | yes (`topP`) |
+| `topK` | `top_k` | yes | yes | no | no | no | yes, via `additionalModelRequestFields` |
+| `minP` | `min_p` | no | yes | no | no | no | no |
+| `frequencyPenalty` | `frequency_penalty` | no | yes | yes | no | no | no |
+| `presencePenalty` | `presence_penalty` | no | yes | yes | no | no | no |
+| `parallelToolCalls` | `parallel_tool_calls` | no | yes | yes | no | no | no |
+| `extraBody` | merged into the request | yes | yes | yes | no | no | yes, into `additionalModelRequestFields` |
+
+"OpenAI and OpenAI-compatible built-ins" is the `openai` adapter and every
+provider that extends it: `deepseek`, `doubao`, `grok`, `hunyuan`, `minimax`,
+`mimo`, and `qiniu`.
+
+Two caveats the table cannot express:
+
+- **Forwarded is not the same as accepted.** The `openai` adapter sends `top_k`
+  and `min_p` because OpenAI-compatible local servers (vLLM, llama-server) use
+  them; cloud OpenAI rejects them. They belong on a local endpoint, not on
+  `api.openai.com`. Azure OpenAI omits both deliberately for the same reason.
+- **Unsupported fields are dropped, not errors.** An adapter that does not map a
+  field simply leaves it out of the request, so one config is safe to reuse
+  across a mixed-provider team.
+
+`extraBody` is spread between the sampling parameters and the structural fields.
+It can therefore override `temperature`, `topP`, and the rest, but not
+transport-level fields (`model`, `messages`, `tools`, `stream`, and Anthropic's
+`system`). Use it for server-specific knobs with no framework field, such as
+vLLM's `repetition_penalty`.
 
 ## Budget ceilings and governed runs
 
@@ -117,6 +214,10 @@ checks still happen at existing turn/task boundaries, so a run can overshoot by
 one model turn. `preferredUnderBudget: 'degrade'` is an application-declared
 policy choice, not a prediction that a particular plan would exceed budget.
 
+This section covers only the provider-facing side of budgeting. For every
+ceiling OMA enforces, where each one is checked, and what a run reports when one
+trips, see [budgets and limits](budgets-and-limits.md).
+
 ## Vercel AI SDK (optional)
 
 The AI SDK model is an opaque application-supplied transport. When
@@ -148,7 +249,7 @@ await oma.runAgent(
 
 The coordinator accepts the same hook via `runTeam(team, goal, { coordinator: { adapter: new AISdkAdapter(...) } })`. For a full application, see [`integrations/with-vercel-ai-sdk`](../packages/core/examples/integrations/with-vercel-ai-sdk/).
 
-## Extended Thinking / Reasoning
+## Extended thinking / reasoning
 
 One `thinking` config on `AgentConfig` maps to each provider's native reasoning setting:
 
@@ -169,7 +270,7 @@ const agent = {
 
 Reasoning is streamed as `reasoning` events. Preserving reasoning across a provider switch is opt-in via `preserveReasoningAsText`; see [context management](context-management.md) and [`patterns/cross-provider-reasoning`](../packages/core/examples/patterns/cross-provider-reasoning.ts).
 
-## Local Model Tool-Calling
+## Local model tool-calling
 
 The framework supports tool-calling with local models served by Ollama, vLLM, LM Studio, or llama.cpp. Tool-calling is handled natively through the OpenAI-compatible API.
 
@@ -193,7 +294,7 @@ const localAgent = {
 }
 ```
 
-Highly quantized MoE models on consumer hardware can fall into repetition loops or hallucinate tool-call schemas under default sampling. `AgentConfig` exposes `topK`, `minP`, `frequencyPenalty`, `presencePenalty`, `parallelToolCalls`, and `extraBody` for server-specific knobs such as vLLM's `repetition_penalty`. See [`providers/local-quantized`](../packages/core/examples/providers/local-quantized.ts) for a complete setup.
+Highly quantized MoE models on consumer hardware can fall into repetition loops or hallucinate tool-call schemas under default sampling. A local OpenAI-compatible server is the one target that accepts the full set: `temperature`, `topP`, `topK`, `minP`, `frequencyPenalty`, `presencePenalty`, `parallelToolCalls`, and `extraBody` for server-specific knobs such as vLLM's `repetition_penalty`. See [sampling parameters](#sampling-parameters) for what each adapter forwards, and [`providers/local-quantized`](../packages/core/examples/providers/local-quantized.ts) for a complete setup.
 
 ## Troubleshooting
 

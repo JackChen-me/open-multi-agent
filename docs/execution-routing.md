@@ -57,7 +57,9 @@ profile together with framework-computed facts:
 
 `ROUTING_DECLARATION_REQUIRED` is raised before any Coordinator, worker, or
 tool-capable Agent starts. A profile never creates `requiredRoles`, approves a
-side effect, or proves that governance was satisfied.
+side effect, or proves that governance was satisfied. The thrown class and how
+to clear it are in
+[errors](errors.md#routingdeclarationrequirederror).
 
 The built-in Profiler resolves its adapter in this order:
 
