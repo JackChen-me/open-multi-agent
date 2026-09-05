@@ -161,6 +161,48 @@ exact. Use access controls and encryption appropriate for that data.
 is lossy and would change the content hash; it remains available for ordinary
 checkpoint and shared-memory redaction.
 
+## What the framework provides, and what you build
+
+The framework's side of an approval is the execution mechanism and the durable
+record: the gates that can return `{ action: 'suspend' }`, the primary approval
+row keyed under `__oma_approval__/<requestId>`, the exact-content binding, the
+`getApprovalRecord` / `decideApproval` / `DurableApprovalLedger` reviewer
+helpers, and `OpenMultiAgent.restore()`. That is the whole surface.
+
+There is deliberately no reviewer product on top of it:
+
+- **No approval UI.** Nothing in the package renders a request or collects a
+  decision.
+- **No CLI command.** The `oma` CLI is a non-interactive wrapper. Its commands
+  are `run`, `task`, `dashboard`, `eval run`, `eval gate`, `provider`, and
+  `help`; there is no `approve` or `reject`.
+- **No transport.** OMA never notifies a reviewer, routes a request to a queue,
+  or exposes an HTTP endpoint. A suspended run returns `pendingApprovals` to
+  the caller and stops.
+- **The dashboard is read-only about approvals.** The Run Viewer maps the
+  `oma.approval.approved` and `oma.plan.approved` trace facts to display labels
+  and renders them alongside the rest of the run. It is a post-run HTML
+  artifact with no write path back into the ledger.
+
+An integrator therefore supplies three things:
+
+1. **A store.** A `MemoryStore` whose `compareAndSet` is atomic across every
+   writer that will decide, and that is reachable from both the suspended
+   process and the reviewer. Suspension fails closed with
+   `APPROVAL_ATOMIC_STORE_REQUIRED` when the store cannot decide atomically.
+   See [Store requirements](#store-requirements) for what the bundled stores
+   do and do not give you.
+2. **A review surface.** Something that shows the reviewer `request.content`
+   and `request.requestHash`, and collects back a decision plus a reviewer
+   identity. The hash is the part that matters: a reviewer who submits a hash
+   they did not inspect defeats the exact-content binding, and OMA cannot tell
+   the difference. Authentication, authorization, and the audit trail of who
+   was shown what are entirely yours.
+3. **A resume path.** A process that calls `decideApproval(store, { requestId,
+   requestHash, decision, reviewer })` and then rebuilds the team wiring and
+   calls `restore(team, { checkpoint: { store } })`. The two can be the same
+   process or different ones, subject to the store's cross-writer guarantees.
+
 ## Explicit limits
 
 - Tool-call suspension is supported only inside checkpointed built-in LLM

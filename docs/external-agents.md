@@ -205,6 +205,49 @@ at the run boundary, so an ACP usage delta can exhaust the remaining run budget.
 The process backend continues to contribute `{0, 0}` because it has no token
 signal.
 
+## Control boundary
+
+An external agent is a first-class team member at the orchestration layer and
+an opaque subprocess below it. The split is structural rather than a policy
+choice: when `AgentConfig.backend` is set, the agent resolves to the external
+backend and never constructs an `AgentRunner`, and the runner is where the tool
+registry, the tool executor, the filesystem sandbox, the context strategy, and
+the per-turn journal emission all live. Everything the orchestrator does around
+a task still happens; everything the runner does inside one does not.
+
+**Still applies.** These are enforced above the backend and are
+backend-agnostic:
+
+| Control | Where it acts |
+|---|---|
+| Task DAG placement, dependency ordering, and failure cascade to dependents | Task queue and scheduler; a failed external task skips its dependents like any other |
+| `onPlanReady`, `onApproval`, and `onTaskDispatch` gates | Orchestration level, so the assignee's backend kind is irrelevant to them. `onTaskDispatch` in particular runs immediately before dispatch and before the backend is resolved, so rejecting it means the subprocess is never spawned |
+| Token budget | The backend's reported usage aggregates into the run and is checked against `maxTokenBudget`. Read the [accounting caveat](#acp-token-accounting-caveat) first: an ACP agent that emits no `usage_update`, and every process-backend agent, contributes `{0, 0}` and is therefore not budget-gated in practice |
+| Shared memory | The orchestrator writes the completed task's output to shared memory under `task:<id>:result` after the task finishes |
+| Run and task journal events | `run/start`, `run/end`, `plan/set`, `task/status`, `memory/set`, `approval/request`, `approval/decision`, and `checkpoint/saved` are emitted by the orchestrator and task-execution layers |
+| Abort propagation | `RunOptions.abortSignal` reaches both backends. The process backend kills the child's process tree. The ACP backend sends `session/cancel` and relies on the agent to stop, so cancellation there is cooperative and the subprocess stays alive for the next turn |
+| Process stderr redaction | A non-zero exit or signal builds its error message through the shared credential redactor, so stderr is scrubbed before it reaches the task result |
+
+**Does not apply.** None of these reach an external backend, and no
+configuration makes them:
+
+| Control | Why not |
+|---|---|
+| `onToolCall` per-call gate | The gate is evaluated by the tool executor inside `AgentRunner`. An external agent's tool calls never pass through it. ACP `tool_call` updates still populate `result.toolCalls`, but that is reporting, not a gate |
+| Filesystem sandbox | `AgentConfig.cwd` scopes the built-in filesystem tools through that same runner. A backend's `cwd` is a plain working directory the subprocess reads and writes directly, with your process's permissions |
+| `egressPolicy` | Scoped to framework-owned LLM requests. External backends and tool code are outside it by design, and the child owns its own network behavior. See the [egress enforcement matrix](egress-policy.md#enforcement-matrix) |
+| Tool-level journal events | `turn/start`, `turn/end`, `user/message`, `assistant/message`, `llm/request`, `tool/call`, `tool/result`, and `context/replace` are emitted only by the runner. Neither backend reads the journal recorder it is handed, so a journaled run records that an external task ran, not what happened inside it |
+| Mid-task checkpoints | Neither backend calls the runner checkpoint hook, so an external task checkpoints at task boundaries only. A `suspend` tool decision fails closed there; see [durable approvals](durable-approvals.md#explicit-limits) |
+
+**ACP permissions default to auto-approve.** `permission` defaults to
+`'auto-approve'`, so unless the application sets it, every permission prompt
+the agent raises is answered yes. OMA picks the least-privilege option offered
+(`allow_once` before `allow_always`), which bounds the blast radius of one
+decision but does not change the default answer. `'reject'` or a callback is
+the only way to make a permission prompt a real gate. The process backend has
+no protocol-level permission prompts at all, so the configured `command`,
+`args`, `env`, and `cwd` are the entire control surface.
+
 ## Programmatic API
 
 Most users only touch `backend`. To construct a backend directly, import from the
