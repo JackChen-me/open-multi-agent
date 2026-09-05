@@ -21,31 +21,6 @@
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
 
-```typescript
-import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
-
-// Your keys and your endpoint: a hosted provider, or a local server through baseURL.
-const oma = new OpenMultiAgent({
-  defaultProvider: 'openai',
-  defaultModel: 'gpt-5.4',
-  // Consequential tool calls (file writes, shell) pause for a human decision.
-  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
-})
-
-const team = oma.createTeam('ops', {
-  name: 'ops',
-  agents: [{ name: 'operator', systemPrompt: 'Reconcile overdue invoices.', toolPreset: 'readwrite' }],
-})
-
-// The coordinator plans the task DAG from the goal; the checkpoint store keeps the run durable.
-const result = await oma.runTeam(team, 'Find overdue invoices and draft the reminders.', {
-  checkpoint: { store: new FileStore('./.oma/run.json') },
-})
-
-// result.status?.code === 'suspended' until a reviewer decides result.pendingApprovals,
-// each bound to a hash of exactly what the reviewer was shown.
-```
-
 <p align="center">
   <a href="https://open-multi-agent.com/?utm_source=npm&utm_medium=package_readme">Website</a> ·
   <a href="https://open-multi-agent.com/getting-started/introduction/?utm_source=npm&utm_medium=package_readme">Docs</a> ·
@@ -108,6 +83,36 @@ const team = orchestrator.createTeam('research-team', {
 const result = await orchestrator.runTeam(team, 'Compare three approaches and recommend one.')
 console.log(result.agentResults.get('coordinator')?.output)
 ```
+
+<details>
+<summary>Pause consequential tool calls for approval</summary>
+
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
+
+// Your keys and your endpoint: a hosted provider, or a local server through baseURL.
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // Consequential tool calls (file writes, shell) pause for a human decision.
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: 'Reconcile overdue invoices.', toolPreset: 'readwrite' }],
+})
+
+// The coordinator plans the task DAG from the goal; the checkpoint store keeps the run durable.
+const result = await oma.runTeam(team, 'Find overdue invoices and draft the reminders.', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// result.status?.code === 'suspended' until a reviewer decides result.pendingApprovals,
+// each bound to a hash of exactly what the reviewer was shown.
+```
+
+</details>
 
 Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Providers](#providers).
 

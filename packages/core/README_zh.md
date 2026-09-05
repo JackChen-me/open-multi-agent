@@ -21,31 +21,6 @@
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
 
-```typescript
-import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
-
-// 密钥与端点都是你自己的：托管模型，或通过 baseURL 接本地服务。
-const oma = new OpenMultiAgent({
-  defaultProvider: 'openai',
-  defaultModel: 'gpt-5.4',
-  // 有实际副作用的工具调用（写文件、执行 shell）挂起，等待人工决定。
-  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
-})
-
-const team = oma.createTeam('ops', {
-  name: 'ops',
-  agents: [{ name: 'operator', systemPrompt: '核对逾期发票。', toolPreset: 'readwrite' }],
-})
-
-// Coordinator 从目标规划任务 DAG；checkpoint store 让整次运行可持久化。
-const result = await oma.runTeam(team, '找出逾期发票并起草催款提醒。', {
-  checkpoint: { store: new FileStore('./.oma/run.json') },
-})
-
-// 在审批人处理 result.pendingApprovals 之前，result.status?.code 保持为 'suspended'；
-// 每条待审批请求都绑定审批人实际看到内容的哈希。
-```
-
 <p align="center">
   <a href="https://open-multi-agent.com/zh/?utm_source=github&utm_medium=package_readme">官网</a> ·
   <a href="https://open-multi-agent.com/zh/getting-started/introduction/?utm_source=github&utm_medium=package_readme">文档</a> ·
@@ -108,6 +83,36 @@ const team = orchestrator.createTeam('research-team', {
 const result = await orchestrator.runTeam(team, 'Compare three approaches and recommend one.')
 console.log(result.agentResults.get('coordinator')?.output)
 ```
+
+<details>
+<summary>让有副作用的工具调用挂起等待审批</summary>
+
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
+
+// 密钥与端点都是你自己的：托管模型，或通过 baseURL 接本地服务。
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // 有实际副作用的工具调用（写文件、执行 shell）挂起，等待人工决定。
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: '核对逾期发票。', toolPreset: 'readwrite' }],
+})
+
+// Coordinator 从目标规划任务 DAG；checkpoint store 让整次运行可持久化。
+const result = await oma.runTeam(team, '找出逾期发票并起草催款提醒。', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// 在审批人处理 result.pendingApprovals 之前，result.status?.code 保持为 'suspended'；
+// 每条待审批请求都绑定审批人实际看到内容的哈希。
+```
+
+</details>
 
 该示例需要设置 `OPENAI_API_KEY`。其他云端或本地模型见 [Provider](#provider)。
 
