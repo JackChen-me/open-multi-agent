@@ -2318,5 +2318,39 @@ describe('OpenMultiAgent', () => {
         expect(trace.durationMs).toBe(0)
       }
     })
+
+    it('invokes onAgentStream for runTasks, which shares runTeam\'s queue', async () => {
+      mockAdapterResponses = ['worker output']
+      const streamed: Array<{ agent: string; type: string }> = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onAgentStream: (agentName, event) => { streamed.push({ agent: agentName, type: event.type }) },
+      })
+      const team = oma.createTeam('t', teamCfg([agentConfig('worker')]))
+
+      const result = await oma.runTasks(team, [
+        { title: 'Task A', description: 'Do A', assignee: 'worker' },
+      ])
+
+      expect(result.success).toBe(true)
+      expect(streamed.length).toBeGreaterThan(0)
+      expect(streamed.every((e) => e.agent === 'worker')).toBe(true)
+      expect(streamed.some((e) => e.type === 'text')).toBe(true)
+      expect(streamed.some((e) => e.type === 'done')).toBe(true)
+    })
+
+    it('does not invoke onAgentStream for runAgent, which never enters the queue', async () => {
+      mockAdapterResponses = ['solo output']
+      const streamed: string[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onAgentStream: (_agentName, event) => { streamed.push(event.type) },
+      })
+
+      const result = await oma.runAgent(agentConfig('solo'), 'Say hello')
+
+      expect(result.success).toBe(true)
+      expect(streamed).toEqual([])
+    })
   })
 })

@@ -79,7 +79,8 @@ export interface ConnectMCPToolsConfig {
    */
   namePrefix?: string
   /**
-   * Timeout (ms) for MCP connect and each `tools/list` page. Defaults to 60000.
+   * Timeout (ms) applied to every request this client makes to the MCP server:
+   * connect, each `tools/list` page, and each `tools/call`. Defaults to 60000.
    */
   requestTimeoutMs?: number
   /**

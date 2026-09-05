@@ -1048,7 +1048,9 @@ export class AgentRunner implements AgentBackend {
    *  - `{ type: 'text', data: string }` for each text delta
    *  - `{ type: 'tool_use', data: ToolUseBlock }` when the model requests a tool
    *  - `{ type: 'tool_result', data: ToolResultBlock }` after each execution
- *  - `{ type: 'budget_exceeded', data: TokenBudgetExceededError }` on budget trip
+   *  - `{ type: 'loop_detected', data: LoopDetectionInfo }` when the repetition
+   *    detector fires
+   *  - `{ type: 'budget_exceeded', data: TokenBudgetExceededError }` on budget trip
    *  - `{ type: 'done', data: RunResult }` at the very end
    *  - `{ type: 'error', data: Error }` on unrecoverable failure
    */

@@ -552,8 +552,12 @@ export interface LLMResponse {
  * - `reasoning`   — incremental reasoning / thinking delta
  * - `tool_use`    — the model has begun or completed a tool-use block
  * - `tool_result` — a tool result has been appended to the stream
+ * - `loop_detected` — repetition detector fired; `data` is a
+ *   {@link LoopDetectionInfo}
  * - `budget_exceeded` — token budget threshold reached for this run
- * - `done`        — the stream has ended; `data` is the final {@link LLMResponse}
+ * - `done`        — the stream has ended; `data` is the final result of the
+ *   layer that emitted it: {@link LLMResponse} from an adapter, `RunResult`
+ *   from a runner or external backend, {@link AgentRunResult} from `Agent`
  * - `error`       — an unrecoverable error occurred; `data` is an `Error`
  */
 export interface StreamEvent {
@@ -2450,10 +2454,12 @@ export interface OrchestratorConfig {
     tasks: readonly Task[],
   ) => ApprovalGateDecision | Promise<ApprovalGateDecision>
   /**
-   * Called for each streaming event emitted by an agent during runTeam().
+   * Called for each streaming event emitted by an agent during a queued run.
    * When provided, agents run in streaming mode so the TUI can receive
    * real-time text deltas and tool-call events.
-   * Only invoked by runTeam(). Not called for runAgent() or runTasks().
+   * Invoked for every agent dispatched through the task queue, which covers
+   * `runTeam()` and `runTasks()` (and a run resumed from either). Not called
+   * for `runAgent()`, which never enters the queue.
    */
   readonly onAgentStream?: (agentName: string, event: StreamEvent) => void
 }
@@ -2923,7 +2929,7 @@ export interface PlanReadyTrace extends TraceEventBase {
   readonly approved: boolean
 }
 
-/** Emitted for each streaming event forwarded through onAgentStream in runTeam. */
+/** Emitted for each streaming event forwarded through onAgentStream in a queued run. */
 export interface AgentStreamTrace extends TraceEventBase {
   readonly type: 'agent_stream'
   /** Underlying stream event type (`text`, `tool_use`, `done`, etc.). */

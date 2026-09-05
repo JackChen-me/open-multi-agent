@@ -9,7 +9,7 @@
  * at the single choke point every write passes through:
  *
  * ```ts
- * const store = new RedactingStore(new FileStore({ path: 'run.json' }))
+ * const store = new RedactingStore(new FileStore('./.oma/run.json'))
  * const team = new Team({ name: 'ops', agents, sharedMemoryStore: store })
  * // Checkpoints default to the team's shared-memory store, so this one wrap
  * // redacts both the `<agent>/…` shared keys and the checkpoint key.
