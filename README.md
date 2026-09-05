@@ -21,11 +21,30 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer replaying a real multi-agent run: task DAG and span waterfall views with per-task status, assignee, tokens, and tool calls" width="960" height="540" loading="eager">
-</p>
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
 
-<br />
+// Your keys and your endpoint: a hosted provider, or a local server through baseURL.
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // Consequential tool calls (file writes, shell) pause for a human decision.
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: 'Reconcile overdue invoices.', toolPreset: 'readwrite' }],
+})
+
+// The coordinator plans the task DAG from the goal; the checkpoint store keeps the run durable.
+const result = await oma.runTeam(team, 'Find overdue invoices and draft the reminders.', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// result.status?.code === 'suspended' until a reviewer decides result.pendingApprovals,
+// each bound to a hash of exactly what the reviewer was shown.
+```
 
 <p align="center">
   <a href="https://open-multi-agent.com/?utm_source=github&utm_medium=readme">Website</a> ·
@@ -40,7 +59,7 @@
 
 <br />
 
-`open-multi-agent` is an AI agent orchestration framework for TypeScript backends that drops into any Node.js app. It runs **dynamic workflows**: a coordinator turns one goal into a task DAG at runtime, a deterministic scheduler executes it across the team, and the whole run stays data you can inspect, approve, and replay. The dashboard above is the built-in offline Run Viewer replaying a real run.
+`open-multi-agent` is an AI agent orchestration framework for TypeScript backends that drops into any Node.js app. It runs **dynamic workflows**: a coordinator turns one goal into a task DAG at runtime, a deterministic scheduler executes it across the team, and the whole run stays data you can inspect, approve, and replay. The Run Viewer further down replays a real run from the trace store.
 
 ## Get started
 
@@ -129,6 +148,11 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 - **Observability and evaluation.** Follow each run through stable identity, execution receipts, and traces; the record is verifiable for order and lineage, not tamper-evident. Replay the task DAG and span waterfall in the offline Run Viewer, or export through the optional OpenTelemetry adapter. The same records feed versioned EvalSets, offline reports, CI gates, and production sampling.
 - **Safety and privacy.** Tools are default-deny, individual calls are gated, and explicit privacy controls apply to telemetry and persisted state.
 - **Open runtime.** Process and ACP backends put Claude Code, Gemini CLI, and Codex on the same task DAG, shared memory, and budgets as LLM agents, though those backends run outside the per-call tool gate, filesystem sandbox, and LLM egress policy. Mix cloud and local models, natively integrated Chinese providers, OpenAI-compatible endpoints, and AI SDK providers, with a fallback parser for local models that emit tool calls as text. Run on your own infrastructure and credentials, locally, offline, or air-gapped; see [Self-hosting and data residency](docs/self-hosting.md).
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer replaying a real multi-agent run: task DAG and span waterfall views with per-task status, assignee, tokens, and tool calls" width="960" height="540" loading="lazy">
+</p>
+<p align="center"><em>The offline Run Viewer replaying a real run from the trace store: task DAG, span waterfall, and per-task evidence, with no hosted service involved.</em></p>
 
 ## Built with OMA
 

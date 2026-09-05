@@ -21,11 +21,30 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer 回放真实多智能体运行：任务 DAG 与 span 瀑布双视图，展示每个任务的状态、负责人、token 与工具调用" width="960" height="540" loading="eager">
-</p>
+```typescript
+import { FileStore, OpenMultiAgent } from '@open-multi-agent/core'
 
-<br />
+// 密钥与端点都是你自己的：托管模型，或通过 baseURL 接本地服务。
+const oma = new OpenMultiAgent({
+  defaultProvider: 'openai',
+  defaultModel: 'gpt-5.4',
+  // 有实际副作用的工具调用（写文件、执行 shell）挂起，等待人工决定。
+  onToolCall: ({ consequential }) => (consequential ? { action: 'suspend' } : { action: 'allow' }),
+})
+
+const team = oma.createTeam('ops', {
+  name: 'ops',
+  agents: [{ name: 'operator', systemPrompt: '核对逾期发票。', toolPreset: 'readwrite' }],
+})
+
+// Coordinator 从目标规划任务 DAG；checkpoint store 让整次运行可持久化。
+const result = await oma.runTeam(team, '找出逾期发票并起草催款提醒。', {
+  checkpoint: { store: new FileStore('./.oma/run.json') },
+})
+
+// 在审批人处理 result.pendingApprovals 之前，result.status?.code 保持为 'suspended'；
+// 每条待审批请求都绑定审批人实际看到内容的哈希。
+```
 
 <p align="center">
   <a href="https://open-multi-agent.com/zh/?utm_source=github&utm_medium=readme">官网</a> ·
@@ -40,7 +59,7 @@
 
 <br />
 
-`open-multi-agent` 是面向 TypeScript 后端的多智能体编排框架，可直接嵌入任意 Node.js 应用。它运行的是**动态工作流（dynamic workflows）**：Coordinator 在运行时将一个目标分解为任务 DAG，由确定性调度器分派给团队执行，整个运行过程始终是可审查、可审批、可回放的数据。上方动图就是内置的离线 Run Viewer 在回放一次真实运行。
+`open-multi-agent` 是面向 TypeScript 后端的多智能体编排框架，可直接嵌入任意 Node.js 应用。它运行的是**动态工作流（dynamic workflows）**：Coordinator 在运行时将一个目标分解为任务 DAG，由确定性调度器分派给团队执行，整个运行过程始终是可审查、可审批、可回放的数据。下文的动图是内置离线 Run Viewer 对一次真实运行的回放。
 
 ## 快速开始
 
@@ -128,6 +147,11 @@ OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来�
 - **可观测与评测。** 通过稳定的运行标识、执行回执与 Trace 跟踪每次运行，在离线 Run Viewer 中回放任务 DAG 与 span 瀑布，或通过可选的 OpenTelemetry 适配器导出；同一套运行记录可直接支撑版本化 EvalSet、离线报告、CI gate 与线上采样。这套记录可核验执行顺序与血缘，但不提供防篡改保证。
 - **安全与隐私。** 内置工具默认拒绝，支持逐次调用 gate，并对遥测与持久化状态应用显式的隐私控制。
 - **开放运行时。** Process 与 ACP backend 让 Claude Code、Gemini CLI、Codex 和 LLM Agent 同处一个任务 DAG，并共享记忆与预算，但这类外部 backend 不在逐次工具 gate、文件沙箱与 LLM 出网策略的覆盖范围内；可混用云端模型、本地开源模型、原生接入的国产模型、OpenAI 兼容端点与 AI SDK provider，并通过容错解析支持以文本形式返回工具调用的本地模型；支持使用自有基础设施与凭证，本地、离线或气隙部署，详见[自托管与数据驻留](docs/self-hosting.md)。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer 回放真实多智能体运行：任务 DAG 与 span 瀑布双视图，展示每个任务的状态、负责人、token 与工具调用" width="960" height="540" loading="lazy">
+</p>
+<p align="center"><em>内置离线 Run Viewer 基于 trace store 回放一次真实运行：任务 DAG、span 瀑布与逐任务证据，不依赖任何托管服务。</em></p>
 
 ## 基于 OMA 构建
 
