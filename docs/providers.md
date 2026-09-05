@@ -173,7 +173,9 @@ Reasoning is streamed as `reasoning` events. Preserving reasoning across a provi
 
 The framework supports tool-calling with local models served by Ollama, vLLM, LM Studio, or llama.cpp. Tool-calling is handled natively through the OpenAI-compatible API.
 
-Verified local models include Gemma 4, Llama 3.1, Qwen 3, Mistral, and Phi-4. Ollama publishes its tool-capable models at [ollama.com/search?c=tools](https://ollama.com/search?c=tools).
+The local models exercised so far are the ones behind the runnable examples in this repository: Gemma 4 on Ollama ([`providers/gemma4-local`](../packages/core/examples/providers/gemma4-local.ts)), Llama 3.1 on Ollama ([`providers/ollama`](../packages/core/examples/providers/ollama.ts)), and a quantized Qwen2.5 on vLLM or llama-server ([`providers/local-quantized`](../packages/core/examples/providers/local-quantized.ts)). Those examples are run by hand against a local server you start yourself.
+
+The automated coverage underneath them is narrower: `packages/core/tests/text-tool-extractor.test.ts` unit-tests the text tool-call extractor against the formats it recognizes, including bare JSON, fenced code blocks, and Hermes-style `<tool_call>` tags. It pins those output shapes, not any particular model. **No local model is covered by the end-to-end suite.** `packages/core/tests/e2e/` contains only hosted-provider cases; the whole directory is excluded from `npm test` unless `RUN_E2E` is set, and each suite then skips itself without its provider's credentials. Treat any other local model, and any other quantization or serving stack, as unverified here and check it against your own workload. Ollama publishes its tool-capable models at [ollama.com/search?c=tools](https://ollama.com/search?c=tools).
 
 If a local model returns tool calls as text instead of the `tool_calls` wire format, the framework automatically extracts them from the text output. This helps with thinking models or misconfigured local servers.
 

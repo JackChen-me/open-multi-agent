@@ -104,6 +104,7 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | Evaluation, scorers, stores, reports, sampling, and gates | [docs/evaluation.md](docs/evaluation.md) |
 | CLI commands and JSON schemas | [docs/cli.md](docs/cli.md) |
 | Process and ACP backends | [docs/external-agents.md](docs/external-agents.md) |
+| Runtime footprint, network scope, state locations, and air-gapped deployment | [docs/self-hosting.md](docs/self-hosting.md) |
 | Routing, scheduling, consensus, recovery, and replay | [model-routing](docs/model-routing.md), [execution-routing](docs/execution-routing.md), [task-scheduling](docs/task-scheduling.md), [consensus](docs/consensus.md), [adaptive-recovery](docs/adaptive-recovery.md), [plan-replay](docs/plan-replay.md) |
 
 ## Adding an LLM adapter
