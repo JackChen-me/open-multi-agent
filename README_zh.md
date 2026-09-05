@@ -18,6 +18,10 @@
 </p>
 
 <p align="center">
+  基础设施与凭证都在你自己手里；关键操作可以挂起等待审批；每次运行都留下可核验的记录。
+</p>
+
+<p align="center">
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
@@ -126,11 +130,11 @@ console.log(result.totalTokenUsage)
 OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来，帮助多智能体系统从原型走向生产环境。
 
 - **动态编排。** 只需描述目标，Coordinator 就会在运行时生成任务 DAG、分配工作并合成结果，无需手工维护工作流图。
-- **受控执行。** 可预览、审批或持久化挂起计划、任务派发与工具调用，并固化已审批计划以供重放；当拓扑不容漂移时可声明必需的角色与执行顺序，并通过多 Agent 共识验证结果。
+- **受控执行。** 可预览、审批或持久化挂起计划、任务派发与工具调用，并固化已审批计划以供重放；框架提供审批 API 与持久化审批记录，审批界面与传递通道由接入方自行实现。当拓扑不容漂移时可声明必需的角色与执行顺序，并通过多 Agent 共识验证结果。
 - **可靠性。** 通过 Checkpoint 从断点恢复中断的运行，或选择在任务结果屏障处启用仅追加式计划修复；重试、超时、循环检测与 token、成本双预算让执行始终有明确边界。
-- **可观测与评测。** 通过稳定的运行标识、执行回执与 Trace 跟踪每次运行，在离线 Run Viewer 中回放任务 DAG 与 span 瀑布，或通过可选的 OpenTelemetry 适配器导出；同一套运行记录可直接支撑版本化 EvalSet、离线报告、CI gate 与线上采样。
+- **可观测与评测。** 通过稳定的运行标识、执行回执与 Trace 跟踪每次运行，在离线 Run Viewer 中回放任务 DAG 与 span 瀑布，或通过可选的 OpenTelemetry 适配器导出；同一套运行记录可直接支撑版本化 EvalSet、离线报告、CI gate 与线上采样。这套记录可核验执行顺序与血缘，但不提供防篡改保证。
 - **安全与隐私。** 内置工具默认拒绝，支持逐次调用 gate，并对遥测与持久化状态应用显式的隐私控制。
-- **开放运行时。** Process 与 ACP backend 让 Claude Code、Gemini CLI、Codex 和 LLM Agent 同处一个任务 DAG，并共享记忆与预算；可混用云端模型、本地开源模型、原生接入的国产模型、OpenAI 兼容端点与 AI SDK provider，并通过容错解析支持以文本形式返回工具调用的本地模型；支持使用自有基础设施与凭证，本地、离线或气隙部署。
+- **开放运行时。** Process 与 ACP backend 让 Claude Code、Gemini CLI、Codex 和 LLM Agent 同处一个任务 DAG，并共享记忆与预算，但这类外部 backend 不在逐次工具 gate、文件沙箱与 LLM 出网策略的覆盖范围内；可混用云端模型、本地开源模型、原生接入的国产模型、OpenAI 兼容端点与 AI SDK provider，并通过容错解析支持以文本形式返回工具调用的本地模型；支持使用自有基础设施与凭证，本地、离线或气隙部署，详见[自托管与数据驻留](docs/self-hosting.md)。
 
 ## 基于 OMA 构建
 

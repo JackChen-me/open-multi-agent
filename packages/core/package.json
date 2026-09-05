@@ -1,7 +1,7 @@
 {
   "name": "@open-multi-agent/core",
   "version": "1.18.0",
-  "description": "TypeScript multi-agent framework: one runTeam() call from goal to result. Auto task decomposition and parallel execution for multi-step LLM jobs. Deploys anywhere Node.js runs.",
+  "description": "TypeScript multi-agent orchestration that runs in your own environment: one call from goal to result, approval gates on consequential actions, and a verifiable record of every run. Built-in provider adapters plus any OpenAI-compatible endpoint, local models included.",
   "files": [
     "dist",
     "README.md",
