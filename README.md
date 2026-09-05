@@ -39,7 +39,9 @@
 ## Get started
 
 Requires Node.js 20 or newer. For production, use a currently maintained
-Node.js LTS release.
+Node.js LTS release. Node.js 20 is upstream-EOL and retained only as a
+migration compatibility window; OMA will remove it in the next major release,
+no earlier than 2026-10-31.
 
 Scaffold a PR review agent, security analysis agent, or teaching DAG:
 
@@ -139,7 +141,7 @@ const result = await oma.runTeam(team, 'Find overdue invoices and draft the remi
 
 Set `OPENAI_API_KEY` to run this example. [Providers](docs/providers.md) covers other hosted models, local servers, OpenAI-compatible endpoints, and AI SDK providers.
 
-`runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](packages/core/examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
+`runTeam()` plans from a goal, `runAgent()` runs a single agent, and `runTasks()` executes an explicit pipeline. The [Core package guide](packages/core/README.md) walks through all three modes, provider and credential setup, and the production checklist. The [example index](packages/core/examples/README.md) lists every runnable example across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Why OMA
 
@@ -211,10 +213,10 @@ Need to embed agent capabilities in an existing product or business system? We h
 
 | Goal | Start here |
 |---|---|
-| Install and run | [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) |
-| Configure models and tools | [Providers](docs/providers.md) · [LLM egress policy](docs/egress-policy.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
-| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Durable approvals](docs/durable-approvals.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
-| Control orchestration | [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) |
+| Install and run | [All docs](docs/README.md) · [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) · [Glossary](docs/glossary.md) · [Production checklist](docs/production-checklist.md) |
+| Configure models and tools | [Providers](docs/providers.md) · [LLM egress policy](docs/egress-policy.md) · [Tools](docs/tool-configuration.md) · [Sandbox and shell](docs/sandbox-and-shell.md) · [MCP](docs/mcp.md) · [Structured input](docs/structured-input.md) · [External agents](docs/external-agents.md) |
+| Operate reliably | [Observability](docs/observability.md) · [Run Viewer](docs/run-viewer.md) · [Run journal](docs/run-journal.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Durable approvals](docs/durable-approvals.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) · [Errors](docs/errors.md) |
+| Control orchestration | [Coordinator](docs/coordinator.md) · [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) · [Streaming](docs/streaming.md) · [Budgets and limits](docs/budgets-and-limits.md) |
 
 ## Contributing
 

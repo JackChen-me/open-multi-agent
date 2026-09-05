@@ -10,7 +10,7 @@ cd open-multi-agent
 npm install
 ```
 
-Requires Node.js >= 20.0.0.
+Requires Node.js >= 20.0.0. Node.js 20 is upstream-EOL and retained only as a migration compatibility window; OMA will remove it in the next major release, no earlier than 2026-10-31.
 
 ## Development Commands
 
@@ -22,11 +22,15 @@ npm test               # Run unit tests in every workspace
 npm run test:watch     # Core Vitest watch mode
 npm run test:coverage  # Core unit tests with coverage
 npm run test:scaffold  # End-to-end create-oma-app scaffold smoke test
+npm run test:example-catalog  # Validate example catalog metadata and coverage
+npm run test:e2e       # Core provider E2E; requires real API keys
+
+node packages/core/dist/cli/oma.js help  # After build; `oma` when installed from npm
 ```
 
 ## Running Tests
 
-Unit tests live in each workspace's `tests/` directory: currently `packages/core/tests/`, `packages/create-oma-app/tests/`, and `packages/otel/tests/`. They run without API keys or network access — provider SDKs and external processes are mocked where needed.
+Unit tests live in each workspace's `tests/` directory: currently `packages/core/tests/`, `packages/create-oma-app/tests/`, `packages/otel/tests/`, and `packages/release-bot/tests/`. They run without API keys or network access — provider SDKs and external processes are mocked where needed.
 
 ```bash
 npm test
@@ -74,14 +78,20 @@ Opening a PR prefills the [pull request template](pull_request_template.md), whi
 
 See the [README](../packages/core/README.md#architecture) for an architecture diagram. Key entry points:
 
-- **Orchestrator**: `packages/core/src/orchestrator/orchestrator.ts` — top-level API
-- **Task system**: `packages/core/src/task/queue.ts`, `packages/core/src/task/task.ts` — dependency DAG
-- **Agent**: `packages/core/src/agent/runner.ts` — conversation loop
-- **Tools**: `packages/core/src/tool/framework.ts`, `packages/core/src/tool/executor.ts` — tool registry and execution
-- **LLM adapters**: `packages/core/src/llm/` — built-in providers + OpenAI-compatible + AI SDK bridge (see [docs/providers.md](../docs/providers.md))
-- **Observability**: `packages/core/src/observability/` — trace records, sinks, exporters, and stores
-- **OpenTelemetry adapter**: `packages/otel/src/` — optional OTel mapping and export integration kept outside core
-- **App scaffolder**: `packages/create-oma-app/src/` and `packages/create-oma-app/templates/` — CLI and starter templates
+- **Orchestrator**: `packages/core/src/orchestrator/orchestrator.ts`. Top-level API.
+- **Task system**: `packages/core/src/task/queue.ts`, `packages/core/src/task/task.ts`. Dependency DAG.
+- **Agent**: `packages/core/src/agent/runner.ts`. Conversation loop.
+- **Tools**: `packages/core/src/tool/framework.ts`, `packages/core/src/tool/executor.ts`. Tool registry and execution.
+- **Team**: `packages/core/src/team/team.ts`, `packages/core/src/team/messaging.ts`. The team container and the in-memory inter-agent message bus.
+- **LLM adapters**: `packages/core/src/llm/`. Built-in providers + OpenAI-compatible + AI SDK bridge (see [docs/providers.md](../docs/providers.md)).
+- **Memory and checkpoints**: `packages/core/src/memory/`. Shared memory, stores, and checkpoint snapshots (see [docs/shared-memory.md](../docs/shared-memory.md) and [docs/checkpoint.md](../docs/checkpoint.md)).
+- **Durable approvals**: `packages/core/src/approval/durable.ts`. Suspended approval requests and decision records (see [docs/durable-approvals.md](../docs/durable-approvals.md)).
+- **Run journal**: `packages/core/src/journal/`. Append-only run events, offline verification, and tail replay (see [docs/run-journal.md](../docs/run-journal.md)).
+- **Observability**: `packages/core/src/observability/`. Trace records, sinks, exporters, and stores.
+- **Run Viewer**: `packages/core/src/dashboard/`. Offline single-run DAG and waterfall HTML rendering (see [docs/run-viewer.md](../docs/run-viewer.md)).
+- **Evaluation**: `packages/core/src/eval/`. EvalSets, scorers, gates, reports, and stores (see [docs/evaluation.md](../docs/evaluation.md)).
+- **OpenTelemetry adapter**: `packages/otel/src/`. Optional OTel mapping and export integration kept outside core.
+- **App scaffolder**: `packages/create-oma-app/src/` and `packages/create-oma-app/templates/`. CLI and starter templates.
 
 ## Where to Contribute
 

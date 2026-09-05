@@ -45,7 +45,9 @@ The runtime schedules dependencies, runs independent work in parallel, shares co
 ## Quick Start
 
 Requires Node.js 20 or newer. For production, use a currently maintained
-Node.js LTS release. Scaffold and run a starter in one command:
+Node.js LTS release. Node.js 20 is upstream-EOL and retained only as a
+migration compatibility window; OMA will remove it in the next major release,
+no earlier than 2026-10-31. Scaffold and run a starter in one command:
 
 ```bash
 npm create oma-app@latest my-oma
@@ -228,7 +230,7 @@ Start with one example that matches the behavior you need:
 | Embed OMA in a backend | [`integrations/express-customer-support`](examples/integrations/express-customer-support/) |
 | Export an offline trace viewer | [`integrations/observability-v2/run-viewer`](examples/integrations/observability-v2/run-viewer.ts) |
 
-The [example index](examples/README.md) lists 50+ runnable examples across basics, cookbook workflows, patterns, providers, and integrations.
+The [example index](examples/README.md) lists every runnable example across basics, cookbook workflows, patterns, providers, and integrations.
 
 ## Providers
 
@@ -255,14 +257,14 @@ Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technic
 
 | Goal | Configure |
 |---|---|
-| Bound work | `maxTurns`, `timeoutMs`, `callTimeoutMs`, `contextStrategy`, `loopDetection` |
+| Bound work | `maxTurns`, `timeoutMs`, `callTimeoutMs`, `contextStrategy`, [`loopDetection`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/budgets-and-limits.md) |
 | Control spend | `maxTokenBudget`; `maxCostBudget` + application-owned `estimateCost` |
 | Limit tools | `tools` / `toolPreset`, `cwd` / `defaultCwd`, tool-output caps |
 | Recover | Task retries, checkpointing, `restore()`, and opt-in adaptive plan repair |
 | Review work | `planOnly`, inline approval callbacks, or [durable approval gates](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md); your application owns the approval surface and transport |
 | Observe | Trace sinks, TraceStore, execution receipts, Run Viewer, or the optional OTel adapter |
 
-Budget checks run at turn and task boundaries, so a run can overshoot by up to one model turn; they are not a cent-exact stop. `estimateCost` receives each call's token usage plus the agent, effective `model`, `provider`, phase, and `taskId`, and your application owns the price table.
+Budget checks run at turn and task boundaries, so a run can overshoot by up to one model turn; they are not a cent-exact stop. `estimateCost` receives each call's token usage plus the agent, effective `model`, `provider`, phase, and `taskId`, and your application owns the price table. [Budgets and limits](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/budgets-and-limits.md) covers every ceiling, where it is checked, and what happens when one trips.
 
 Built-in tools are default-deny, and every model-visible tool result is sent to
 your model provider, so grant read and exec access deliberately. Tools may keep
@@ -270,7 +272,7 @@ application-owned data separate while returning text, image, or file content
 through `modelOutput`; see the [tool configuration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#rich-image-and-file-results).
 Filesystem tools stay within the configured `cwd`; granted `bash` is not
 sandboxed. Its execution target can be replaced through a
-[`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md#shell-executors),
+[`ShellExecutor`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/sandbox-and-shell.md#shell-executors),
 while the default `LocalShellExecutor` preserves host execution and is not a
 security boundary. Secrets are redacted from traces, shell output, and Viewer
 payloads by default, but result messages and checkpoints have their own
@@ -282,7 +284,7 @@ Core already provides run identity, trace sinks, execution receipts, queryable i
 
 [`@open-multi-agent/otel`](https://github.com/open-multi-agent/open-multi-agent/blob/main/packages/otel/README.md) is an **optional enterprise integration** for teams that already operate a centralized OpenTelemetry stack. It converts OMA traces into standard OTel spans so multi-agent runs can join company-wide monitoring, alerting, and incident workflows. The application owns the provider and its lifecycle; telemetry failures never change the run result.
 
-See the [observability guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [migration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md), and [performance guidance](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-performance.md).
+See the [observability guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md) and the [migration guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability-migration.md).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/demo-dashboard-hero.gif" alt="OMA Run Viewer replaying a real multi-agent run: task DAG and span waterfall views with per-task status, assignee, tokens, and tool calls" width="960" height="540" loading="lazy">
@@ -297,10 +299,10 @@ When a long run goes wrong, the record usually missing is what each agent actual
 
 | Area | Guides |
 |---|---|
-| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [structured input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [durable approvals](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
-| Control workflows | [Plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
-| Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](examples/production/README.md) |
+| Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [structured input](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [sandbox and shell](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/sandbox-and-shell.md), [MCP](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/mcp.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
+| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [evaluation in CI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation-ci.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [durable approvals](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md), [errors](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/errors.md) |
+| Control workflows | [Coordinator](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/coordinator.md), [plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [hooks and callbacks](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/hooks-and-callbacks.md), [streaming](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/streaming.md), [budgets and limits](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/budgets-and-limits.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
+| Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [Run Viewer](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-viewer.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production checklist](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/production-checklist.md), [glossary](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/glossary.md), [production examples](examples/production/README.md) |
 
 ## Contributing
 
