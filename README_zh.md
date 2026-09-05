@@ -38,7 +38,7 @@
 
 ## 快速开始
 
-要求 Node.js 20 或更高版本。生产环境请使用仍处于维护期的 Node.js LTS 版本。
+要求 Node.js 20 或更高版本。生产环境请使用仍处于维护期的 Node.js LTS 版本。Node.js 20 上游已停止维护，OMA 仅将其保留为迁移过渡窗口，会在下一个 major 版本移除，最早不早于 2026-10-31。
 
 初始化 PR 审查 Agent、安全分析 Agent 或教学用 DAG：
 
@@ -138,7 +138,7 @@ const result = await oma.runTeam(team, '找出逾期发票并起草催款提醒�
 
 运行这段示例需要设置 `OPENAI_API_KEY`。其他云端模型、本地服务、OpenAI 兼容端点与 AI SDK provider 的配置见 [Provider 文档](docs/providers.md)。
 
-`runTeam()` 从目标自动规划，`runAgent()` 运行单个 Agent，`runTasks()` 执行显式流水线。三种模式、Provider 与凭证配置、生产检查清单见[核心包使用指南](packages/core/README_zh.md)。[示例索引](packages/core/examples/README.md)收录 50+ 个可运行示例，覆盖基础、cookbook 流程、模式、Provider 与集成。
+`runTeam()` 从目标自动规划，`runAgent()` 运行单个 Agent，`runTasks()` 执行显式流水线。三种模式、Provider 与凭证配置、生产检查清单见[核心包使用指南](packages/core/README_zh.md)。[示例索引](packages/core/examples/README.md)收录全部可运行示例，覆盖基础、cookbook 流程、模式、Provider 与集成。
 
 ## 为什么选择 OMA
 
@@ -214,10 +214,10 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 
 | 目标 | 从这里开始 |
 |---|---|
-| 安装与运行 | [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) |
-| 配置模型与工具 | [Provider](docs/providers.md) · [LLM 出网策略](docs/egress-policy.md) · [工具与沙箱](docs/tool-configuration.md) · [外部 Agent](docs/external-agents.md) |
-| 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) |
-| 控制编排 | [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) |
+| 安装与运行 | [文档索引](docs/README.md) · [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) · [术语表](docs/glossary.md) · [生产检查清单](docs/production-checklist.md) |
+| 配置模型与工具 | [Provider](docs/providers.md) · [LLM 出网策略](docs/egress-policy.md) · [工具配置](docs/tool-configuration.md) · [沙箱与 shell 执行](docs/sandbox-and-shell.md) · [MCP](docs/mcp.md) · [结构化输入](docs/structured-input.md) · [外部 Agent](docs/external-agents.md) |
+| 稳定运行 | [可观测性](docs/observability.md) · [Run Viewer](docs/run-viewer.md) · [运行事件日志](docs/run-journal.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) · [错误](docs/errors.md) |
+| 控制编排 | [Coordinator](docs/coordinator.md) · [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) · [流式输出](docs/streaming.md) · [预算与限制](docs/budgets-and-limits.md) |
 
 ## 参与贡献
 

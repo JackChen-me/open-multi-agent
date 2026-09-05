@@ -1,4 +1,4 @@
-# Plan Preview & Replay
+# Plan preview & replay
 
 `runTeam` normally decomposes a goal and executes it in a single call. You can split that in two: have the coordinator decompose the goal into a task DAG **without executing it**, freeze that plan as a serializable artifact, then **replay the exact same graph later without calling the coordinator again**.
 
@@ -23,7 +23,7 @@ const preview = await orchestrator.runTeam(team, goal, { planOnly: true })
 The returned `TeamRunResult` has `planOnly: true`, `success: true`, and `tasks` populated (all `pending`); `agentResults` holds only the coordinator's decomposition call. Two things to know:
 
 - **`planOnly` bypasses the simple-goal short-circuit.** A trivial goal that a normal `runTeam` would hand straight to a single agent still goes through the coordinator here, so you always get a real plan to inspect.
-- **`onPlanReady` still gates.** If you've wired `OrchestratorConfig.onPlanReady` and it returns `false`, the plan is rejected: the result is `success: false` and `planOnly` is unset.
+- **`onPlanReady` still gates.** If you've wired `OrchestratorConfig.onPlanReady` and it returns `false`, the plan is rejected: the result is `success: false` and `planOnly` is unset. See [previewing and gating the plan](coordinator.md#previewing-and-gating-the-plan) for how the gate sits relative to the coordinator's own validation.
 
 ## Freeze it
 

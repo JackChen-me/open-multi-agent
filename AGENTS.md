@@ -13,7 +13,7 @@ This is a private npm-workspaces root. Run the commands below from the repositor
 | `create-oma-app` | Published scaffolder and starter templates | `packages/create-oma-app/src/`, `packages/create-oma-app/templates/`, `packages/create-oma-app/tests/` |
 | `@open-multi-agent/release-bot` | Private OMA-powered release planning and deterministic publication automation; never published | `packages/release-bot/src/`, `packages/release-bot/tests/`, `.github/workflows/release-bot.yml`, `.github/workflows/publish.yml` |
 
-Root-level `README.md`, `docs/`, `.github/`, and `scripts/` apply across workspaces. Paths in this file are repository-relative; do not assume an unprefixed `src/` or `tests/` means the workspace you intend.
+Root-level `README.md`, `docs/`, `.github/`, and `scripts/` apply across workspaces. Paths in this file are repository-relative; do not assume an unprefixed `src/` or `tests/` means the workspace you intend. [`bench/`](bench/README.md) is the A/B benchmark harness: it is not a workspace and is never published, it runs through `npx tsx`, and everything it produces is gitignored.
 
 ## Commands
 
@@ -103,11 +103,23 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | Checkpoint and restore | [docs/checkpoint.md](docs/checkpoint.md) |
 | Run event journal, lineage, and the model-visible boundary | [docs/run-journal.md](docs/run-journal.md) |
 | Tracing, stores, progress, Run Viewer, privacy, and OpenTelemetry | [docs/observability.md](docs/observability.md) |
+| Run Viewer inputs, rendering, and privacy boundary | [docs/run-viewer.md](docs/run-viewer.md) |
 | Evaluation, scorers, stores, reports, sampling, and gates | [docs/evaluation.md](docs/evaluation.md) |
+| Evaluation in CI and routing EvalSets | [evaluation-ci](docs/evaluation-ci.md), [evaluation-routing](docs/evaluation-routing.md) |
 | CLI commands and JSON schemas | [docs/cli.md](docs/cli.md) |
+| Coordinator planning, configuration, and the simple-goal short circuit | [docs/coordinator.md](docs/coordinator.md) |
+| Callback and hook surface across config, options, and tasks | [docs/hooks-and-callbacks.md](docs/hooks-and-callbacks.md) |
+| Filesystem sandbox and shell execution | [docs/sandbox-and-shell.md](docs/sandbox-and-shell.md) |
+| MCP connection, tool mapping, and process boundaries | [docs/mcp.md](docs/mcp.md) |
+| Structured agent input and content blocks | [docs/structured-input.md](docs/structured-input.md) |
+| Streaming surfaces and `StreamEvent` order | [docs/streaming.md](docs/streaming.md) |
+| Turn, timeout, loop, token, and cost ceilings | [docs/budgets-and-limits.md](docs/budgets-and-limits.md) |
+| Durable approval gates and decision records | [docs/durable-approvals.md](docs/durable-approvals.md) |
+| Exported error classes and retry classification | [docs/errors.md](docs/errors.md) |
 | Process and ACP backends | [docs/external-agents.md](docs/external-agents.md) |
 | Runtime footprint, network scope, state locations, and air-gapped deployment | [docs/self-hosting.md](docs/self-hosting.md) |
 | Routing, scheduling, consensus, recovery, and replay | [model-routing](docs/model-routing.md), [execution-routing](docs/execution-routing.md), [task-scheduling](docs/task-scheduling.md), [consensus](docs/consensus.md), [adaptive-recovery](docs/adaptive-recovery.md), [plan-replay](docs/plan-replay.md) |
+| Documentation index across every `docs/` page | [docs/README.md](docs/README.md) |
 
 ## Adding an LLM adapter
 

@@ -122,7 +122,9 @@ the model and runs the command through a shell with your process's
 permissions. The sandbox root does not constrain it, and neither does the
 per-call gate unless you configure one. Granting `bash` is granting shell
 access to the host; see [tool configuration](tool-configuration.md) for the
-grant model and the per-call `onToolCall` gate.
+grant model and the per-call `onToolCall` gate, and
+[sandbox and shell execution](sandbox-and-shell.md) for the sandbox root, its
+resolution rules, and replaceable shell executors.
 
 ## Redaction
 

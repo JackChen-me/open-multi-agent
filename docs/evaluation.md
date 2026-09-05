@@ -461,262 +461,40 @@ objects are defensively copied and deeply frozen.
 
 ## Run evaluations from the CLI
 
-After building or installing the package, a no-network target can be evaluated
-from a shell or CI job:
-
-```bash
-oma eval run --set ./evals/greetings.json --target ./evals/target.mjs \
-  --report json --report junit --out ./eval-results \
-  --gate ./evals/gate.json --baseline ./evals/baseline.json \
-  --meta prompt_version=v2
-```
-
-The target module must default-export an `EvalTarget` function or
-`{ target, scorers? }`. An optional `--scorers` module default-exports a
-`Scorer[]`; scorer names must be unique across both sources. The CLI dynamically
-imports and executes these user modules with the current process permissions,
-so they must be trusted.
-
-Reports are written below `<out>/<evalRunId>/`; `--out` defaults to
-`./eval-results`. `--report` is repeatable and defaults to JSON. `--meta
-key=value` is also repeatable and all values are strings. See
-[the CLI reference](cli.md#oma-eval-run) for the complete argument and exit-code
-contract.
-
-Without `--gate`, low scores and `pass: false` records do not change the exit
-code. With `--gate`, the stdout summary includes the verdict and its path, and
-the exact `{ pass, failures, warnings }` object is written to
-`<out>/<evalRunId>/verdict.json`. A failed gate or every selected target failing
-exits 1. Usage/file/module errors exit 2. `--baseline` requires `--gate`.
+`oma eval run` evaluates a no-network target from a shell or CI job, writing
+JSON, Markdown, and JUnit reports under `<out>/<evalRunId>/` and optionally
+applying a gate to set the exit code. The target module default-exports an
+`EvalTarget` or `{ target, scorers? }`, and the CLI imports it with the current
+process permissions, so it must be trusted. See
+[evaluation in CI](evaluation-ci.md#run-evaluations-from-the-cli) for the full
+workflow and [the CLI reference](cli.md#oma-eval-run) for the argument and
+exit-code contract.
 
 ## Gate quality in CI
 
-`evaluateGate()` is pure logic exported from `@open-multi-agent/core/eval`:
-
-```ts
-import { evaluateGate } from '@open-multi-agent/core/eval'
-
-const verdict = evaluateGate(report, {
-  schemaVersion: 1,
-  thresholds: [
-    // A rule scorer plus passRate=1 is a deterministic quality gate.
-    { scorer: 'exact', metric: 'passRate', min: 1 },
-    { scorer: 'relevancy', metric: 'avg', min: 0.8 },
-    { scorer: 'relevancy', metric: 'p50', min: 0.85, tag: 'critical' },
-  ],
-  maxScorerErrorRate: 0.1,
-  maxTargetErrorRate: 0,
-  baseline: {
-    maxRegression: 0.05,
-    perScorer: { exact: 0 },
-  },
-}, baseline)
-
-if (!verdict.pass) process.exitCode = 1
-```
-
-The equivalent JSON policy is:
-
-```json
-{
-  "schemaVersion": 1,
-  "thresholds": [
-    { "scorer": "exact", "metric": "passRate", "min": 1 },
-    { "scorer": "relevancy", "metric": "avg", "min": 0.8 },
-    { "scorer": "relevancy", "metric": "p50", "min": 0.85, "tag": "critical" }
-  ],
-  "maxScorerErrorRate": 0.1,
-  "maxTargetErrorRate": 0,
-  "baseline": {
-    "maxRegression": 0.05,
-    "perScorer": { "exact": 0 }
-  }
-}
-```
-
-Thresholds support `avg`, `p50`, `p95`, `min`, and `passRate`, with optional
-tag scoping and inclusive `min`/`max` boundaries. A missing scorer, tag, or
-`passRate` source is a configuration failure rather than a silent pass. The
-health defaults fail when scorer errors exceed 10% of scored plus scorer-error
-records, or when any selected target fails.
-
-Every verdict contains only `pass`, `failures`, and `warnings`. A failure has a
-stable `kind`, optional scorer/metric/tag coordinates, the observed `actual`,
-the configured `limit`, and a human-readable `message`. For failures about
-availability rather than a measured score, `missing_scorer` uses `actual: 0`
-and `limit: 1`, while `baseline_mismatch` uses `actual: 1` and `limit: 0`.
-
-A baseline is an ordinary JSON `EvalRunReport`, not a second file format. The
-recommended workflow is:
-
-1. Run the accepted target with `--report json` and copy its `report.json` to a
-   reviewed location such as `evals/baseline.json`.
-2. Commit that report together with its versioned EvalSet and gate policy.
-3. In CI, compare the candidate report with `--baseline`.
-4. Update the baseline only after intentionally reviewing and accepting the
-   behavior change; the CLI never updates it automatically.
-
-Set name or version mismatches fail by default. Set
-`baseline.allowSetMismatch` to `true` only when a warning plus skipped
-regression checks is intended. When a scorer version differs, OMA warns and
-skips that scorer's regression checks because a changed judge prompt or model
-does not produce a comparable score. Threshold and health checks still run.
-If baseline rules are configured but no baseline report is supplied, OMA warns
-and skips regression checks.
-
-Use `oma eval gate` when report generation and quality enforcement are separate
-CI stages. It prints the exact verdict JSON to stdout:
-
-```bash
-oma eval gate --report ./candidate/report.json --gate ./evals/gate.json \
-  --baseline ./evals/baseline.json
-```
-
-A GitHub Actions job can preserve both machine-readable reports while letting
-the gate control the step status:
-
-```yaml
-- name: Run deterministic evaluation gate
-  run: |
-    oma eval run --set ./evals/set.json --target ./evals/target.mjs \
-      --gate ./evals/gate.json --baseline ./evals/baseline.json \
-      --report json --report junit --out ./eval-results || exit 1
-
-- name: Upload evaluation JUnit report
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: evaluation-junit
-    path: eval-results/**/report.junit.xml
-```
+`evaluateGate()` turns a report plus a `GatePolicy` into a
+`{ pass, failures, warnings }` verdict, applying absolute thresholds, scorer and
+target health limits, and optional baseline-regression checks. `oma eval gate`
+applies the same logic to an existing report when report generation and
+enforcement are separate CI stages. See
+[evaluation in CI](evaluation-ci.md#gate-quality-in-ci) for the policy
+reference, the baseline workflow, and GitHub Actions wiring.
 
 ## Routing stability regression EvalSet
 
-The frozen `run-team-routing-stability@1.0.0` EvalSet in
-`packages/core/tests/fixtures/eval/routing-stability-set.json` measures whether
-equivalent `runTeam()` goals keep the same executed topology when prompt length
-or language changes. Each family contains short and detailed English variants
-plus Chinese, Japanese, and Korean translations. Governance families carry the
-same `governanceIntent: 'required'`,
-`requiredRoles`, and `requiredOrder` declaration on every variant; benign
-families carry no declaration.
-
-The test injects one deterministic `LLMAdapter` into every worker and the
-coordinator. Every model call returns the same fixed text, including a valid
-two-role coordinator plan. It also injects a valid low-risk `TaskProfiler`
-fixture for benign Single candidates and fails the test unless Hybrid profiling
-finishes with `outcome: 'applied'`; the gate therefore cannot pass by silently
-falling back from invalid profile output. The suite makes no network request
-and needs no API key. Within one family, the goal text is therefore the only
-routing input that changes. The measured topology comes from
-`buildExecutionReceipt(result)` and the `result.tasks` short-circuit marker, and
-contains only:
-
-- `single-short-circuit` versus task graph;
-- the worker roles that actually executed; and
-- cross-role dependency edges.
-
-Model output, generated task IDs, timing, token usage, and scheduler start order
-are excluded. For `n` variants, flip rate is the number of unordered variant
-pairs with different canonical topologies divided by `n * (n - 1) / 2`.
-Length invariance compares the fixture's short/detailed English pair; language
-invariance compares its explicitly paired English/Chinese variants.
-
-`packages/core/tests/fixtures/eval/routing-stability-gate.json` applies three
-absolute thresholds to the `governance` tag: routing-stability minimum `1`
-(zero flips), length-invariance minimum `1`, and language-invariance minimum
-`1`. It also gates benign routing-stability at `0.95` (at most 5% pair flips);
-benign length/language submetrics remain monitored. Scorer and target error
-limits are both zero. The existing CI `npm test` matrix blocks a change that
-makes a declared route depend on goal language or length or pushes benign
-topology flips over the limit. A negative-control test injects a fake declared
-router that collapses Chinese variants to one role and asserts that both the
-routing-stability and language-invariance thresholds fail.
-
-The current snapshot below is emitted in the test's `[routing-stability]`
-EvalSet report:
-
-| Family | Pair flips | Flip rate | Length invariant | Language invariant |
-|---|---:|---:|---:|---:|
-| Declared wire transfer | 0 / 10 | 0% | 100% | 100% |
-| Declared key rotation | 0 / 10 | 0% | 100% | 100% |
-| **Declared governance total** | **0 / 20** | **0%** | **100%** | **100%** |
-| Undeclared DNS | 0 / 10 | 0% | 100% | 100% |
-| Undeclared database comparison | 0 / 10 | 0% | 100% | 100% |
-| **Undeclared benign total** | **0 / 20** | **0%** | **100%** | **100%** |
-
-The target for undeclared benign routing is at most 5% pair flips and at most
-5% length mismatches (at least 95% length invariance). Update the frozen corpus
-version and the documented snapshot only after reviewing an intentional
-measurement change.
+A frozen EvalSet measures whether equivalent `runTeam()` goals keep the same
+executed topology when prompt length or language changes, and gates
+declared-governance families at zero flips. It runs inside the ordinary `npm
+test` matrix with no network access. See
+[routing evaluation](evaluation-routing.md#routing-stability-regression-evalset).
 
 ## Semantic routing policy EvalSet
 
-`packages/core/tests/fixtures/eval/semantic-routing-set.json` freezes the V1
-Hybrid policy contract independently from provider behavior. It covers short
-independent-evidence and independent-review goals, permission isolation,
-consequential side effects, conflicting objectives, ordinary short and long
-single-task negatives, equivalent Chinese/Japanese/Korean goals, and a
-prompt-injection sample.
-
-Each fixture contains a reviewed `TaskProfile`, framework-computed facts, and
-the expected deterministic recommendation. CI validates the strict profile
-schema and requires every fixture to match exactly. This proves Policy behavior
-without treating one provider's current classification as the semantic
-contract. Real-provider E2E is limited to checking that the one-call Profiler
-integration can produce a valid profile; it is not the sole routing oracle.
-
-Shadow evaluation belongs in CI and canary release work, not the public runtime
-default. Before promoting a major release, measure the reviewed end-to-end
-corpus against these gates:
-
-- zero false-Single results on critical cases;
-- at least 95% reviewed routing accuracy;
-- at most 1% invalid/failed Profiler outputs;
-- median Profiler token overhead no greater than 5% of representative total
-  usage; and
-- P95 end-to-end latency regression no greater than 10%.
-
-### Running the real-provider Shadow gate
-
-`packages/core/tests/e2e/semantic-routing-shadow.test.ts` runs the reviewed
-synthetic corpus through the actual `LLMTaskProfiler`, then applies the same
-deterministic policy that Hybrid routing uses. It is skipped unless
-`SEMANTIC_ROUTING_SHADOW=1` is set, executes no workers or tools, and does not
-send user data. The profiler uses the shipping `LLMTaskProfiler` default of 800
-output tokens per fixture, so the canary validates the production contract. The
-optional `SEMANTIC_ROUTING_SHADOW_BASE_URL` and
-`SEMANTIC_ROUTING_SHADOW_REGION` values map to the selected adapter; Bedrock
-uses its normal AWS credential chain instead of the API-key variable.
-
-For DeepSeek V4, the built-in profiler explicitly uses non-thinking mode: this
-is a bounded JSON classification call, and DeepSeek otherwise enables thinking
-by default. The production route and this gate use the same setting.
-
-Set credentials only in your local shell or CI secret store; never paste a key
-into a command, repository file, or test log. For example, map an existing
-local provider secret without printing it:
-
-```bash
-export SEMANTIC_ROUTING_SHADOW=1
-export SEMANTIC_ROUTING_SHADOW_PROVIDER=openai
-export SEMANTIC_ROUTING_SHADOW_MODEL=gpt-4o-mini
-export SEMANTIC_ROUTING_SHADOW_API_KEY="$OPENAI_API_KEY"
-npm run test:semantic-routing-shadow -w @open-multi-agent/core
-```
-
-The report contains only provider/model identifiers, aggregate accuracy,
-failure and mismatch case IDs, P95 profiler latency, and aggregate token use.
-It deliberately omits goals, inferred reasons, raw model output, and all
-configuration secrets. The executable gate enforces zero invalid profiles,
-zero critical false-Single outcomes, and at least 95% reviewed routing
-accuracy. Record the output as release evidence. Measure the remaining
-end-to-end token and latency regression gates in the production-shadow canary
-before declaring a provider/model supported for Hybrid routing.
-
-Historical success rates, online adaptive learning, and Team-to-Single
-optimization require separately versioned evaluation, monitoring, and rollback
-and are not part of V1.
+A second frozen EvalSet pins the Hybrid routing policy contract against reviewed
+`TaskProfile` fixtures, so policy behavior is proven independently of any one
+provider's current classification. An opt-in real-provider Shadow gate runs the
+same deterministic policy against a live profiler as release evidence. See
+[routing evaluation](evaluation-routing.md#semantic-routing-policy-evalset).
 
 ## Memory evaluation metrics
 

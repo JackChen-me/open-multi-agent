@@ -1,6 +1,10 @@
-# Tool Configuration
+# Tool configuration
 
 Agents can be configured with fine-grained tool access control using presets, allowlists, and denylists.
+
+Two subsystems that used to live on this page now have their own:
+[sandbox and shell execution](sandbox-and-shell.md) and
+[MCP tools](mcp.md).
 
 ## Declared governance roles in `runTeam()`
 
@@ -151,10 +155,14 @@ const rotateSecret = defineTool({
 })
 ```
 
-`consequential` is optional and defaults to `false`. The built-in `bash`,
-`file_write`, and `file_edit` tools are marked consequential; read-only
-filesystem tools are not. Custom and MCP tools remain benign unless their
-registered `ToolDefinition` explicitly opts in.
+`consequential` is optional and defaults to `false`. Exactly three built-ins
+are marked consequential: `bash`, `file_write`, and `file_edit`. The read-only
+filesystem tools (`file_read`, `grep`, `glob`) are not, and neither is
+`delegate_to_agent`, even though it is part of the grant set the check scans on
+`runTeam()` / `runTasks()` paths: a delegated run is classified by the tools the
+target agent itself holds. Custom and MCP tools remain benign unless their
+registered `ToolDefinition` explicitly opts in through the `consequential` field
+on `defineTool()`.
 
 For `runAgent()` and an automatic `runTeam()` call that omits
 `governanceIntent`, OMA checks the final grant set after preset, allowlist,
@@ -231,10 +239,10 @@ This holds uniformly across `runAgent`, `runTeam` / `runTasks`, the `runTeam` si
 
 **Two things stay true once a tool is granted — design around them:**
 
-- **`bash` is not sandboxed.** Granting it gives the agent arbitrary shell on the host (see [_Filesystem Working Directory_](#filesystem-working-directory) below). Only the filesystem tools are path-contained.
+- **`bash` is not sandboxed.** Granting it gives the agent arbitrary shell on the host (see [sandbox and shell execution](sandbox-and-shell.md)). Only the filesystem tools are path-contained.
 - **Tool output flows to your model provider.** Every tool result is appended to the conversation and sent to the configured LLM on the next turn. Anything a tool reads — file contents, command output, fetched pages — leaves your process and reaches the provider. Grant read access deliberately.
 
-**Custom / runtime tools are exempt from the grant requirement** — registering them _is_ the grant. Tools passed via `customTools` or `agent.addTool()` are always available (they still respect `disallowedTools`); see [_Custom Tools_](#custom-tools). **`delegate_to_agent`** (team orchestration handoff) follows the default-deny rule like any other built-in: grant it with `tools: ['delegate_to_agent']` on each agent you want to be able to delegate.
+**Custom / runtime tools are exempt from the grant requirement** — registering them _is_ the grant. Tools passed via `customTools` or `agent.addTool()` are always available (they still respect `disallowedTools`); see [_Custom tools_](#custom-tools). **`delegate_to_agent`** (team orchestration handoff) follows the default-deny rule like any other built-in: grant it with `tools: ['delegate_to_agent']` on each agent you want to be able to delegate, and see [_Delegation with `delegate_to_agent`_](#delegation-with-delegate_to_agent) for the extra registration rule that applies to it.
 
 ### Restoring the previous "all tools" behavior
 
@@ -248,7 +256,7 @@ const orchestrator = new OpenMultiAgent({
 
 `defaultToolPreset` is a **fallback**: it applies only to agents that declare neither `tools` nor `toolPreset`. Per-agent config always overrides it, and it never widens an agent that already declares a grant. It is not applied to the internal coordinator, the final-synthesis pass, or the consensus proposer / judge agents (`runConsensus` and the per-task `verify` hook), which run from their own configs; grant tools to those per agent.
 
-## Tool Presets
+## Tool presets
 
 Predefined tool sets for common use cases:
 
@@ -272,7 +280,7 @@ const fullAgent: AgentConfig = {
 }
 ```
 
-## Advanced Filtering
+## Advanced filtering
 
 Combine presets with allowlists and denylists for precise control:
 
@@ -287,6 +295,86 @@ const customAgent: AgentConfig = {
 ```
 
 **Resolution order:** default-deny (no preset _and_ no allowlist ⇒ zero built-in tools) → preset → allowlist → denylist → framework safety rails. Custom / runtime tools bypass the grant step (registration is the grant) but still honor the denylist.
+
+## Delegation with `delegate_to_agent`
+
+`delegate_to_agent` is the built-in that lets one agent hand a sub-task to
+another roster agent and get that agent's final text back as a tool result. It
+follows the default-deny rule like every other built-in, and it has one extra
+condition on top: it is only *registered* during orchestration.
+
+**Registration.** `registerBuiltInTools()` adds it only when called with
+`{ includeDelegateTool: true }`. The orchestrator passes that flag when it
+builds `runTeam()` / `runTasks()` pool workers and the ephemeral agent a
+delegation itself spawns. `runAgent()` and the `runTeam()` simple-goal short
+circuit build their agent without the flag. An unregistered tool can never be
+granted either, so a model call to `delegate_to_agent` on those paths comes back
+as the same `"is not granted to this agent"` error result as any other
+ungranted built-in.
+
+**Grant.** Registration is still not a grant. Give it to each agent that should
+be able to delegate:
+
+```typescript
+const team = {
+  name: 'research',
+  agents: [
+    {
+      name: 'lead',
+      model: 'claude-sonnet-4-6',
+      tools: ['delegate_to_agent'],
+    },
+    {
+      name: 'analyst',
+      model: 'claude-sonnet-4-6',
+      toolPreset: 'readonly',
+    },
+  ],
+}
+```
+
+The target agent does **not** need `delegate_to_agent`; it needs whatever tools
+its sub-task requires. Granting it to the target only lets that agent delegate
+onward in turn.
+
+**Refusals are values, not throws.** Every rejection below returns a
+`ToolResult` with `isError: true` and an explanatory message, so the model can
+pick a different target or stop:
+
+| Condition | Refused because |
+|---|---|
+| No orchestrated team context | `runDelegatedAgent` is absent, for example in a standalone `Agent` or `runAgent()` run. |
+| `target_agent` equals the caller | Self-delegation. |
+| `target_agent` is not in the team roster | Unknown target; the message lists the roster. |
+| The target already appears in the delegation chain | Cycle, for example `alice -> bob -> alice`. |
+| Current depth has reached `maxDelegationDepth` | Depth ceiling. |
+| The agent pool has no free run slot | A nested run would block on the concurrency semaphore. |
+
+**Depth.** `OrchestratorConfig.maxDelegationDepth` bounds the chain and
+defaults to `3`. Depth is counted per nested delegated run: the task's own agent
+starts at `0`, so the default admits at most three nested runs beneath it. There
+is no per-agent or per-run override; the orchestrator value applies to the whole
+run. Delegation is refused once `depth >= maxDelegationDepth`.
+
+```typescript
+const orchestrator = new OpenMultiAgent({
+  maxDelegationDepth: 1, // a task agent may delegate once; that agent may not
+})
+```
+
+**Budget.** A delegated run's `tokenUsage` comes back on
+`ToolResult.metadata.tokenUsage` and is added to the calling runner's running
+total, so `maxTokenBudget` and cost tracking stay accurate across a delegation
+chain rather than only counting the parent's own turns.
+
+**Audit.** When the team has shared memory enabled, the delegated output is
+also written under `<caller>/delegation:<target>:<suffix>` with the caller,
+target, and success recorded as metadata. That write is best-effort: a store
+failure does not fail the tool. See [shared memory](shared-memory.md).
+
+**Isolation.** The target runs in a fresh conversation for that prompt only,
+built from its own `AgentConfig`, so it inherits neither the caller's transcript
+nor the caller's `credentials` bag.
 
 ## Capability-aware agent selection
 
@@ -327,7 +415,7 @@ scheduling strategy may fall back to an ineligible agent.
 
 The layers above answer **"which tools are reachable?"** by operating on tool _names_. The `onToolCall` gate answers a different question one layer down: **"should _this specific invocation_ run right now?"** `bash` is a single allowed name that covers `ls -la` and `rm -rf /` equally; the gate inspects the actual arguments and can veto individual calls.
 
-The hook is **opt-in and off by default**. It runs once per tool invocation, after Zod input validation and before the tool implementation, and returns a decision:
+The hook is **opt-in and off by default**. It runs once per tool invocation, after Zod input validation and before the tool implementation, and returns a decision. [Hooks and callbacks](hooks-and-callbacks.md#ontoolcall) places it among the other function-typed fields:
 
 ```typescript
 import type { ToolCallContext, ToolCallDecision } from '@open-multi-agent/core'
@@ -359,7 +447,7 @@ Key semantics:
 - **Orthogonal to task dispatch approval.** `OrchestratorConfig.onApproval` gates legacy task rounds and `onTaskDispatch` gates one ready task before dispatch; `onToolCall` gates a single tool invocation during execution. They operate at different layers and compose. The two task-level approval modes are mutually exclusive with each other.
 - **Observability.** When a gate runs, the `tool_call` trace event carries `gated: true`, `gateAction: 'allow' | 'deny' | 'suspend'`, and an optional redacted `gateReason`. Durable decisions come from the approval ledger and may be summarized in an execution receipt; telemetry is not their source of truth.
 
-> **Not a security boundary.** A gate that returns `deny` still relies on cooperating code; it is a coordination layer, not containment. `bash` remains un-sandboxed (see the callout below). For an actually-untrusted shell, use process-level isolation (a container / VM / seccomp); the gate is for *policy*, not *isolation*.
+> **Not a security boundary.** A gate that returns `deny` still relies on cooperating code; it is a coordination layer, not containment. `bash` remains un-sandboxed (see [sandbox and shell execution](sandbox-and-shell.md#what-the-sandbox-covers)). For an actually-untrusted shell, use process-level isolation (a container / VM / seccomp); the gate is for *policy*, not *isolation*.
 
 ### Shell risk classifier
 
@@ -388,165 +476,36 @@ Compound commands are segmented on shell separators (`&&`, `||`, `;`, `|`, subst
 
 The classifier is a **shallow heuristic, not a parser**; it can be fooled by obfuscation (variable indirection, base64-decode-then-exec, exotic quoting). It is convenience only: extend the tables, wrap it, or replace it entirely. See [`examples/patterns/risk-gated-bash.ts`](../packages/core/examples/patterns/risk-gated-bash.ts) for an end-to-end demo.
 
-## Shell Executors
+## Shell executors
 
-The granted `bash` built-in delegates command execution through a
-`ShellExecutor`. With no executor configured, OMA uses `LocalShellExecutor`,
-which preserves the existing `bash -c` behavior on the host:
+The granted `bash` built-in runs commands through a `ShellExecutor`, which
+defaults to `LocalShellExecutor` on the host. Set
+`OrchestratorConfig.defaultShellExecutor`, or `AgentConfig.shellExecutor` for
+one agent, to send an already-granted command somewhere else. The executor
+changes only where a command runs: it does not grant `bash`, and it does not
+bypass `disallowedTools` or the `onToolCall` gate.
 
-```typescript
-import { OpenMultiAgent } from '@open-multi-agent/core'
-import type { AgentConfig } from '@open-multi-agent/core'
-import type { ShellExecutor } from '@open-multi-agent/core/shell'
+The `ShellExecutor` contract, the `start()` / `dispose()` lifecycle under
+overlapping runs, and the host-versus-remote filesystem divergence are in
+[sandbox and shell execution](sandbox-and-shell.md#shell-executors).
 
-declare const sharedRemoteExecutor: ShellExecutor
-declare const specialistExecutor: ShellExecutor
+## Filesystem working directory
 
-const orchestrator = new OpenMultiAgent({
-  // Inherited by agents that do not set shellExecutor.
-  defaultShellExecutor: sharedRemoteExecutor,
-})
+Built-in filesystem tools (`file_read`, `file_write`, `file_edit`, `grep`,
+`glob`) are sandboxed to a per-agent working directory. Paths must be absolute
+and resolve inside it, symlinks included. `AgentConfig.cwd` overrides
+`OrchestratorConfig.defaultCwd`, which itself defaults to
+`<process.cwd()>/.agent-workspace`; `null` at either level disables the sandbox
+for that scope.
 
-const agent: AgentConfig = {
-  name: 'builder',
-  model: 'claude-sonnet-4-6',
-  tools: ['bash'],
-  // Per-agent value wins over the orchestrator default.
-  shellExecutor: specialistExecutor,
-}
-```
+**`bash` is not sandboxed.** Once an agent has a shell, any absolute path or
+`cd` escapes a per-tool path check, so the sandbox is path containment for the
+filesystem built-ins rather than a boundary against arbitrary command
+execution. The three typical configurations, the resolution order, and the full
+statement of that invariant are in
+[sandbox and shell execution](sandbox-and-shell.md#filesystem-working-directory).
 
-The executor changes **where an already-granted command runs**. It does not
-grant `bash` or bypass `disallowedTools`; command execution still happens only
-after `onToolCall` allows it. The existing default-deny and per-call gate rules
-are unchanged. The tool wrapper also keeps the model-facing behavior uniform
-across executors: input validation, the 30-second default timeout,
-stdout/stderr formatting, output redaction, and
-`isError` on a nonzero exit code.
-
-The public type contract is available from `@open-multi-agent/core/shell` and
-has no runtime imports:
-
-```typescript
-interface ShellExecutor {
-  start?(): Promise<void>
-  exec(command: string, options: ShellExecOptions): Promise<ShellExecResult>
-  dispose?(): Promise<void>
-}
-```
-
-`ShellExecOptions` contains `cwd`, `timeoutMs`, and `abortSignal`.
-`ShellExecResult` contains `stdout`, `stderr`, and `exitCode`. Executors must
-use exit code `124` for timeout, `130` for abort, and `127` when the process or
-remote command could not be started. The tool wrapper adds a short deadline
-backstop so an executor that ignores timeout or abort cannot stall the tool
-loop indefinitely, but implementations still own prompt cancellation and
-termination of the process, job, or remote session they control.
-
-### Lifecycle and concurrent use
-
-One executor instance represents one reusable session:
-
-- OMA calls `start()` lazily, immediately before the first allowed `bash`
-  execution in a run. A granted tool that is never called (or is denied by
-  `onToolCall`) creates no session. Later shell calls in that run reuse it.
-- OMA always attempts `dispose()` when the run succeeds, fails, is aborted, or
-  a streaming consumer stops early. If `start()` partially allocates resources
-  and then rejects, OMA attempts `dispose()` too.
-- If overlapping runs share the same executor instance (as agents inheriting
-  one `defaultShellExecutor` do), OMA reference-counts them: one `start()`, then
-  one `dispose()` after the final run finishes. `exec()` may be called
-  concurrently, including when one model turn requests multiple shell calls.
-  An executor that cannot run commands concurrently must serialize internally;
-  use distinct per-agent instances when each agent needs its own session.
-- A process crash cannot execute JavaScript cleanup. Remote adapters should
-  also configure a provider-side TTL, lease expiry, or out-of-band reaper for
-  crash recovery.
-
-These lifecycle calls belong to Agent/Orchestrator runs. If application code
-invokes the low-level exported `bashTool.execute()` directly, that caller owns
-`start()` / `dispose()` around its tool calls.
-
-`LocalShellExecutor` is stateless. It keeps the existing safe environment
-allowlist, captures stdout/stderr, runs the command in a separate process group
-on POSIX, and kills the process tree on timeout or abort. It executes with the
-host Node.js process's permissions: **it is not a sandbox or security
-boundary**. A custom executor is only as isolated as the environment and
-adapter implementation behind it; OMA does not ship Docker, VM, or hosted
-sandbox adapters in core.
-
-### Host and remote filesystems diverge
-
-> **A remote shell executor does not move the built-in filesystem tools.**
-> `file_read`, `file_write`, `file_edit`, `grep`, and `glob` still operate on
-> the host inside `AgentConfig.cwd` / `defaultCwd`. The `cwd` passed to `bash`
-> is interpreted inside the executor's environment. For example, `file_write`
-> may create `report.md` in the host `.agent-workspace`, while a following
-> remote `bash` call to `wc -l report.md` sees no such file. Unless the
-> application provides its own synchronization layer, do not co-grant the
-> host filesystem tools to a remote-shell agent, or explicitly design around
-> the two separate filesystems.
-
-Shell executors apply only inside the normal LLM runner tool loop. Process and
-ACP agent backends replace that loop and continue to manage their own command
-execution and `cwd`; `shellExecutor` does not affect them.
-
-## Filesystem Working Directory
-
-Built-in filesystem tools (`file_read`, `file_write`, `file_edit`, `grep`, `glob`) are sandboxed to a per-agent working directory. Paths must be absolute and resolve inside that directory; symlinks are resolved before the check so they cannot escape the configured root.
-
-> **`bash` is not sandboxed.** Once an agent has a shell, any `cd /etc`, absolute path, or subshell trivially escapes a per-tool path check. The sandbox is therefore best understood as **path containment for built-in filesystem tools**, not a security boundary against arbitrary command execution. If full path containment matters, drop `bash` via `disallowedTools: ['bash']` (or omit it from your `tools` allowlist) and rely on the filesystem tools. Process-level isolation (containers, seatbelt, firejail) is the right tool for an actually-untrusted shell.
-
-### Three typical configurations
-
-```typescript
-import { OpenMultiAgent } from '@open-multi-agent/core'
-
-// 1. Default — sandbox rooted at `<cwd>/.agent-workspace`.
-//    The directory is auto-created on first write. Agents cannot read or
-//    write outside that subdirectory, which keeps source files, `.env`,
-//    `.git/`, and `node_modules` off-limits even when the host launched
-//    from the repo root.
-const defaultOrchestrator = new OpenMultiAgent()
-
-// 2. Widen the sandbox to the entire current working directory.
-//    Useful when the agent is a coding assistant operating on the user's
-//    project (the host already established trust by launching there).
-const wideOrchestrator = new OpenMultiAgent({
-  defaultCwd: process.cwd(),
-})
-
-// 3. Disable the sandbox entirely (relative and absolute paths anywhere).
-const unrestrictedOrchestrator = new OpenMultiAgent({
-  defaultCwd: null,
-})
-```
-
-### Custom sandbox root
-
-```typescript
-const orchestrator = new OpenMultiAgent({
-  defaultCwd: '/var/run/my-agent-workspace', // any absolute path
-})
-
-const agent: AgentConfig = {
-  name: 'editor',
-  model: 'claude-sonnet-4-6',
-  toolPreset: 'readwrite',
-  cwd: '/var/run/my-agent-workspace/packages/app', // optional per-agent override
-}
-```
-
-**Resolution order.** `AgentConfig.cwd` (if set) → `OrchestratorConfig.defaultCwd` (if set) → `<process.cwd()>/.agent-workspace`. Pass `null` at either level to disable the sandbox for that scope.
-
-**Auto-creation.** The sandbox root is `mkdir -p`'d on first write, so callers do not need to pre-create `.agent-workspace` (or any custom path).
-
-The default `LocalShellExecutor` runs `bash` in its own process group on POSIX,
-so timeouts and abort signals kill any backgrounded children rather than
-letting them outlive the parent. Custom executors own equivalent cleanup in
-their execution environment.
-
-## Custom Tools
+## Custom tools
 
 Two ways to give an agent a tool that is not in the built-in set.
 
@@ -571,6 +530,47 @@ const agent: AgentConfig = {
 ```
 
 **Register at runtime** via `agent.addTool(tool)`. Tools added this way are always available, regardless of filtering.
+
+Both routes mark the tool as *runtime-added* in the registry, which is what
+exempts it from the name-based grant. Registering the same definition with a
+plain `ToolRegistry.register(tool)` instead keeps it under default-deny, so its
+name must then appear in `tools`.
+
+`customTools` is read when OMA builds the agent, which covers `runAgent()`,
+`runTeam()`, and `runTasks()`. A hand-constructed
+`new Agent(config, registry, executor)` uses the registry you pass it and does
+not read `customTools`; register the tool on that registry, or call
+`agent.addTool()`, instead.
+
+### Tool primitives
+
+The orchestrator builds each agent's registry and executor for you. The same
+primitives are exported from the package root for applications that wire an
+`Agent` by hand or build their own tool plumbing.
+
+- **`defineTool(config)`** returns a `ToolDefinition`. Required: `name`,
+  `description`, `inputSchema` (a Zod schema), and
+  `execute(input, context) => Promise<ToolResult>`. Optional: `consequential`,
+  `outputSchema` (validates `ToolResult.data` on non-error results),
+  `llmInputSchema` (a hand-written JSON Schema that replaces Zod conversion for
+  the model-facing definition), and `maxOutputChars`. Omitted optional fields
+  are left off the returned object rather than set to `undefined`.
+- **`ToolRegistry`** holds the named tools. `register(tool, { runtimeAdded })`
+  throws on a duplicate name rather than overwriting; `get`, `has`, `list` /
+  `getAll`, and `unregister` / `deregister` round it out. `toToolDefs()`
+  produces the model-facing definitions the runner sends to an adapter, and
+  `toRuntimeToolDefs()` returns only the runtime-added subset, which is how
+  grant resolution knows which tools skip the allowlist.
+- **`zodToJsonSchema(schema)`** performs that Zod to JSON Schema conversion.
+  `toToolDefs()` calls it whenever a tool has no `llmInputSchema`. Zod types it
+  does not model fall back to `{}`, which is still valid JSON Schema; supply
+  `llmInputSchema` when a schema needs to reach the model exactly as written.
+- **`ToolExecutor(registry, options)`** runs the calls: Zod input validation,
+  then the `onToolCall` gate, then `execute`, then `outputSchema` validation and
+  truncation. `maxConcurrency` defaults to `4` for batched calls, and
+  `maxToolOutputChars` sets the agent-level truncation default. It never
+  rejects: an unknown tool name, a validation failure, and a thrown tool error
+  all come back as a `ToolResult` with `isError: true`.
 
 ## Per-agent tool credentials
 
@@ -610,7 +610,7 @@ The bag is **per agent and never merged**: `researcher` sees only `SEARCH_API_KE
 
 This is a **scoping convenience, not an isolation boundary**. Tool code runs in-process and can still read `process.env` or any module-level variable; `credentials` just gives you a first-class place to hand each agent only the secrets it needs. (You can already approximate this by giving each agent its own `customTools` instance with a scoped closure — the `credentials` bag makes it explicit and keeps the secret out of the closure.) Values are treated as secrets: the `credentials` key is auto-redacted from traces and dashboards.
 
-## Tool Output Control
+## Tool output control
 
 Long tool outputs can blow up conversation size and cost. The following
 validation and context controls compose with the rich-result contract.
@@ -768,6 +768,14 @@ const bigQueryTool = defineTool({
 })
 ```
 
+Truncation keeps roughly the first 70% and last 30% of the budget and replaces
+the middle with a `[...truncated N characters...]` marker. The marker counts
+against the budget, so the result never exceeds the limit. It applies only to a
+string `data` with no explicit `modelOutput`; a rich payload and non-string
+application data are left alone. The same helper is exported as
+`truncateToolOutput(data, maxChars)` for callers trimming text before it
+reaches a tool result.
+
 **Post-consumption compression.** Once the agent has acted on a tool result, compress older copies in the transcript so they stop costing input tokens on every subsequent turn. Error results are never compressed.
 
 ```typescript
@@ -778,38 +786,14 @@ const agent: AgentConfig = {
 }
 ```
 
-## MCP Tools (Model Context Protocol)
+## MCP tools (Model Context Protocol)
 
-`open-multi-agent` can connect to stdio MCP servers and expose their tools directly to agents.
+`connectMCPTools()` from `@open-multi-agent/core/mcp` starts a stdio MCP server
+and converts every tool it exposes into an ordinary `ToolDefinition`.
+Registering those definitions is not a grant: their names still have to appear
+in `AgentConfig.tools` unless they are passed through `customTools`.
+`@modelcontextprotocol/sdk` is an optional peer dependency loaded on first use,
+and `egressPolicy` does not reach inside the MCP child process.
 
-```typescript
-import { connectMCPTools } from '@open-multi-agent/core/mcp'
-
-const { tools, disconnect } = await connectMCPTools({
-  command: 'npx',
-  args: ['--no-install', '@modelcontextprotocol/server-github'],
-  env: {
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
-  },
-  namePrefix: 'github',
-})
-
-// Register each MCP tool in your ToolRegistry, then include their names in AgentConfig.tools
-// Don't forget cleanup when done
-await disconnect()
-```
-
-Notes:
-- `@modelcontextprotocol/sdk` is an optional peer dependency, only needed when using MCP.
-- Current transport support is stdio.
-- MCP input validation is delegated to the MCP server (`inputSchema` is `z.any()`).
-- MCP text output keeps its existing string behavior. Successful MCP `image`,
-  embedded blob resource, and HTTP(S) `resource_link` blocks also receive a
-  rich `modelOutput`; errors, audio, malformed media, and non-HTTP resource
-  links retain an explicit text representation.
-- Prefer locally installed or pinned MCP server binaries and pass only the environment variables that server needs. Avoid spreading `process.env` into MCP subprocesses.
-- `egressPolicy` does not constrain connections opened inside the MCP child, by `bash`, or by custom tools. See the [egress enforcement matrix](egress-policy.md#enforcement-matrix).
-
-See [`integrations/mcp-github`](../packages/core/examples/integrations/mcp-github.ts) for a full runnable setup.
+Options and defaults, name prefixing, input validation, result mapping, error
+handling, and the runnable examples are in [MCP tools](mcp.md).

@@ -4,10 +4,8 @@
 structured trace spans, and an offline single-run DAG/Waterfall Viewer.
 
 For an existing callback integration, follow the staged
-[`onTrace` migration guide](./observability-migration.md). Release engineering
-and benchmark evidence are recorded in
-[`observability-performance.md`](./observability-performance.md) and
-[`observability-release-readiness.md`](./observability-release-readiness.md).
+[`onTrace` migration guide](./observability-migration.md). The offline Viewer
+has its own page: [Run Viewer](./run-viewer.md).
 
 ## Run identity and outcome
 
@@ -27,7 +25,7 @@ result.errorInfo // redacted, JSON-safe details on failures
 characters). `attempt` starts at 1. Each execution attempt gets a new 32-hex
 `traceId` and 16-hex `rootSpanId`. Restore preserves `runId`, increments
 `attempt`, generates new trace/root IDs, and links to the previous attempt when
-restoring an identity-aware v2 or v3 checkpoint.
+restoring an identity-aware checkpoint, which is schema v2 and later.
 
 Status codes are `ok`, `error`, `cancelled`, `timeout`, `budget_exhausted`,
 `rejected`, and `skipped`. Existing `success` fields remain available and are
@@ -39,6 +37,31 @@ failure.
 For source compatibility in the first 1.x release, the new result fields are
 optional in TypeScript declarations, but every runtime result from these APIs
 includes `identity` and `status`.
+
+### Producing identity and status directly
+
+The orchestrator calls these itself on every run, so an application that only
+reads `result.identity` and `result.status` never needs them. They are exported
+for code that has to produce the same shapes outside a run, such as a custom
+runner, a test fixture, or a wrapper that reports a failure the orchestrator
+never saw:
+
+| Export | What it does |
+|---|---|
+| `createRunIdentity(options?)` | Builds a fresh `RunIdentity`: the supplied `runId` or a new UUID, `attempt: 1`, and a random 32-hex `traceId` plus 16-hex `rootSpanId` |
+| `createRestoreIdentity(snapshot, options?)` | Builds the next attempt from a `CheckpointSnapshot`: same `runId`, `attempt + 1`, new trace/root IDs, and a `continued_from` link to the snapshot's previous trace for identity-aware snapshots. Throws when `options.runId` names a different run than the snapshot |
+| `validateRunId(runId)` | Enforces the 1-128 character bound and returns the value, so a caller can reject a bad ID before starting work |
+| `classifyRunFailure(error, options?)` | Maps a thrown value to `{ status, errorInfo }`, deriving `budget_exhausted`, `timeout`, `rejected`, and `cancelled` from the framework error types and redacting/truncating the messages it copies |
+
+```typescript
+import { classifyRunFailure, createRunIdentity } from '@open-multi-agent/core'
+
+const identity = createRunIdentity({ runId: 'order-42' })
+const { status, errorInfo } = classifyRunFailure(error, { provider: 'anthropic' })
+```
+
+These are the same helpers the runtime uses rather than a separate stable
+contract, and their behavior tracks the orchestrator's.
 
 ### Per-run metadata
 
@@ -67,7 +90,7 @@ before execution starts. The framework also reserves the exact `_overridden`
 key for restore provenance.
 
 When tracing is active, metadata is written on the root span as
-`oma.meta.<key>` and is echoed from the top-level result after validation. A v2
+`oma.meta.<key>` and is echoed from the top-level result after validation. A
 checkpoint persists it; `restore()` inherits the checkpoint metadata unless
 the caller supplies a different set. An explicit difference wins and the new
 attempt's root span records `oma.meta._overridden=true`. Existing checkpoints
@@ -150,8 +173,8 @@ a dependency-backed review chain do not count as independent review.
 
 ## TraceRecord schema v2
 
-The core package exports the `TraceRecord` schema used by the internal
-OBS-1B runtime. A span produces `span_start`, zero or more `span_event`
+The core package exports the `TraceRecord` schema used by the internal trace
+runtime. A span produces `span_start`, zero or more `span_event`
 records, and exactly one self-contained `span_end`. Records carry
 `schemaVersion: 2`, a unique `recordId`, a per-trace strictly increasing
 `sequence`, the run identity, W3C-compatible trace/span IDs, timestamps,
@@ -172,7 +195,7 @@ status, and structured error so it remains useful if a start/event record is
 lost later in the delivery pipeline. Close is idempotent and the first end
 wins.
 
-OBS-2 adds a public sink/exporter lifecycle. The runtime is activated by either
+The v2 sink and exporter lifecycle is public. The runtime is activated by either
 `observability.sinks` or the existing `onTrace` path. Without either option, no
 child `TraceRecord` objects or attributes are constructed; top-level
 identity/status still exist.
@@ -460,25 +483,18 @@ delete checkpoints, shared memory, or remotely exported OTel data.
 ### Journal versus telemetry
 
 The optional [run journal](run-journal.md) describes the same run these records
-describe and is deliberately not part of this stack. Traces are **telemetry**:
-sampling, batching, export, and retention deletion may all discard them, and
-none of that may change a run. Journal events are **execution state**: they
-record what the run did and what each model call saw, and `restore()` can fold
-them back into a conversation.
+describe and is deliberately not part of this stack. Traces are **telemetry** and
+may be sampled, batched, exported, or deleted by retention without changing a
+run; journal events are **execution state** that `restore()` can fold back into a
+conversation. Reach for traces when the question is where the time and tokens
+went, and for the journal when it is why the model saw what it saw.
 
-The separation is structural, not conventional — `journal/` does not import from
-`observability/` — and it runs to the failure signals as well: a trace delivery
-failure and a `journal_append_failed` progress event report on separate records,
-and neither implies the other. Journal events carry `traceId` and `spanId` when a
-trace runtime is active, which is enough to join the two streams after the fact.
-Reach for traces when the question is where the time and tokens went, and for the
-journal when it is why the model saw what it saw; the
-[run journal guide](run-journal.md) has the event vocabulary and the `verifyRun()`
-audit.
+[Journal versus telemetry](run-journal.md#journal-versus-telemetry) states the
+separation in full, including how the two failure signals stay independent.
 
 ## Optional OpenTelemetry package
 
-`@open-multi-agent/otel` is an independent workspace/package that adapts OBS-2
+`@open-multi-agent/otel` is an independent workspace/package that adapts v2
 `TraceRecord` batches to OpenTelemetry spans. It is not imported by core, so a
 core-only installation has no OpenTelemetry runtime dependency or import path.
 
@@ -499,7 +515,7 @@ neither is a configuration error. The adapter never reads, initializes, or
 replaces the global provider. `forceFlush()` delegates to a supplied provider
 when it supports that operation. Provider shutdown is skipped by default, even
 when available: set `shutdownOnShutdown: true` only when the adapter owns that
-provider's lifecycle. Rejection/timeout maps to the OBS-2 exporter result and
+provider's lifecycle. Rejection/timeout maps to the exporter result and
 diagnostics, never to an Agent/Task/Run failure.
 
 `egressPolicy` does not wrap the application-owned provider or its exporters.
@@ -557,7 +573,7 @@ Resource reports OMA spans under the OTel default (`unknown_service:node`).
 `deployment.environment.name` as span attributes; they are not a substitute for
 a Resource.
 
-The first release intentionally provides no OTLP convenience subpath. The
+The adapter intentionally provides no OTLP convenience subpath. The
 application selects its own OTel SDK and OTLP/exporter implementation, avoiding
 eager OTLP imports, implicit global-provider configuration, and a second
 SDK/exporter compatibility matrix.
@@ -642,7 +658,25 @@ explicitly to a built-in sink to disable warnings, or use `onDiagnostic`.
 Diagnostic handler throws are swallowed without recursively producing another
 diagnostic.
 
-## Progress Events
+### What telemetry costs
+
+With neither `observability.sinks` nor `onTrace` configured, no trace runtime is
+constructed at all: there are no child `TraceRecord` objects, no attributes, and
+no queue. Only the top-level `identity` and `status` fields are produced.
+
+With a sink configured, `emit()` is synchronous and bounded. It serializes the
+record for size accounting, admits it to the local queue, and returns; export,
+retry, and backoff all run in the transport worker, so delivery latency never
+appears in Agent, Task, or Run execution time. The hot-path cost is that
+per-record admission work, which a batching sink does more of than a bare
+callback.
+
+Absolute timings depend on the Node version, CPU, filesystem, and load, so no
+number is promised here. One recorded snapshot, with the hardware and method it
+was taken on, is in
+[`internal/observability-performance.md`](./internal/observability-performance.md).
+
+## Progress events
 
 Use `onProgress` when you need lightweight lifecycle events for logs, terminal output, or a live UI.
 
@@ -654,9 +688,9 @@ const orchestrator = new OpenMultiAgent({
 })
 ```
 
-Common event types include `task_start`, `task_complete`, `task_retry`, `task_skipped`, `agent_start`, `agent_complete`, `budget_exceeded`, and `error`. A `task_retry` event's `data.nextDelayMs` is the actual, post-jitter delay before the next attempt, not the nominal backoff schedule.
+Common event types include `task_start`, `task_complete`, `task_retry`, `task_skipped`, `agent_start`, `agent_complete`, `budget_exceeded`, and `error`. A `task_retry` event's `data.nextDelayMs` is the actual, post-jitter delay before the next attempt, not the nominal backoff schedule. Incremental model output is a separate channel and never arrives here; see [streaming](streaming.md).
 
-## Trace Spans
+## Trace spans
 
 `onTrace` remains source- and runtime-compatible for existing users. Each event
 still carries its UUID `spanId`, optional UUID `parentId`, duration, token
@@ -702,88 +736,29 @@ The `TraceEvent` union now has eight members, including `routing_decision`.
 Internally, `LegacyCallbackTraceSink` maps v2 records back to the exact legacy
 event object. Synchronous callback throws and asynchronous rejections remain
 isolated and cannot become unhandled rejections. `onTrace` is not marked
-deprecated in this release; the 1.x compatibility window remains open while
-users can migrate transport code to `observability.sinks` at their own pace.
+deprecated and the 1.x compatibility window is open, so transport code can move
+to `observability.sinks` at its own pace.
 The copyable stage-by-stage path is in
 [`observability-migration.md`](./observability-migration.md), including direct
 `LegacyCallbackTraceSink`, batching, TraceStore/OTel, and lifecycle ownership.
 
 Span parentage is best-effort and uses the causal structure known to the runtime. In team runs, worker agent spans point to their task span, and LLM/tool/stream spans point to the agent span. Root spans such as top-level agent runs omit `parentId`.
 
-## Post-Run Run Viewer
+When streaming is active, each forwarded chunk also produces a `stream_chunk` span event and a legacy `agent_stream` trace event; [streaming](streaming.md#relationship-to-traces-progress-events-and-the-run-viewer) covers both and how they relate to progress events.
 
-`renderRunViewer()` returns a self-contained static HTML page for one run. It
-accepts a `TeamRunResult`, a materialized `StoredRun`, or both:
+## Post-run Run Viewer
 
-```typescript
-import { writeFileSync } from 'node:fs'
-import { renderRunViewer } from '@open-multi-agent/core'
+`renderRunViewer()` turns one finished run into a self-contained static HTML page
+with a task DAG and a span waterfall. It accepts a `TeamRunResult`, a
+materialized `StoredRun` read back from a TraceStore, or both, and performs no
+filesystem or network I/O; the `oma run --dashboard` and `oma dashboard` commands
+own file output. The embedded payload is allowlisted and redacted, so it carries
+no prompts, completions, tool payloads, or reasoning content.
 
-const result = await orchestrator.runTeam(team, goal)
-writeFileSync('run.html', renderRunViewer({ result }))
-```
+The renderer API, the three input modes, the CLI paths, and the privacy boundary
+are on the [Run Viewer](./run-viewer.md) page.
 
-Result-only mode renders the exact task graph and explicitly labels missing
-trace detail. Trace-only mode derives task dependencies from `depends_on`
-links and provides every materialized span kind in an attempt-grouped,
-expandable, proportional Waterfall. Combined mode uses the result graph as the
-authority and links its tasks to richer trace evidence.
-
-```typescript
-const run = await traceStore.getRun(result.identity!.runId, { includeRecords: true })
-if (run) writeFileSync('run.html', renderRunViewer({ result, run }))
-```
-
-`renderTeamRunDashboard(result)` remains source-compatible and delegates to
-`renderRunViewer({ result })`; it does not maintain a separate renderer.
-
-The library renderer performs no filesystem or network I/O. The CLI owns file
-output:
-
-```bash
-# Capture and render the run being executed
-oma run --goal "..." --team team.json --dashboard
-
-# Export one previously persisted FileTraceStore run
-oma dashboard --trace-store ./.oma/traces.ndjson --run-id <runId> --output run.html
-```
-
-The historical command is read-only at the logical store layer and always
-closes the store. See [docs/cli.md](./cli.md) for overwrite, stdout, stderr, and
-exit-code behavior.
-
-The Viewer renders status, completeness, run identity, duration, attempts,
-tokens, costs, agents, models, and providers when recorded. DAG and Waterfall
-selection are synchronized by task ID; search and kind/status/agent/task
-filters preserve ancestor context. Cyclic or missing hierarchy/dependency data
-degrades to visible warnings instead of being silently treated as success.
-When routing data is present, a summary above both views shows what mode was
-selected, the source and reasons for that choice, and the actual
-`ExecutionReceipt` mode/roles/dependency evidence. Result-only and combined
-views use `buildExecutionReceipt(result)` for the actual topology rather than
-maintaining a dashboard-specific topology model. Trace-only views summarize
-the already-materialized Viewer tasks and label that evidence trace-derived
-because an `ExecutionReceipt` was not provided.
-
-The generated HTML contains its CSS, JavaScript, and allowlisted data and loads
-no remote scripts, stylesheets, fonts, images, telemetry, or runtime API. It
-does not embed prompts, completions, arbitrary attributes, tool arguments/tool
-results, messages, task descriptions/results, or reasoning content. Safe
-display fields are redacted again before serialization. This is a developer
-inspection artifact, not a live dashboard, multi-run browser, or authoritative
-run-state store.
-
-Generate a representative no-network artifact after building the package:
-
-```bash
-npx tsx packages/core/examples/integrations/observability-v2/run-viewer.ts
-```
-
-The example writes `oma-dashboards/run-viewer-demo.html` through a real
-`FileTraceStore` historical export. Its records are explicitly fictional,
-deterministic demo data, not a live provider run.
-
-## What to Persist
+## What to persist
 
 For production runs, persist enough data to reconstruct a failure without replaying the entire job:
 

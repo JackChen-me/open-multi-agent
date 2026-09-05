@@ -1,4 +1,4 @@
-# External Agents
+# External agents
 
 OMA can orchestrate **external agents that run as local processes** alongside its
 LLM-backed agents. Two backend kinds are built in:
@@ -108,7 +108,7 @@ session. This avoids silently dropping image blocks or caller-owned history.
 `beforeRun.prompt` remains supported; changing `beforeRun.messages` is rejected
 for the same reason. `AgentConfig.history` does not seed a process or ACP
 session; it restores messages only for LLM-backed `prompt()` conversations. See
-[Structured Agent Input](structured-input.md).
+[Structured agent input](structured-input.md).
 
 For `process`, OMA starts a fresh subprocess per run. Use `input: 'stdin'` for
 commands that read a prompt from stdin, `input: 'argument'` when the command
@@ -265,20 +265,24 @@ const result = await backend.run([{ role: 'user', content: [{ type: 'text', text
 await backend.dispose() // close the connection and kill the subprocess
 ```
 
-## v1 scope
+## Current limits
 
-What this release does **not** do yet (open an issue with a real use case to pull any
+What the built-in backends do **not** do (open an issue with a real use case to pull any
 of these forward):
 
 - **Client role only.** OMA drives external agents; it does not expose OMA agents *as*
-  an ACP agent to editors.
-- **No `fs/*` proxying.** The agent does its own filesystem access within `cwd`; OMA
-  does not yet proxy ACP file operations through its sandbox. Agents that require the
-  client to serve files are not supported.
-- **Process backend is stateless.** It starts one subprocess per run and maps stdout
-  to output. Use ACP or a custom backend when you need sessions, structured tool
-  events, or protocol-level permission prompts.
-- **No cost-based budgets.** Budgeting is token-based; `usage_update.cost` is ignored.
+  an ACP agent to editors. The backend builds an ACP `client` and registers exactly one
+  handler on it, for `session/request_permission`.
+- **No `fs/*` proxying.** OMA advertises empty `clientCapabilities` on `initialize`, so
+  the agent does its own filesystem access within `cwd` rather than routing file
+  operations back through OMA's sandbox. Agents that require the client to serve files
+  are not supported.
+- **Process backend is stateless.** It starts one subprocess per run, holds no session
+  between runs, and maps stdout to output. Use ACP or a custom backend when you need
+  sessions, structured tool events, or protocol-level permission prompts.
+- **No cost-based budgets.** Budgeting is token-based. The ACP backend reads only
+  `usage_update.used`; `usage_update.cost` is ignored.
 - **ACP subprocess lifetime.** An orchestrated ACP agent's subprocess lives until the
-  process exits (there is no per-agent disposal hook in `runTeam` / `runTasks`).
-  Use the programmatic API + `dispose()` when you need explicit teardown.
+  process exits. `AcpBackend.dispose()` exists but nothing in `runTeam` / `runTasks`
+  calls it, so use the programmatic API and call `dispose()` yourself when you need
+  explicit teardown.

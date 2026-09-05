@@ -10,9 +10,9 @@ fixture and typechecked in the Node 20/22/24 test matrix.
 
 ## Compatibility contract
 
-- `onTrace` remains supported throughout the current 1.x line and is **not**
-  marked deprecated in this release.
-- The seven-member `TraceEvent` union, completion/event timing, UUID `spanId`,
+- `onTrace` is supported throughout the 1.x line and is **not** marked
+  deprecated; the compatibility window is open.
+- The eight-member `TraceEvent` union, completion/event timing, UUID `spanId`,
   UUID `parentId` tree, and best-effort-redacted legacy tool payloads remain
   unchanged.
 - A synchronous callback throw or asynchronous rejection never changes an
@@ -119,11 +119,13 @@ and [`file-trace-store.ts`](../packages/core/examples/integrations/observability
 
 ### Stage 3B: choose the OpenTelemetry adapter
 
-The first compatible install pair is:
-
 ```bash
-npm install @open-multi-agent/core@^1.11.0 @open-multi-agent/otel@^0.1.0
+npm install @open-multi-agent/core @open-multi-agent/otel @opentelemetry/api
 ```
+
+The adapter depends on `@open-multi-agent/core@^1.11.0`, the first release
+carrying the v2 APIs it maps, and declares `@opentelemetry/api@^1.9.0` as a peer
+dependency.
 
 ```ts
 import { createOtelTraceSink } from '@open-multi-agent/otel'

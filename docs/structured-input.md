@@ -1,4 +1,4 @@
-# Structured Agent Input
+# Structured agent input
 
 `Agent.run()`, `Agent.stream()`, and `OpenMultiAgent.runAgent()` accept either a
 string or a complete `LLMMessage[]`. The string form is unchanged shorthand for
@@ -97,8 +97,9 @@ does not change that run. `Agent.getHistory()` also returns a deep copy.
 Invalid message/content shapes or data that cannot be cloned throw
 `InvalidMessageError` before `beforeRun`, provider/backend execution, progress,
 or online evaluation. Invalid `prompt()` input is not appended to history.
-For `stream()`, this validation happens when `stream()` is called, before the
-returned iterator starts.
+For `stream()`, whose events are documented in
+[streaming](streaming.md), this validation happens when `stream()` is called,
+before the returned iterator starts.
 
 ## `beforeRun` semantics
 

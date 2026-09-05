@@ -78,7 +78,7 @@ endpoint or `AZURE_OPENAI_ENDPOINT` when a policy is active.
 | AI SDK bridge or another custom `LLMAdapter` | Unsupported and fail-closed before adapter invocation. The model object does not expose a reliable target and transport contract to OMA. This also applies when a custom adapter is supplied to the built-in semantic profiler or coordinator. |
 | GitHub Copilot auth and API | Enforced. A pre-supplied GitHub token requires `https://api.github.com` and `https://api.githubcopilot.com`. Interactive device login additionally requires `https://github.com`. OMA checks all required origins before the first auth request and guards both token exchange and model API fetches. |
 | Custom `TaskProfiler`, execution router, hooks, and other application callbacks | Not covered. They are application-owned in-process code. |
-| MCP stdio child | Not covered. OMA starts the configured child and exchanges stdio messages; it cannot constrain connections opened inside the MCP server. |
+| MCP stdio child | Not covered. OMA starts the configured child and exchanges stdio messages; it cannot constrain connections opened inside the MCP server. See [MCP tools](mcp.md#egress-and-process-boundaries). |
 | `process` and ACP backends | Not covered. OMA starts a child process and uses stdio; the child owns its network behavior. ACP permission callbacks are not a network sandbox. |
 | Built-in `bash` tool | Not covered. The shell process can use its host permissions and network stack. |
 | Custom tools, including tools that call `fetch` | Not covered. Tool code and its clients are supplied by the application. |

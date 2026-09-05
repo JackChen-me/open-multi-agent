@@ -5,7 +5,7 @@ note record. It does not publish packages, create a tag, or create a GitHub
 Release. Performance numbers live in
 [`observability-performance.md`](./observability-performance.md); adoption and
 cutover steps live in
-[`observability-migration.md`](./observability-migration.md).
+[`observability-migration.md`](../observability-migration.md).
 
 Baseline: `6339ee50515e149eb1fb5a073f44024d3ab821a3`, including PR #384.
 

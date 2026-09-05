@@ -1,4 +1,4 @@
-# Context Management
+# Context management
 
 Long-running agents can hit input token ceilings fast. Set `contextStrategy` on `AgentConfig` to control how the conversation shrinks as it grows:
 
@@ -21,7 +21,7 @@ const agent: AgentConfig = {
 | `compact` | Rule-based: truncate large assistant text blocks and tool results, keep recent turns intact. No extra LLM call. |
 | `custom` | Supply your own `compress(messages, estimatedTokens)` function. |
 
-## Auditing What a Strategy Replaced
+## Auditing what a strategy replaced
 
 Every strategy above rewrites the conversation destructively: the messages it
 produces are what the next request carries, and the originals are gone from the
@@ -55,7 +55,7 @@ strategy. A pass that changes nothing emits nothing, and `summarize`'s memo
 cache reuses the event that first recorded a summary rather than writing it
 twice.
 
-## Compressing Tool Results
+## Compressing tool results
 
 Tool outputs persist in the conversation history across turns even after the agent has acted on them. In long runs this can consume a significant portion of the context budget.
 
@@ -87,7 +87,7 @@ const agent: AgentConfig = {
   placeholders before asking the summary model to compress old turns.
 - Works alongside `contextStrategy`; combine both for maximum context headroom.
 
-## Truncating Tool Output
+## Truncating tool output
 
 `maxToolOutputChars` caps the raw output length for implicit string tool
 results. Outputs longer than the limit are truncated to a head + tail excerpt
@@ -105,7 +105,7 @@ const agent: AgentConfig = {
 
 Per-tool `maxOutputChars` (set on `ToolDefinition`) takes priority over the agent-level `maxToolOutputChars`.
 
-## Preserving Reasoning Across Providers
+## Preserving reasoning across providers
 
 Reasoning models (OpenAI o-series, DeepSeek reasoner, Anthropic extended thinking, Gemini thought summaries) emit intermediate reasoning that the framework extracts as `ReasoningBlock`s with a `provenance` field identifying the producing adapter. By default, only same-provider blocks with a valid signature are echoed back; everything else is silently dropped on outbound conversion to avoid the receiving model rejecting an unsigned thinking block or to keep prompt size predictable.
 
