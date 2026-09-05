@@ -57,6 +57,7 @@ Always inspect the focused diff and run `git diff --check`. Run the smallest rel
 - **Documentation-only:** `git diff --check`; tests are not required unless commands, generated artifacts, or executable examples changed.
 - **Core code:** relevant core tests, then `npm run lint -w @open-multi-agent/core` and `npm run test -w @open-multi-agent/core`. Run `npm run build -w @open-multi-agent/core` when public entry points, declarations, package output, or CLI output may be affected.
 - **OpenTelemetry adapter:** relevant tests, then `npm run lint -w @open-multi-agent/otel`, `npm run test -w @open-multi-agent/otel`, and build when package output or public types may be affected.
+- **Release bot:** relevant tests, then `npm run lint -w @open-multi-agent/release-bot` and `npm run test -w @open-multi-agent/release-bot`; both build core first through their `pre` scripts, so they also catch a core API change that breaks the bot. Workflow changes follow [`.github/RELEASING.md`](.github/RELEASING.md).
 - **Scaffolder or templates:** relevant tests, then `npm run lint -w create-oma-app`, `npm run test -w create-oma-app`, and `npm run typecheck:template -w create-oma-app`. Run `npm run test:scaffold -w create-oma-app` when generated-project behavior changes.
 - **Examples or catalog metadata:** `npm run test:example-catalog` and `npm run lint -w @open-multi-agent/core`, which type-checks `packages/core/examples/` alongside `src/` via [`packages/core/tsconfig.lint.json`](packages/core/tsconfig.lint.json); add a runnable example smoke test when executable behavior changes. That config excludes `examples/fixtures/` and the self-contained example projects that carry their own `package.json`/`tsconfig.json`; add a new example of that shape to its `exclude` list, since core lint cannot resolve a package-name import of `@open-multi-agent/core` before `dist` exists.
 - **Cross-workspace or dependency changes:** `npm run lint`, `npm test`, and `npm run build`; add the package/import/template smoke checks relevant to the changed surface.
@@ -66,9 +67,9 @@ Before finishing, report every command run and its outcome. If a relevant check 
 
 ## Architecture entry points
 
-`packages/core/src/` is organized one directory per subsystem (`orchestrator/`, `agent/`, `team/`, `task/`, `tool/`, `llm/`, `memory/`, `observability/`, `eval/`, `dashboard/`, `cli/`); run `ls packages/core/src/` to locate code, and use the linked docs below for behavior and contracts. Inside `orchestrator/`, `orchestrator.ts` is the entry point that the peer modules in that directory hang off.
+`packages/core/src/` is organized one directory per subsystem; run `ls packages/core/src/` to locate code rather than relying on any list of those directories, and use the linked docs below for behavior and contracts. Inside `orchestrator/`, `orchestrator.ts` is the entry point that the peer modules in that directory hang off.
 
-The published surface is `packages/core/src/index.ts` plus the dedicated subpath entry points declared under `exports` in `packages/core/package.json`: `/observability`, `/observability/file`, `/eval`, `/eval/file`, `/mcp`, `/ai-sdk`, `/acp`, `/process`, and `/classifiers`. Keep that declaration and the backing source files in sync when adding or renaming one.
+The published surface is `packages/core/src/index.ts` plus the subpath entry points declared under `exports` in `packages/core/package.json`; list them with `jq '.exports | keys' packages/core/package.json` rather than relying on any copy of that list. When adding or renaming one, keep that declaration, the backing source file, and the required entry-point list in the `package` job of [`.github/workflows/ci.yml`](.github/workflows/ci.yml) in sync.
 
 `OpenMultiAgent` exposes three primary modes: `runAgent()` for a one-shot agent, `runTeam()` for coordinator-generated task DAGs, and `runTasks()` for explicit dependency pipelines. See the [core package README](packages/core/README.md#architecture) for the conceptual architecture.
 
@@ -97,6 +98,7 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | Context strategies and reasoning round-tripping | [docs/context-management.md](docs/context-management.md) |
 | Tool grants, presets, sandbox, delegation, MCP, and gates | [docs/tool-configuration.md](docs/tool-configuration.md) |
 | Providers, environment variables, local servers, and AI SDK | [docs/providers.md](docs/providers.md) |
+| LLM egress policy, enforcement matrix, and fail-closed surfaces | [docs/egress-policy.md](docs/egress-policy.md) |
 | Shared memory and custom stores | [docs/shared-memory.md](docs/shared-memory.md) |
 | Checkpoint and restore | [docs/checkpoint.md](docs/checkpoint.md) |
 | Run event journal, lineage, and the model-visible boundary | [docs/run-journal.md](docs/run-journal.md) |
@@ -109,4 +111,4 @@ These constraints span multiple files and can cause behavioral or compatibility 
 
 ## Adding an LLM adapter
 
-Implement `LLMAdapter.chat()` and `LLMAdapter.stream()`, add the provider to `SupportedProvider`, and register it in `packages/core/src/llm/adapter.ts` through dynamic `import()` so unused SDKs never resolve. OpenAI-compatible providers should accept `baseURL` and reuse `openai-common.ts`. Add focused adapter tests and update [docs/providers.md](docs/providers.md) without introducing a hard-coded provider count.
+Implement `LLMAdapter.chat()` and `LLMAdapter.stream()`, add the provider to `SupportedProvider`, and register it in `packages/core/src/llm/adapter.ts` through dynamic `import()` so unused SDKs never resolve. OpenAI-compatible providers should accept `baseURL` and reuse `openai-common.ts`. Decide how the provider behaves under `egressPolicy` in `prepareProviderBaseURL`: an OpenAI-compatible provider needs an entry in `PROVIDER_DEFAULT_BASE_URLS` or a provider endpoint environment variable so its origin can be resolved and checked, and a provider whose SDK opens connections OMA cannot guard must be declared unsupported so it fails closed. Add the outcome to the enforcement matrix in [docs/egress-policy.md](docs/egress-policy.md). Add focused adapter tests and update [docs/providers.md](docs/providers.md) without introducing a hard-coded provider count.
