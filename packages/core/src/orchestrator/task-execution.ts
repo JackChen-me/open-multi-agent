@@ -18,7 +18,9 @@ import type {
   ApprovalRequestContent,
   CheckpointSnapshot,
   OrchestratorEvent,
+  RunStatus,
   StreamEvent,
+  StructuredTraceError,
   Task,
   TaskExecutionMetrics,
   TaskStatus,
@@ -68,6 +70,7 @@ import {
   createApprovalRequest,
   DurableApprovalError,
 } from '../approval/durable.js'
+import { RunStoreError } from '../run/record.js'
 
 /**
  * Build {@link TeamInfo} for tool context, including nested `runDelegatedAgent`
@@ -273,6 +276,18 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
     savedVersion = snapshot.version
     savedWatermarkSeq = snapshot.version === 5 ? snapshot.journalWatermarkSeq : 0
 
+    // Fence immediately before the snapshot write. A worker whose lease was
+    // taken over is rejected here and never reaches the store, so it cannot
+    // overwrite the new owner's checkpoint. This write also renews the lease,
+    // which makes every safe boundary a heartbeat.
+    if (ctx.runLease) {
+      await ctx.runLease.recordCheckpoint({
+        key: active.manager.key,
+        snapshotVersion: snapshot.version,
+        savedAt: snapshot.createdAt,
+      })
+    }
+
     await active.manager.save(snapshot)
   }
 
@@ -414,7 +429,7 @@ function toCheckpointAgentResult(
   }
 }
 
-type DispatchGateResult = 'allow' | 'abort' | 'budget' | 'capacity'
+type DispatchGateResult = 'allow' | 'abort' | 'budget' | 'capacity' | 'lease_lost'
 
 /**
  * Synchronous dispatch-admission seam. AgentPool's semaphore remains the
@@ -426,9 +441,38 @@ function evaluateDispatchGate(
   inFlightCount: number,
 ): DispatchGateResult {
   if (ctx.abortSignal?.aborted) return 'abort'
+  // Ownership outranks the budget and capacity checks: a run this worker no
+  // longer owns must not dispatch another task under any of them.
+  if (ctx.runLease?.lost) return 'lease_lost'
   if (ctx.budgetExceededTriggered) return 'budget'
   if (inFlightCount >= ctx.pool.runConcurrencyLimit) return 'capacity'
   return 'allow'
+}
+
+/**
+ * Stop a run whose execution lease is gone.
+ *
+ * A lost lease means another worker took the run over, or an operator
+ * cancelled it. Either way this process must stop rather than keep advancing
+ * state it can no longer durably write.
+ */
+function leaseLostOutcome(error: RunStoreError): {
+  status: RunStatus
+  errorInfo: StructuredTraceError
+  reason: string
+} {
+  const cancelled = error.record?.status === 'cancelled'
+  const classified = classifyRunFailure(error, {
+    kind: 'store',
+    statusCode: cancelled ? 'cancelled' : 'error',
+  })
+  return {
+    status: classified.status,
+    errorInfo: classified.errorInfo,
+    reason: cancelled
+      ? 'Skipped: run cancelled by its authoritative run record.'
+      : 'Skipped: run execution lease lost.',
+  }
 }
 
 async function applyRecoveryAtOutcome(
@@ -762,6 +806,15 @@ export async function executeQueue(
       requestAbortStop()
       return true
     }
+    if (dispatchGate === 'lease_lost') {
+      if (!stopDispatch) {
+        const lost = leaseLostOutcome(ctx.runLease!.lost!)
+        ctx.outcomeStatus = lost.status
+        ctx.outcomeErrorInfo = lost.errorInfo
+        requestStop(lost.reason)
+      }
+      return true
+    }
     if (dispatchGate === 'budget') {
       requestStop(ctx.budgetExceededReason ?? 'Skipped: token budget exceeded.')
       return true
@@ -839,10 +892,10 @@ export async function executeQueue(
 
       if (!legacyRoundMode) {
         const dispatchGate = evaluateDispatchGate(ctx, inFlight.size)
-        if (dispatchGate === 'abort') requestAbortStop()
-        if (dispatchGate === 'budget') {
-          requestStop(ctx.budgetExceededReason ?? 'Skipped: token budget exceeded.')
-        }
+        // Terminal gates (abort, lost lease, budget) all stop through one
+        // helper so a new one cannot be handled at one call site and missed
+        // at the other.
+        requestTerminalGateStop()
         if (
           dispatchErrors.length > 0
           && fatalError === undefined

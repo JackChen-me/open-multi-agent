@@ -32,6 +32,7 @@ import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
 import type { JournalRecorder } from '../journal/journal.js'
 import type { DurableApprovalLedger } from '../approval/durable.js'
+import type { RunLeaseHandle } from '../run/ledger.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import type { ResolvedRecoveryOptions } from './recovery.js'
 import { createRunIdentity, validateRunMetadata } from '../observability/identity.js'
@@ -146,6 +147,12 @@ export interface RunContext {
   readonly agentResults: Map<string, AgentRunResult>
   readonly config: OrchestratorConfig
   readonly checkpoint?: ActiveCheckpoint
+  /**
+   * Cross-process execution lease, present only when a `runStore` is
+   * configured. It is the run's ownership authority: checkpoint writes fence
+   * against it and the dispatch gate stops the run once it is lost.
+   */
+  readonly runLease?: RunLeaseHandle
   /** Present only when the run resolved a journal. Every emission guards on it. */
   readonly journal?: JournalRecorder
   /** Stable top-level execution identity, independent of trace callbacks. */
@@ -207,5 +214,11 @@ export interface ActiveCheckpoint {
   readonly approvalDecisions: Map<string, ApprovalDecisionRecord>
   /** Approved task/round boundaries that the execution loop may consume once. */
   readonly approvedBoundaries: Map<string, ApprovalDecisionRecord>
+  /**
+   * Lease acquired for this run, when a `runStore` is configured. Held here so
+   * `restore()` can take ownership before it reconciles approvals and hand the
+   * same handle to the execution path instead of acquiring a second one.
+   */
+  runLease?: RunLeaseHandle
   saveChain: Promise<void>
 }

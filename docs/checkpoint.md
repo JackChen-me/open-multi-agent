@@ -221,6 +221,10 @@ Suspension is the exception: OMA cannot return a resumable approval request
 until the exact pending boundary has been saved. That save is strict and fails
 closed. See [durable approvals](durable-approvals.md#rejection-and-recovery-semantics).
 
+An enabled [run store](run-store.md) adds a second exception: the checkpoint
+write fences against the run's execution lease first, so a worker that has been
+taken over writes no snapshot at all and the run stops.
+
 [Run journal](run-journal.md) appends follow the same contract, with no
 exception at all: a failed append is reported and dropped, never escalated. That
 is why the journal can only ever extend a snapshot on restore and never replace
@@ -338,6 +342,11 @@ await cp.delete()                      // drop the persisted checkpoint
 Per-run snapshot/restore over `MemoryStore`. What it does *not* yet do:
 
 - **Snapshot-based, not event-sourced.** Each checkpoint overwrites the previous one. Enabling a [run journal](run-journal.md) adds a replayable tail after the latest snapshot ([Tail replay](#tail-replay)), but the snapshot remains the anchor and the journal is never required to recover.
+- **No execution ownership on its own.** A checkpoint is state, not a claim on
+  it: two processes can restore the same snapshot and both advance it. Enable a
+  [run store](run-store.md) for a run-level lease and fencing token. Without one,
+  the accurate boundary is process-restart recovery, not cross-process
+  concurrent-safe durable execution.
 - **External agent backends remain task-grained.** Process and ACP backends own
   their own loops, so OMA cannot persist their private mid-task conversation or
   tool state.

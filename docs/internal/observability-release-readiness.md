@@ -43,7 +43,7 @@ follow-up; OBS-5 only permits narrow correctness and compatibility fixes.
 | Dashboard | static post-run task DAG artifact | live delivery, durable state, trace query |
 | TraceStore | best-effort TraceRecord append/query/delete/retention | authoritative run state, CAS, lease, resume |
 | CheckpointStore | safe-boundary execution snapshots used by `restore()` | telemetry retention or trace query |
-| Future RunStore | authoritative durable run state machine | implemented by this release |
+| RunStore | authoritative durable run lifecycle, lease, and fencing (shipped separately from Observability v2; see [run-store](../run-store.md)) | telemetry, trace query, retention |
 | OTel adapter | mapping OMA records to spans/events/links | global provider setup, SDK/exporter choice, collector, provider ownership |
 
 ## Failure-injection matrix

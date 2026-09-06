@@ -85,7 +85,8 @@ per-surface table is the
 ## Where state lives
 
 Nothing is persisted anywhere you did not choose. Shared memory, checkpoints,
-and durable approvals all go through the `MemoryStore` interface, and core
+durable approvals, and — when one is configured — authoritative
+[run records](run-store.md) all go through the `MemoryStore` interface, and core
 ships three implementations:
 
 | Store | Durability | Notes |
@@ -104,7 +105,10 @@ guarantee. A cross-process reviewer should therefore decide only after the
 suspended runner has exited, or the deployment needs a database-backed store
 whose `compareAndSet` is atomic across all writers. This matters most for
 [durable approvals](durable-approvals.md#store-requirements), where the
-decision write is the correctness boundary.
+decision write is the correctness boundary, and for the
+[run store](run-store.md), where it decides whether two workers can advance the
+same run. `MemoryStoreRunStore` therefore declares `atomicity: 'process'` unless
+you tell it otherwise; the shipped stores never qualify for `'cross-process'`.
 
 Trace records and evaluation records have their own stores and the same shape
 of choice: `InMemoryTraceStore` or `FileTraceStore`, `InMemoryEvalStore` or

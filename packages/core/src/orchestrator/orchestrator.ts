@@ -97,6 +97,8 @@ import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { Checkpoint } from '../memory/checkpoint.js'
+import { RunLedger, resolveRunStoreConfig, type RunLeaseHandle } from '../run/ledger.js'
+import type { RunOutcome } from '../run/record.js'
 import { InMemoryStore } from '../memory/store.js'
 import type { RunJournalMode } from '../journal/events.js'
 import {
@@ -285,6 +287,7 @@ type EffectiveOrchestratorConfig = Required<
     | 'checkpoint'
     | 'recovery'
     | 'journal'
+    | 'runStore'
   >
 > & Pick<
   OrchestratorConfig,
@@ -308,6 +311,7 @@ type EffectiveOrchestratorConfig = Required<
   | 'checkpoint'
   | 'recovery'
   | 'journal'
+  | 'runStore'
 >
 
 interface SemanticProfileRun {
@@ -543,6 +547,7 @@ export class OpenMultiAgent {
       estimateCost: config.estimateCost,
       defaultToolPreset: config.defaultToolPreset,
       checkpoint: config.checkpoint,
+      runStore: config.runStore,
       recovery: config.recovery,
       journal: config.journal,
       onApproval: config.onApproval,
@@ -1448,6 +1453,10 @@ export class OpenMultiAgent {
       return hasGrantedConsequentialTool(effective, { includeDelegateTool: true })
     })
 
+    // Assigned once the run reaches execution. Declared here so every `finish`
+    // path records the run's durable transition, including the ones that return
+    // before a lease was ever taken (where it stays undefined and does nothing).
+    let runLease: RunLeaseHandle | undefined
     const finish = async (result: TeamRunResult): Promise<TeamRunResult> => {
       const resultWithRouting = {
         ...result,
@@ -1477,10 +1486,13 @@ export class OpenMultiAgent {
           preferredBudgetDegraded,
         },
       )
-      const completedResult = finalizeConsequentialRun<TeamRunResult>(
-        governedResult,
-        consequentialUndeclared,
-        confirmationState,
+      const completedResult = await this.finalizeRunLease(
+        runLease,
+        finalizeConsequentialRun<TeamRunResult>(
+          governedResult,
+          consequentialUndeclared,
+          confirmationState,
+        ),
       )
       const teamStatus = completedResult.status
         ?? statusOnly(completedResult.success ? 'ok' : 'error')
@@ -1930,6 +1942,10 @@ export class OpenMultiAgent {
       'runTeam',
       goal,
     )
+    // Taken before the plan-approval boundary, so a run that suspends there
+    // records its durable suspension under an owned lease.
+    runLease = await this.acquireRunLease(identity.runId, options)
+    if (activeCheckpoint && runLease) activeCheckpoint.runLease = runLease
     const ctx: RunContext = {
       team,
       pool,
@@ -1937,6 +1953,7 @@ export class OpenMultiAgent {
       agentResults,
       config: runConfig,
       ...(activeCheckpoint ? { checkpoint: activeCheckpoint } : {}),
+      ...(runLease ? { runLease } : {}),
       ...(journal ? { journal } : {}),
       runId,
       identity,
@@ -2083,7 +2100,12 @@ export class OpenMultiAgent {
       return finish(this.buildPlanOnlyTeamRunResult(agentResults, identity, goal, queue))
     }
 
-    await executeQueue(queue, ctx)
+    try {
+      await executeQueue(queue, ctx)
+    } catch (error) {
+      await this.abandonRunLease(runLease)
+      throw error
+    }
     if (queue.list().every((task) => task.status === 'completed')) {
       await saveRunCheckpoint(queue, ctx)
     }
@@ -2482,6 +2504,13 @@ export class OpenMultiAgent {
         }
       : undefined
 
+    // Restore is the resume command: take ownership before reconciling the
+    // approval ledger or writing anything, so two workers restoring the same
+    // checkpoint cannot both advance it. A suspended record becomes eligible
+    // here, idempotently.
+    const restoreLease = await this.acquireRunLease(identity.runId, options, true)
+    if (checkpointForResume && restoreLease) checkpointForResume.runLease = restoreLease
+
     if ((snapshot.version === 4 || snapshot.version === 5) && checkpointForResume) {
       const hasTerminalRejection = snapshot.approvalDecisions.some(
         (decision) => decision.scope !== 'tool_call' && decision.decision === 'rejected',
@@ -2571,11 +2600,11 @@ export class OpenMultiAgent {
         supersededByRevision: task.supersededByRevision,
         recoveredByRevision: task.recoveredByRevision,
       }))
-      const finishRestoreBoundary = (result: TeamRunResult): TeamRunResult => {
-        const completed = {
+      const finishRestoreBoundary = async (result: TeamRunResult): Promise<TeamRunResult> => {
+        const completed = await this.finalizeRunLease(restoreLease, {
           ...this.withCheckpointApprovals(result, checkpointForResume),
           ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
-        }
+        })
         this.completeOnlineEvaluation(
           evaluationStartedAtMs === undefined ? undefined : {
             input: { kind: 'restore', goal: snapshot.goal ?? options?.goal },
@@ -2606,6 +2635,7 @@ export class OpenMultiAgent {
           agentResults,
           config: this.config,
           checkpoint: checkpointForResume,
+          ...(restoreLease ? { runLease: restoreLease } : {}),
           identity,
           ...(restoreMetadata.metadata !== undefined ? { metadata: restoreMetadata.metadata } : {}),
           runId: identity.runId,
@@ -3041,6 +3071,12 @@ export class OpenMultiAgent {
       : undefined
     const runIdentity = identity ?? newRunFacts!.identity
     const metadata = restoreMetadata?.metadata ?? newRunFacts?.metadata
+    // Ownership is settled before any telemetry starts: a worker refused the
+    // lease must not leave a started trace or an unterminated journal behind
+    // for a run it never executed. `restore()` already took the lease before
+    // reconciling approvals, so reuse that handle rather than acquiring twice.
+    const runLease = activeCheckpoint?.runLease
+      ?? await this.acquireRunLease(runIdentity.runId, options)
     const traceRuntime = this.startTrace(runIdentity, metadata, restoreMetadata?.overridden)
     const journal = await this.startRunJournal(
       options?.journal, runIdentity, journalMode, goal, metadata,
@@ -3063,6 +3099,7 @@ export class OpenMultiAgent {
       'runTasks',
       goal,
     )
+    if (checkpoint && runLease) checkpoint.runLease = runLease
     // Restore reconciles approval decisions against the primary ledger before
     // this point, when no recorder exists yet. Recording them here is what
     // makes an attempt's journal say which boundaries it resumed under.
@@ -3070,7 +3107,12 @@ export class OpenMultiAgent {
       for (const decision of checkpoint.approvalDecisions.values()) {
         journal.emit({ type: 'approval/decision', decision })
       }
-      await this.resumeFromJournal(journal, checkpoint)
+      try {
+        await this.resumeFromJournal(journal, checkpoint)
+      } catch (error) {
+        await this.abandonRunLease(runLease)
+        throw error
+      }
     }
     const restoredConfirmationState = checkpoint?.mode === 'runTeam'
       && this.config.requireConsequentialConfirmation
@@ -3088,6 +3130,7 @@ export class OpenMultiAgent {
       agentResults,
       config: runConfig,
       ...(checkpoint ? { checkpoint } : {}),
+      ...(runLease ? { runLease } : {}),
       ...(journal ? { journal } : {}),
       identity: runIdentity,
       ...(metadata !== undefined ? { metadata } : {}),
@@ -3110,7 +3153,12 @@ export class OpenMultiAgent {
       recoveryPatchSignatures: new Set(),
     }
 
-    await executeQueue(queue, ctx)
+    try {
+      await executeQueue(queue, ctx)
+    } catch (error) {
+      await this.abandonRunLease(runLease)
+      throw error
+    }
     if (queue.list().every((task) => task.status === 'completed')) {
       await saveRunCheckpoint(queue, ctx)
     }
@@ -3212,11 +3260,11 @@ export class OpenMultiAgent {
       ...(routingDecision !== undefined ? { routingDecision } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
     }
-    const completedResult = finalizeGovernanceRun(
+    const completedResult = await this.finalizeRunLease(runLease, finalizeGovernanceRun(
       resultWithRouting,
       governanceDeclaration,
       buildExecutionReceipt(resultWithRouting),
-    )
+    ))
     const queueStatus = completedResult.status
       ?? statusOnly(completedResult.success ? 'ok' : 'error')
     await endRunJournal(journal, queueStatus, completedResult.errorInfo)
@@ -3226,6 +3274,102 @@ export class OpenMultiAgent {
     })
     this.completeOnlineEvaluation(pendingEvaluation, completedResult)
     return completedResult
+  }
+
+  /**
+   * Take single-active ownership of `runId` when a run store is configured.
+   *
+   * Returns `undefined` when no run store applies, which is the default and
+   * leaves single-process checkpoint recovery exactly as it was. When one does
+   * apply, failing to acquire the lease throws: a run another worker owns, a
+   * run already finished, or a suspended run with no recorded resume must not
+   * be advanced by this process.
+   */
+  private async acquireRunLease(
+    runId: string,
+    options?: RunTasksOptions,
+    resumeSuspended = false,
+  ): Promise<RunLeaseHandle | undefined> {
+    const runStore = resolveRunStoreConfig(options?.runStore, this.config.runStore)
+    if (!runStore) return undefined
+    const ledger = new RunLedger(runStore.store, {
+      ...(runStore.owner !== undefined ? { owner: runStore.owner } : {}),
+      ...(runStore.leaseTtlMs !== undefined ? { leaseTtlMs: runStore.leaseTtlMs } : {}),
+      ...(runStore.now !== undefined ? { now: runStore.now } : {}),
+    })
+    // `restore()` is the resume command: a suspended run whose decision was
+    // recorded out of process becomes eligible here, idempotently.
+    if (resumeSuspended) {
+      const existing = await ledger.get(runId)
+      if (existing?.status === 'suspended') await ledger.requestResume(runId)
+    }
+    return ledger.acquire(runId, {
+      ...(runStore.heartbeat !== undefined ? { heartbeat: runStore.heartbeat } : {}),
+    })
+  }
+
+  /**
+   * Record the run's terminal (or suspended) durable transition.
+   *
+   * Unlike a checkpoint write this is not best-effort: if the transition cannot
+   * be written the call throws rather than report an outcome the authoritative
+   * record does not carry. The one case that writes nothing is a lease already
+   * known to be lost — the run belongs to another worker, and the terminal
+   * transition is that worker's to make.
+   */
+  private async finalizeRunLease<T extends TeamRunResult>(
+    lease: RunLeaseHandle | undefined,
+    result: T,
+  ): Promise<T> {
+    if (!lease) return result
+    // A worker that lost its lease writes nothing — the run belongs to whoever
+    // took it over, and the terminal transition is theirs to make. It also
+    // cannot report the outcome as its own, so the result becomes the failure
+    // the fence detected. That mirrors what the dispatch gate reports when the
+    // same loss is detected mid-run.
+    if (lease.lost) {
+      lease.stopHeartbeat()
+      const classified = classifyRunFailure(lease.lost, {
+        kind: 'store',
+        statusCode: lease.lost.record?.status === 'cancelled' ? 'cancelled' : 'error',
+      })
+      return {
+        ...result,
+        success: false,
+        status: classified.status,
+        errorInfo: classified.errorInfo,
+      }
+    }
+    const status = result.status ?? statusOnly(result.success ? 'ok' : 'error')
+    const outcome: RunOutcome = {
+      code: status.code,
+      ...(status.message !== undefined ? { message: status.message } : {}),
+    }
+    if (status.code === 'suspended') {
+      await lease.suspend((result.pendingApprovals ?? []).map((request) => request.id))
+    } else if (status.code === 'cancelled') {
+      await lease.cancel(outcome)
+    } else if (result.success) {
+      await lease.complete(outcome)
+    } else {
+      await lease.fail(outcome)
+    }
+    return result
+  }
+
+  /**
+   * Give a lease up when the run throws instead of returning a result.
+   *
+   * Releasing makes the run immediately acquirable rather than leaving another
+   * worker to wait out the TTL, and stopping the heartbeat is what keeps a
+   * crashed run from being renewed forever by a process that has moved on.
+   * Best-effort by design: the TTL is the backstop if the release itself fails.
+   */
+  private async abandonRunLease(lease: RunLeaseHandle | undefined): Promise<void> {
+    if (!lease) return
+    lease.stopHeartbeat()
+    if (lease.lost) return
+    await lease.release().catch(() => undefined)
   }
 
   private createActiveCheckpoint(

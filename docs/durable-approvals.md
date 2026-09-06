@@ -154,6 +154,13 @@ still a single-writer file store with no cross-process lock: an out-of-process
 reviewer should decide after the suspended writer exits, or use a database
 store whose `compareAndSet` is atomic across all writers.
 
+The approval ledger's compare-and-set protects the *first decision*, not
+execution ownership: it does not stop two workers from resuming the same
+approved run. Add a [run store](run-store.md) when more than one worker can pick
+a suspended run up. A suspended run then records its pending boundary durably,
+survives the exit of the process that suspended it, and becomes eligible for a
+new lease once a decision exists.
+
 Approval requests can contain complete task descriptions and raw/validated
 tool arguments. They are persisted verbatim so the approved operation remains
 exact. Use access controls and encryption appropriate for that data.

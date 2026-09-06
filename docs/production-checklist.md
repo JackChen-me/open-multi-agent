@@ -133,6 +133,13 @@ All four items are detailed in [budgets and limits](budgets-and-limits.md).
   `'fixed'`; `'repairable'` is opt-in and bounded by `maxPlanRevisions`
   (default `3`) and `maxAddedTasks` (default `20`). See
   [adaptive recovery](adaptive-recovery.md).
+- [ ] **Configure a `runStore` if more than one worker can pick a run up.** Off
+  by default, and a checkpoint alone establishes no owner: two processes can
+  restore the same snapshot and both advance it. A run store adds a per-run
+  lease and fencing token, and its writes fail closed rather than degrade to
+  best-effort. Declare `atomicity: 'cross-process'` only for a backend whose
+  compare-and-set really is atomic across writers — `FileStore` and
+  `InMemoryStore` are not. See [run store](run-store.md).
 - [ ] **Rehearse the resume path.** `restore()` needs the team wiring rebuilt
   and, for a `runTeam` run, the same `coordinator` config, because a checkpoint
   cannot persist a live adapter. Without it, restore falls back to raw per-task
@@ -231,7 +238,8 @@ A short smoke pass that exercises the decisions above end to end:
 - [Egress policy](egress-policy.md) and [self-hosting](self-hosting.md)
 - [Durable approvals](durable-approvals.md) and
   [hooks and callbacks](hooks-and-callbacks.md)
-- [Checkpoint](checkpoint.md), [adaptive recovery](adaptive-recovery.md), and
+- [Checkpoint](checkpoint.md), [run store](run-store.md),
+  [adaptive recovery](adaptive-recovery.md), and
   [task scheduling](task-scheduling.md)
 - [Observability](observability.md), [run journal](run-journal.md), and
   [Run Viewer](run-viewer.md)

@@ -307,6 +307,44 @@ export {
 } from './memory/checkpoint.js'
 
 // ---------------------------------------------------------------------------
+// Authoritative run record
+// ---------------------------------------------------------------------------
+
+export {
+  DEFAULT_RUN_LEASE_TTL_MS,
+  MemoryStoreRunStore,
+  RUN_KEY_PREFIX,
+  RUN_LIFECYCLE_STATUSES,
+  RunLeaseHandle,
+  RunLedger,
+  RunStoreError,
+  assertRunRecord,
+  assertRunTransition,
+  canTransitionRun,
+  isRunLeaseLive,
+  isRunRecord,
+  isRunRecordKey,
+  isTerminalRunStatus,
+  resolveRunStoreConfig,
+  runRecordKey,
+} from './run/index.js'
+export type {
+  AcquireRunLeaseOptions,
+  MemoryStoreRunStoreOptions,
+  RunCheckpointRef,
+  RunLease,
+  RunLedgerOptions,
+  RunLifecycleStatus,
+  RunOutcome,
+  RunRecord,
+  RunStore,
+  RunStoreAtomicity,
+  RunStoreConfig,
+  RunStoreErrorCode,
+  RunSuspension,
+} from './run/index.js'
+
+// ---------------------------------------------------------------------------
 // Run journal
 // ---------------------------------------------------------------------------
 

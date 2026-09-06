@@ -85,6 +85,12 @@ These constraints span multiple files and can cause behavioral or compatibility 
 - **Reasoning is dropped unless opted in:** provider-native reasoning blocks that the target adapter cannot echo are discarded unless `preserveReasoningAsText` is enabled. Inline `<thinking>` text is never reconstructed into a signed reasoning block. See [context management](docs/context-management.md).
 - **Native tool calls win:** the local-model text extractor runs only when a server emits no native tool calls.
 - **External backends replace the LLM runner:** process and ACP backends perform their own work in `cwd`; the runner tool loop, sandbox, and context strategy do not apply, while queue, scheduler, memory, and budget behavior remain backend-agnostic. ACP permissions default to auto-approve and its cumulative context usage is recorded as per-turn deltas when updates exist. See [external agents](docs/external-agents.md).
+- **Ownership is opt-in, and its writes fail closed:** without a `runStore` a
+  checkpoint is recovery state with no owner, so two processes can restore the
+  same snapshot and both advance it. With one, a run acquires a lease before it
+  dispatches, checkpoint writes fence against its token, and lifecycle writes
+  reject rather than degrade to best-effort. A worker that lost its lease writes
+  no terminal status and never reports success. See [run store](docs/run-store.md).
 - **Telemetry is not execution state:** losing telemetry must not roll back a durable run. Deleting traces must not delete checkpoints, shared memory, or remotely exported OpenTelemetry data. Observability delivery/export failures do not become agent, task, or run failures. See [observability](docs/observability.md).
 - **Evaluation observes results:** offline evaluation is separate; online sampling, scoring, and persistence are best-effort and isolated from the business response. Scorer failures become `scorer_error` and are excluded from score aggregates rather than converted to zero. See [evaluation](docs/evaluation.md).
 - **Secrets and PII are redacted best-effort:** traces, shell output, and dashboard payloads pass through redaction, but callers must still avoid deliberately persisting or logging secrets.
@@ -101,6 +107,7 @@ These constraints span multiple files and can cause behavioral or compatibility 
 | LLM egress policy, enforcement matrix, and fail-closed surfaces | [docs/egress-policy.md](docs/egress-policy.md) |
 | Shared memory and custom stores | [docs/shared-memory.md](docs/shared-memory.md) |
 | Checkpoint and restore | [docs/checkpoint.md](docs/checkpoint.md) |
+| Authoritative run record, execution leases, and fencing | [docs/run-store.md](docs/run-store.md) |
 | Run event journal, lineage, and the model-visible boundary | [docs/run-journal.md](docs/run-journal.md) |
 | Tracing, stores, progress, Run Viewer, privacy, and OpenTelemetry | [docs/observability.md](docs/observability.md) |
 | Run Viewer inputs, rendering, and privacy boundary | [docs/run-viewer.md](docs/run-viewer.md) |

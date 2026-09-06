@@ -8,6 +8,7 @@
   "include": [
     "./eval-store-contract.ts",
     "./memory-store-contract.ts",
+    "./run-store-contract.ts",
     "./trace-store-contract.ts"
   ],
   "exclude": []
