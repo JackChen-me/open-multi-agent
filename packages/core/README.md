@@ -319,3 +319,5 @@ Per-contributor credits by area are in [CONTRIBUTORS.md](https://github.com/open
 ## License
 
 MIT
+
+Maintained by [YuanASI (Shenzhen YuanASI Technology Co., Ltd.)](https://yuanasi.com/en?utm_source=npm&utm_medium=package_readme&utm_campaign=open_multi_agent).

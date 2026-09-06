@@ -55,3 +55,5 @@ Ollama projects select `OMA_MODEL` when set, otherwise the first installed model
 ## License
 
 MIT
+
+Maintained by [YuanASI (Shenzhen YuanASI Technology Co., Ltd.)](https://yuanasi.com/en?utm_source=npm&utm_medium=package_readme&utm_campaign=open_multi_agent).

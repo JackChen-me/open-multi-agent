@@ -173,3 +173,9 @@ application chooses and configures its own OpenTelemetry SDK and OTLP (or
 other) exporter, which keeps this package's runtime surface to the OTel API and
 avoids eager OTLP imports, global-provider configuration, and a second
 SDK/exporter version matrix.
+
+## License
+
+MIT
+
+Maintained by [YuanASI (Shenzhen YuanASI Technology Co., Ltd.)](https://yuanasi.com/en?utm_source=npm&utm_medium=package_readme&utm_campaign=open_multi_agent).

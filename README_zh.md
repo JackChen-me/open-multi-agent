@@ -232,3 +232,5 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 ## 许可证
 
 MIT
+
+由[深圳元定义科技有限公司（YuanASI）](https://yuanasi.com/?utm_source=github&utm_medium=readme_footer&utm_campaign=open_multi_agent)维护。

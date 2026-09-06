@@ -2,6 +2,8 @@
 
 `open-multi-agent` is built by the people below. The [contributor graph](https://github.com/open-multi-agent/open-multi-agent/graphs/contributors) lists everyone who has landed a commit; this file records what each person contributed.
 
+The project is maintained by [YuanASI (Shenzhen YuanASI Technology Co., Ltd.)](https://yuanasi.com/en); Jack Chen is the lead maintainer.
+
 Opening your first PR gets you added here. See the [contribution guide](.github/CONTRIBUTING.md).
 
 ## Framework features

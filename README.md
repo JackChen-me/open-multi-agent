@@ -231,3 +231,5 @@ Contributor credits by area are in [CONTRIBUTORS.md](CONTRIBUTORS.md).
 ## License
 
 MIT
+
+Maintained by [YuanASI (Shenzhen YuanASI Technology Co., Ltd.)](https://yuanasi.com/en?utm_source=github&utm_medium=readme_footer&utm_campaign=open_multi_agent).

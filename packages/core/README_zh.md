@@ -302,3 +302,5 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 ## 许可证
 
 MIT
+
+由[深圳元定义科技有限公司（YuanASI）](https://yuanasi.com/?utm_source=github&utm_medium=package_readme&utm_campaign=open_multi_agent)维护。

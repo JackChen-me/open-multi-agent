@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- LICENSE now names Shenzhen YuanASI Technology Co., Ltd. alongside the
+  open-multi-agent contributors, every package README closes with a maintainer
+  line linking to yuanasi.com, and `author` in the three published package.json
+  files points at YuanASI. The MIT terms are unchanged.
+
 ## 1.18.0 - 2026-09-04
 
 ### Added

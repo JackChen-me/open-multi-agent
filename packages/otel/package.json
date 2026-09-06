@@ -35,8 +35,9 @@
     "llm"
   ],
   "author": {
-    "name": "open-multi-agent",
-    "url": "https://github.com/open-multi-agent"
+    "name": "YuanASI (Shenzhen YuanASI Technology Co., Ltd.)",
+    "email": "co@yuanasi.com",
+    "url": "https://yuanasi.com"
   },
   "license": "MIT",
   "repository": {
