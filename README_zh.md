@@ -216,7 +216,7 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 |---|---|
 | 安装与运行 | [文档索引](docs/README.md) · [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) · [术语表](docs/glossary.md) · [生产检查清单](docs/production-checklist.md) |
 | 配置模型与工具 | [Provider](docs/providers.md) · [LLM 出网策略](docs/egress-policy.md) · [工具配置](docs/tool-configuration.md) · [沙箱与 shell 执行](docs/sandbox-and-shell.md) · [MCP](docs/mcp.md) · [结构化输入](docs/structured-input.md) · [外部 Agent](docs/external-agents.md) |
-| 稳定运行 | [可观测性](docs/observability.md) · [Run Viewer](docs/run-viewer.md) · [运行事件日志](docs/run-journal.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) · [错误](docs/errors.md) |
+| 稳定运行 | [可观测性](docs/observability.md) · [Run Viewer](docs/run-viewer.md) · [运行事件日志](docs/run-journal.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [Run store 与执行租约](docs/run-store.md) · [持久化审批](docs/durable-approvals.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) · [错误](docs/errors.md) |
 | 控制编排 | [Coordinator](docs/coordinator.md) · [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) · [流式输出](docs/streaming.md) · [预算与限制](docs/budgets-and-limits.md) |
 
 ## 参与贡献

@@ -254,6 +254,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 | 控制成本 | `maxTokenBudget`；`maxCostBudget` + 应用自有 `estimateCost` |
 | 限制工具 | `tools` / `toolPreset`、`cwd` / `defaultCwd`、工具输出上限 |
 | 故障恢复 | 任务重试、checkpoint、`restore()` 与可选的自适应计划修复 |
+| 跨 worker 归属 | 可选 [`runStore`](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-store.md)：单一执行租约、带 fencing 的 checkpoint 写入、持久化生命周期 |
 | 人工把关 | `planOnly`、同步审批回调或[持久化审批 gate](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)；审批界面与传递通道由应用自行实现 |
 | 统一观测 | Trace sink、TraceStore、执行回执、Run Viewer，或可选 OTel adapter |
 
@@ -274,6 +275,10 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 </p>
 <p align="center"><em>内置离线 Run Viewer 基于 trace store 回放一次真实运行：任务 DAG、span 瀑布与逐任务证据，不依赖任何托管服务。</em></p>
 
+### Run store 与执行租约
+
+checkpoint 说明的是一次运行可以从哪里恢复，而不是谁有权恢复它，因此两个 worker 可能加载同一份快照并同时推进。可选的 `runStore` 补上这层权威：每次运行对应一条权威记录，保存生命周期状态、执行租约和单调递增的 fencing token。worker 必须先取得租约才能派发任务，每次 checkpoint 写入都携带该 token 做 fencing，被其他 worker 接管的运行会停止而不会覆盖新持有者的状态。挂起的运行不再依赖存活进程，运维方也可以在 worker 之外取消或恢复它。该能力默认关闭，关闭时行为不变，详见 [run store 指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-store.md)。
+
 ### 运行事件日志
 
 长时间运行出问题时，最缺的记录往往是每个 Agent 在被调用那一刻究竟看到了什么。可选的运行事件日志会把这部分保留下来：每条消息和工具结果都作为追加事件写入，上下文策略替换掉若干轮次后放进去的那个块也原样保存，运行结束后可以直接读回，而不必靠推测还原。`verifyRun()` 随后离线校验模型看到的每个块都能从日志中复现，而不是采信日志对自身的陈述，该校验确认的是执行顺序与血缘，并不使日志具备防篡改能力；`restore()` 也可以从最后一条追加事件恢复，而不再局限于最后一次快照。该能力默认关闭，关闭时没有额外开销，详见[运行事件日志指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md)。
@@ -283,7 +288,7 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 | 主题 | 指南 |
 |---|---|
 | 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[结构化输入](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/structured-input.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[沙箱与 shell 执行](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/sandbox-and-shell.md)、[MCP](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/mcp.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[CI 中的评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation-ci.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[持久化审批](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md)、[错误](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/errors.md) |
+| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[CI 中的评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation-ci.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[Run store 与执行租约](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-store.md)、[持久化审批](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md)、[错误](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/errors.md) |
 | 控制流程 | [Coordinator](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/coordinator.md)、[计划预览与回放](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md)、[共享记忆](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md)、[Hook 与回调](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/hooks-and-callbacks.md)、[流式输出](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/streaming.md)、[预算与限制](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/budgets-and-limits.md)、[外部 agent](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[Run Viewer](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-viewer.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产检查清单](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/production-checklist.md)、[术语表](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/glossary.md)、[生产示例](examples/production/README.md) |
 

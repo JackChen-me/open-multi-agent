@@ -50,6 +50,7 @@ which question the page answers, so you can pick one without opening five.
 | [Run Viewer](run-viewer.md) | How do I render one finished run as a self-contained page with a task DAG and span waterfall? |
 | [Run event journal](run-journal.md) | What exactly did each agent see at the moment it was asked, and can that be verified offline? |
 | [Checkpoint and resume](checkpoint.md) | How does an interrupted run resume without repeating completed work? |
+| [Run store and execution leases](run-store.md) | Which worker owns a run, and what stops two of them from advancing it at once? |
 | [Context management](context-management.md) | How does a long conversation shrink as it grows, and what happens to reasoning blocks? |
 | [Evaluation](evaluation.md) | How do EvalSets, scorers, and stores measure quality without changing the business result? |
 | [Evaluation in CI](evaluation-ci.md) | How do I turn an EvalSet into a pass/fail signal a CI job can act on? |

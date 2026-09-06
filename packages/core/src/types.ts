@@ -7,6 +7,8 @@
 
 import type { ZodSchema } from 'zod'
 import type { RunJournalConfig } from './journal/journal.js'
+import type { RunStoreConfig } from './run/ledger.js'
+import type { RunStore } from './run/store.js'
 import type { SupportedProvider } from './llm/adapter.js'
 import type {
   SchedulingStrategy,
@@ -1630,6 +1632,12 @@ export interface RunTasksOptions extends RunIdentityOptions {
    */
   readonly checkpoint?: boolean | CheckpointOptions
   /**
+   * Authoritative run record and execution lease for this call. Overrides
+   * {@link OrchestratorConfig.runStore}; pass `false` to run this call without
+   * a lease even when the orchestrator configures one.
+   */
+  readonly runStore?: RunStore | RunStoreConfig | false
+  /**
    * Opt-in deterministic model routing. When omitted, existing agent and
    * coordinator model selection is unchanged.
    */
@@ -2332,6 +2340,15 @@ export interface OrchestratorConfig {
    * and `restore`. Per-call options override this value. Defaults to off.
    */
   readonly checkpoint?: boolean | CheckpointOptions
+  /**
+   * Default authoritative {@link RunStore} for `runTeam`, `runTasks`,
+   * `runFromPlan`, and `restore`. When set, each run acquires an execution
+   * lease before it advances, fences its checkpoint writes with the lease's
+   * token, and records its terminal transition. Per-call
+   * {@link RunTasksOptions.runStore} overrides this value. Defaults to off,
+   * which leaves existing single-process checkpoint recovery unchanged.
+   */
+  readonly runStore?: RunStore | RunStoreConfig
   /** Default opt-in runtime repair policy. Per-run recovery replaces it. */
   readonly recovery?: RecoveryOptions
   /**

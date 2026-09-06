@@ -475,7 +475,7 @@ exported to OTel or another vendor.
 | TraceStore | append/query telemetry, retention, and trace deletion | best-effort; no CAS, lease, suspend, or resume |
 | CheckpointStore | safe-boundary execution snapshot consumed by `restore()` | execution recovery state; not a trace query system |
 | RunJournal | opt-in append-only record of what happened and what each model call saw | execution state; best-effort writes, never required to recover |
-| future RunStore | authoritative durable run state machine | not implemented by Observability v2 |
+| [RunStore](run-store.md) | authoritative durable run lifecycle, execution lease, and fencing token | primary execution state; opt-in, and the only row here whose writes fail closed |
 
 Losing telemetry must not roll back a durable run. Deleting traces must not
 delete checkpoints, shared memory, or remotely exported OTel data.
