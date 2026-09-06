@@ -2,12 +2,29 @@
 
 ## Unreleased
 
+### Added
+
+- Added an opt-in authoritative run store. `OrchestratorConfig.runStore` and
+  `RunTasksOptions.runStore` give a logical run a durable lifecycle record, an
+  execution lease, and a monotonically increasing fencing token, so one worker
+  at a time advances a run and a worker that was taken over cannot write after
+  the takeover. Ships the `RunStore` interface, the `MemoryStoreRunStore`
+  adapter over any `MemoryStore` with compare-and-set, and the `RunLedger` /
+  `RunLeaseHandle` surface for reading, cancelling, and resuming a run from
+  outside its worker.
+
 ### Changed
 
 - LICENSE now names Shenzhen YuanASI Technology Co., Ltd. alongside the
   open-multi-agent contributors, every package README closes with a maintainer
   line linking to yuanasi.com, and `author` in the three published package.json
   files points at YuanASI. The MIT terms are unchanged.
+- With a run store configured, execution-ownership and run-lifecycle writes fail
+  closed instead of following the best-effort semantics of checkpoint and
+  telemetry writes: a fenced-out checkpoint write never reaches the store, a
+  lost lease stops the run at the dispatch gate, and a worker that lost its
+  lease reports the fence failure rather than success. Runs with no run store
+  configured are unchanged.
 
 ## 1.18.0 - 2026-09-04
 
